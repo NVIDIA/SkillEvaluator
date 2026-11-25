@@ -99,6 +99,37 @@ def test_rate_scheduler_records_requests_that_expire_in_its_bounded_queue():
     assert report["dispatch_lateness_ms"]["p95"] >= 0
 
 
+def test_scheduler_keeps_delete_ack_when_dropped_upserts_leave_no_baseline(monkeypatch):
+    from concurrent.futures import Future
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    np = pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as benchmark
+
+    def submit(invoke, *args):
+        result = Future()
+        result.set_result(invoke(*args))
+        return result
+
+    monkeypatch.setattr(benchmark, "ThreadPoolExecutor", lambda **_: nullcontext(SimpleNamespace(submit=submit)))
+    monkeypatch.setattr(benchmark, "time", SimpleNamespace(monotonic=lambda: 3.1))
+    backend = Mock()
+    mutate = benchmark.MutationLoad(backend, np.eye(4, dtype=np.float32), seed=41)
+
+    report = benchmark.run_stream(mutate, start=1.0, rate=1, duration=3, workers=1, lateness_limit=0.75)
+
+    backend.upsert.assert_not_called()
+    backend.remove.assert_called_once_with(4, 4)
+    backend.search.assert_not_called()
+    assert (report["scheduled"], report["completed"], report["dropped"], report["errors"]) == (3, 1, 2, {})
+    assert report["mutation_ack_ms"]["delete"]["count"] == 1
+    assert report["mutation_visibility_ms"]["delete"]["count"] == 0
+    assert report["mutation_visibility_after_ack_ms"]["delete"]["count"] == 0
+    assert report["mutation_visibility_unavailable"] == {"upsert": 0, "delete": 1}
+
+
 def test_stale_replay_cannot_restore_a_deleted_id_or_replace_a_newer_version():
     np = pytest.importorskip("numpy")
     from scripts.benchmark_registry_overlap import validate_stale_replay
@@ -176,6 +207,7 @@ def test_qualification_requires_ann_evidence_and_a_complete_operating_envelope()
         "dropped": 0,
         "errors": {},
         "mutation_visibility_ms": {"upsert": {"p95": 800.0}, "delete": {"max": 10.0}},
+        "mutation_visibility_unavailable": {"upsert": 0, "delete": 0},
     }
     result = {
         "backend": {"planner_uses_ann": True, "ann_indexed_count": 100_000},
@@ -190,6 +222,13 @@ def test_qualification_requires_ann_evidence_and_a_complete_operating_envelope()
 
     report = qualify_backend(result, args)
     assert report["passes_technical_gate"] is True
+
+    mutations["mutation_visibility_unavailable"]["delete"] = 1
+    report = qualify_backend(result, args)
+    assert report["checks"]["steady_mutation_load_completed"] is True
+    assert report["checks"]["steady_delete_visibility"] is False
+    assert report["passes_technical_gate"] is False
+    mutations["mutation_visibility_unavailable"]["delete"] = 0
 
     result["backend"]["planner_uses_ann"] = False
     report = qualify_backend(result, args)
@@ -294,6 +333,111 @@ def test_one_dimensional_corpus_requires_recall_only_or_preparation(phase, capsy
 
     assert exc.value.code == 2
     assert "at least two dimensions" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("index", "angle", "duration", "burst"), [(0, 0.0, "0.01", "0"), (0, 0.001, "0.01", "0"), (3, 0.0, "0.6", "0.04")]
+)
+def test_ambiguous_mutation_probe_is_rejected_before_backend(
+    tmp_path, monkeypatch, capsys, index, angle, duration, burst
+):
+    np = pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as benchmark
+
+    probe = benchmark._normalize(np.random.default_rng([41, index]).standard_normal((1, 2), dtype=np.float32))[0]
+    perpendicular = np.array([-probe[1], probe[0]], dtype=np.float32)
+    near_probe = np.float32(np.cos(angle)) * probe + np.float32(np.sin(angle)) * perpendicular
+    vectors = tmp_path / "vectors.npy"
+    np.save(vectors, np.stack([near_probe, -probe]), allow_pickle=False)
+    report = tmp_path / "report.json"
+    args = [
+        "--backend",
+        "pgvector",
+        "--postgres-dsn",
+        "fixture",
+        "--vectors",
+        str(vectors),
+        "--size",
+        "2",
+        "--dimension",
+        "2",
+        "--queries",
+        "1",
+        "--k",
+        "1",
+        "--duration",
+        duration,
+        "--burst-duration",
+        burst,
+        "--output",
+        str(report),
+    ]
+
+    def unexpected_backend(*_args):
+        pytest.fail("Ambiguous workload reached the benchmark backend")
+
+    monkeypatch.setattr(benchmark, "_run_backend", unexpected_backend)
+    assert benchmark.main(args) == 2
+    assert f"mutation slot {index}" in capsys.readouterr().err
+    assert not report.exists()
+
+
+@pytest.mark.parametrize("prepare_only", [False, True])
+def test_unused_probe_preflight_does_not_run(tmp_path, monkeypatch, prepare_only):
+    pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as benchmark
+
+    def unexpected_probe(*_args):
+        pytest.fail("Unused mutation visibility probes were validated")
+
+    monkeypatch.setattr(benchmark, "_validate_probe_vectors", unexpected_probe)
+    monkeypatch.setattr(benchmark, "_run_backend", lambda *_args: {})
+    args = [
+        "--backend",
+        "pgvector",
+        "--postgres-dsn",
+        "fixture",
+        "--size",
+        "2",
+        "--dimension",
+        "2",
+        "--queries",
+        "1",
+        "--k",
+        "1",
+        "--output",
+        str(tmp_path / "report.json"),
+    ]
+    args.extend(["--prepare-only"] if prepare_only else ["--duration", "0", "--burst-duration", "0"])
+
+    assert benchmark.main(args) == 0
+
+
+@pytest.mark.parametrize("stale_control", [False, True])
+def test_probe_preflight_checks_vectors_that_coexist_after_drops(monkeypatch, stale_control):
+    from types import SimpleNamespace
+
+    np = pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as benchmark
+
+    dimension, seed = 16, 41
+    corpus = np.eye(2, dimension, dtype=np.float32)
+    generate = benchmark._mutation_probe_vector
+    if stale_control:
+        duplicate = benchmark._stale_replay_vectors(dimension, seed)[0]
+        index = 0
+        expected = "stale replay control 0: ties mutation slot 0"
+    else:
+        duplicate = generate(dimension, seed, 0)
+        index = 3
+        expected = "mutation slots 0 and 3"
+
+    def with_duplicate(dimension, seed, slot):
+        return duplicate if slot == index else generate(dimension, seed, slot)
+
+    monkeypatch.setattr(benchmark, "_mutation_probe_vector", with_duplicate)
+    with pytest.raises(ValueError, match=expected):
+        benchmark._validate_probe_vectors(corpus, SimpleNamespace(seed=seed, duration=0.8, burst_duration=0))
 
 
 @pytest.mark.parametrize("alias", ["same-path", "symlink", "hardlink"])
@@ -498,8 +642,8 @@ def test_dropped_mutations_do_not_shift_later_writes(monkeypatch):
 
     # A scheduled delete still sends its tombstone when both preceding writes were dropped.
     backend = Backend()
-    with pytest.raises(benchmark.VisibilityTimeout, match="before deletion"):
-        benchmark.MutationLoad(backend, corpus, seed=41)(2)
+    timing = benchmark.MutationLoad(backend, corpus, seed=41)(2)
+    assert timing.kind == "delete" and timing.visibility_ms is None
     assert backend.writes == [full[2]]
 
 
@@ -521,3 +665,35 @@ def test_predelete_probe_error_does_not_skip_the_scheduled_delete():
 
     backend.remove.assert_called_once_with(4, 4)
     assert 4 not in mutate.live
+
+
+def test_positive_predelete_probe_after_deadline_still_fails(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    np = pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as benchmark
+
+    now = 0.0
+    monkeypatch.setattr(benchmark, "time", SimpleNamespace(monotonic=lambda: now))
+    backend = Mock()
+    backend.visible.return_value = True
+    backend.search.return_value = [4]
+    mutate = benchmark.MutationLoad(backend, np.eye(4, dtype=np.float32), seed=41)
+    assert mutate(0).kind == "upsert"
+
+    def late_search(_vector, _k):
+        nonlocal now
+        now += benchmark.DELETE_DEADLINE + 0.5
+        return [4]
+
+    def remove(_entry_id, _sequence):
+        backend.visible.return_value = False
+        backend.search.side_effect = None
+        backend.search.return_value = [0]
+
+    backend.search.side_effect = late_search
+    backend.remove.side_effect = remove
+    with pytest.raises(benchmark.VisibilityTimeout):
+        mutate(2)
+    backend.remove.assert_called_once_with(4, 4)

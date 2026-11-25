@@ -64,7 +64,7 @@ class Workload:
 class MutationTiming:
     kind: str
     ack_ms: float
-    visibility_ms: float
+    visibility_ms: float | None
 
 
 @dataclass(frozen=True)
@@ -375,11 +375,27 @@ def run_stream(
             for kind in ("upsert", "delete")
         },
         "mutation_visibility_ms": {
-            kind: _distribution([timing.visibility_ms for timing in mutations if timing.kind == kind])
+            kind: _distribution(
+                [
+                    timing.visibility_ms
+                    for timing in mutations
+                    if timing.kind == kind and timing.visibility_ms is not None
+                ]
+            )
             for kind in ("upsert", "delete")
         },
         "mutation_visibility_after_ack_ms": {
-            kind: _distribution([timing.visibility_ms - timing.ack_ms for timing in mutations if timing.kind == kind])
+            kind: _distribution(
+                [
+                    timing.visibility_ms - timing.ack_ms
+                    for timing in mutations
+                    if timing.kind == kind and timing.visibility_ms is not None
+                ]
+            )
+            for kind in ("upsert", "delete")
+        },
+        "mutation_visibility_unavailable": {
+            kind: sum(timing.kind == kind and timing.visibility_ms is None for timing in mutations)
             for kind in ("upsert", "delete")
         },
     }
@@ -404,6 +420,103 @@ def _wait_for_visibility(check: Callable[[], bool], began: float, deadline: floa
         _remaining_time(expires)
 
 
+def _mutation_probe_vector(dimension: int, seed: int, index: int) -> VectorCorpus:
+    import numpy as np
+
+    rng = np.random.default_rng([seed, index])
+    return _normalize(rng.standard_normal((1, dimension), dtype="float32"))[0]
+
+
+def _stale_replay_vectors(dimension: int, seed: int) -> VectorCorpus:
+    import numpy as np
+
+    # Keep stale replay controls independent of the mixed-load vectors.
+    rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(1,)))
+    return _normalize(rng.standard_normal((4, dimension), dtype="float32"))
+
+
+def _load_phases(args: argparse.Namespace) -> tuple[tuple[str, float, int], ...]:
+    return ("steady", args.duration, 5), ("burst", args.burst_duration, 25)
+
+
+def _validate_probe_vectors(corpus: VectorCorpus, args: argparse.Namespace) -> None:
+    """Check whether the planned top-1 controls can distinguish their target vectors."""
+    import numpy as np
+
+    slot_count = sum(math.ceil(rate * duration) for _, duration, rate in _load_phases(args))
+    if not slot_count:
+        return
+    # Corpus and probe vectors are unit-length within float32 normalization error.
+    # A tie must be close in every coordinate. Pad the distance bound before pruning.
+    distance_squared = 2 * TIE_TOLERANCE + 1e-6
+    radius = math.sqrt(distance_squared)
+    dimension = corpus.shape[1]
+    prefix_width = min(4, dimension)
+    corpus_order = np.argsort(corpus[:, 0])
+    corpus_prefix = corpus[corpus_order, :prefix_width]
+    corpus_first = np.ascontiguousarray(corpus_prefix[:, 0])
+
+    def ties(vectors: VectorCorpus, probe: VectorCorpus) -> bool:
+        rows = vectors.astype(np.float64)
+        query = probe.astype(np.float64)
+        cutoff = (1 - TIE_TOLERANCE) * np.linalg.norm(query) * np.linalg.norm(rows, axis=1)
+        return bool(np.any(rows @ query >= cutoff))
+
+    def nearby_prefixes(prefix, first_coordinates, probe: VectorCorpus):
+        first = np.searchsorted(first_coordinates, float(probe[0]) - radius, side="left")
+        last = np.searchsorted(first_coordinates, float(probe[0]) + radius, side="right")
+        delta = prefix[first:last] - probe[:prefix_width]
+        return first + np.flatnonzero(np.einsum("ij,ij->i", delta, delta) <= distance_squared)
+
+    def check_corpus(probe: VectorCorpus, label: str) -> None:
+        neighbors = corpus_order[nearby_prefixes(corpus_prefix, corpus_first, probe)]
+        if any(ties(corpus[neighbors[block]], probe) for block in _blocks(len(neighbors))):
+            raise ValueError(f"Ambiguous top-1 visibility probe at {label}: ties a corpus vector.")
+
+    slots = np.arange(slot_count)
+    slots = slots[slots % 3 != 2]
+    probe_prefix = np.empty((len(slots), prefix_width), dtype=np.float32)
+    for index, slot in enumerate(slots):
+        probe = _mutation_probe_vector(dimension, args.seed, int(slot))
+        check_corpus(probe, f"mutation slot {slot}")
+        probe_prefix[index] = probe[:prefix_width]
+
+    # A dropped deletion can leave a probe live. Compare possible peers by prefix,
+    # regenerating their full vectors only where the cosine bound could be met.
+    probe_order = np.argsort(probe_prefix[:, 0])
+    probe_prefix = probe_prefix[probe_order]
+    probe_first = np.ascontiguousarray(probe_prefix[:, 0])
+    slots = slots[probe_order]
+
+    def tied_slot(probe: VectorCorpus, candidates) -> int | None:
+        for slot in candidates:
+            peer = _mutation_probe_vector(dimension, args.seed, int(slot))
+            if ties(peer[None, :], probe):
+                return int(slot)
+        return None
+
+    for slot, prefix in zip(slots, probe_prefix, strict=True):
+        peers = slots[nearby_prefixes(probe_prefix, probe_first, prefix)]
+        different_id = (peers // 3) % MUTATION_SLOTS != (slot // 3) % MUTATION_SLOTS
+        peers = peers[(peers > slot) & different_id]
+        if len(peers):
+            probe = _mutation_probe_vector(dimension, args.seed, int(slot))
+            peer = tied_slot(probe, peers)
+            if peer is not None:
+                raise ValueError(f"Ambiguous top-1 visibility probe at mutation slots {slot} and {peer}.")
+
+    stale = _stale_replay_vectors(dimension, args.seed)
+    stale = np.vstack((stale, -stale[1]))
+    for index, probe in enumerate(stale):
+        label = f"stale replay control {index}"
+        check_corpus(probe, label)
+        if ties(stale[:index], probe):
+            raise ValueError(f"Ambiguous top-1 visibility probe at {label}: ties another stale replay control.")
+        peer = tied_slot(probe, slots[nearby_prefixes(probe_prefix, probe_first, probe)])
+        if peer is not None:
+            raise ValueError(f"Ambiguous top-1 visibility probe at {label}: ties mutation slot {peer}.")
+
+
 class MutationLoad:
     """Exercise insert, replace and delete on a bounded set of dedicated IDs."""
 
@@ -424,8 +537,6 @@ class MutationLoad:
         return (found[0] == entry_id) == live
 
     def __call__(self, index: int) -> MutationTiming:
-        import numpy as np
-
         # Derive the write from its scheduled slot, including when other slots were dropped.
         cycle, step = divmod(index, 3)
         slot = cycle % MUTATION_SLOTS
@@ -440,6 +551,7 @@ class MutationLoad:
                 try:
                     probe_deadline = time.monotonic() + DELETE_DEADLINE
                     was_visible = self._observed(entry_id, *previous, probe_deadline, live=True)
+                    _remaining_time(probe_deadline)
                 except Exception as exc:
                     # Preserve the scheduled write and report the failed observation separately.
                     probe_error = exc
@@ -451,14 +563,13 @@ class MutationLoad:
             if probe_error is not None:
                 raise probe_error
             if previous is None or not was_visible:
-                raise VisibilityTimeout("Mutation entry was not searchable before deletion")
+                return MutationTiming("delete", ack, None)
             prior_sequence, vector = previous
             elapsed = _wait_for_visibility(
                 lambda: self._observed(entry_id, prior_sequence, vector, expires, live=False), began, DELETE_DEADLINE
             )
             return MutationTiming("delete", ack, elapsed)
-        rng = np.random.default_rng([self.seed, index])
-        vector = _normalize(rng.standard_normal((1, self.dimension), dtype="float32"))[0]
+        vector = _mutation_probe_vector(self.dimension, self.seed, index)
         began = time.monotonic()
         expires = began + UPSERT_DEADLINE
         self.backend.upsert(entry_id, sequence, vector)
@@ -472,15 +583,9 @@ class MutationLoad:
 
 def validate_stale_replay(backend, first_id: int, *, dimension: int, seed: int) -> dict[str, bool]:
     """Verify keyed revisions and ANN results before and after stale writes."""
-    import numpy as np
-
     if dimension == 1:
         return {"distinguishable_probe_vectors": False}
-    # Keep stale replay controls independent of the mixed-load vectors.
-    rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(1,)))
-    deleted_vector, current_vector, stale_delete_vector, duplicate_vector = _normalize(
-        rng.standard_normal((4, dimension), dtype="float32")
-    )
+    deleted_vector, current_vector, stale_delete_vector, duplicate_vector = _stale_replay_vectors(dimension, seed)
     prior_vector = -current_vector
 
     def search_matches(entry_id: int, probe: VectorCorpus, *, expected: bool) -> bool:
@@ -583,7 +688,7 @@ def _measure_load(backend, corpus: VectorCorpus, workload: Workload, args: argpa
         return mutate(mutation_offset + index)
 
     phases = {}
-    for phase, duration, mutation_rate in (("steady", args.duration, 5), ("burst", args.burst_duration, 25)):
+    for phase, duration, mutation_rate in _load_phases(args):
         if duration <= 0:
             continue
         _progress(f"{phase.capitalize()} load for {duration:g} seconds")
@@ -671,6 +776,7 @@ def qualify_backend(result: dict[str, object], args: argparse.Namespace) -> dict
         mutations = phase_data["mutations"]
         percentile = searches["response_from_schedule_ms"]
         visibility = mutations["mutation_visibility_ms"]
+        unavailable = mutations["mutation_visibility_unavailable"]
         search_failures = searches["dropped"] + sum(searches["errors"].values())
         failed_fraction = search_failures / searches["scheduled"]
         search_failure_fraction[phase] = failed_fraction
@@ -680,10 +786,14 @@ def qualify_backend(result: dict[str, object], args: argparse.Namespace) -> dict
                 f"{phase}_search_p99": percentile["p99"] is not None and percentile["p99"] <= 250,
                 f"{phase}_search_timeout_error_rate": failed_fraction < 0.005,
                 f"{phase}_upsert_visibility": (
-                    visibility["upsert"]["p95"] is not None and visibility["upsert"]["p95"] <= 60_000
+                    not unavailable["upsert"]
+                    and visibility["upsert"]["p95"] is not None
+                    and visibility["upsert"]["p95"] <= 60_000
                 ),
                 f"{phase}_delete_visibility": (
-                    visibility["delete"]["max"] is not None and visibility["delete"]["max"] <= 5_000
+                    not unavailable["delete"]
+                    and visibility["delete"]["max"] is not None
+                    and visibility["delete"]["max"] <= 5_000
                 ),
                 f"{phase}_mutation_load_completed": not mutations["dropped"] and not mutations["errors"],
             }
@@ -790,6 +900,7 @@ def main(argv: list[str] | None = None) -> int:
         _progress("Benchmark requires NumPy. Install it in an isolated benchmark environment.")
         return 2
 
+    probe_preflight_seconds = None
     try:
         _progress(f"Preparing {args.size:,} vectors of dimension {args.dimension}")
         corpus = (
@@ -797,6 +908,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.vectors
             else synthetic_corpus(args.size, args.dimension, args.seed)
         )
+        if not args.prepare_only and (args.duration or args.burst_duration):
+            _progress("Checking the corpus for tied visibility probe vectors")
+            began = time.monotonic()
+            _validate_probe_vectors(corpus, args)
+            probe_preflight_seconds = time.monotonic() - began
         digest = corpus_sha256(corpus)
         if args.write_vectors:
             _validate_artifact_paths(args)
@@ -851,6 +967,7 @@ def main(argv: list[str] | None = None) -> int:
             "tie_tolerance": TIE_TOLERANCE,
             "provider_time_included": False,
             "mutation_visibility_probe": "keyed live revision and direct ANN query using a seeded probe vector",
+            "mutation_probe_preflight_seconds": probe_preflight_seconds,
             "mutation_visibility_clock": "adapter invocation through successful probe",
         },
         "environment": {"python": platform.python_version(), "platform": platform.platform(), "numpy": np.__version__},

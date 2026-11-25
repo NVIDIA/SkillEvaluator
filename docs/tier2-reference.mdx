@@ -726,16 +726,24 @@ HNSW search effort independently. The report records each adapter's setting.
 The steady phase schedules 20 searches and 5 mutations per second for
 30 minutes. The one-minute burst keeps 20 searches per second and raises
 mutations to 25 per second. Each mutation's scheduled slot fixes its operation,
-revision, and probe vector, including when an earlier slot is dropped. Read
-recall@10 against the exhaustive reference,
+revision, and probe vector, including when an earlier slot is dropped. Before
+starting either backend, the benchmark checks the scheduled probes for
+ambiguous cosine rankings and rejects a tied mixed-load workload. This check
+runs outside the measured phases. Set both durations to zero to run recall only.
+
+Read recall@10 against the exhaustive reference,
 provider-excluded search p95 and p99 from the scheduled start, and separate
 write acknowledgement and visibility timings. Visibility is measured by
-checking the keyed live revision and issuing a top-k query with a seeded probe
+checking the keyed live revision and issuing a top-1 query with a seeded probe
 vector. The prior revision must appear in both probes before a removal and be
-absent afterward. Mutation visibility gates use adapter invocation through the
-successful probe. The report gives acknowledgement-to-visibility times
-separately. A driver request already in flight may finish after the probe's
-deadline, in which case the sample counts as a failure.
+absent afterward. If a delete succeeds without a searchable prior revision,
+the report keeps its acknowledgement and counts its visibility as unavailable.
+An unavailable sample leaves the visibility gate unmet. Dropped requests
+contribute separately to the load completion gate. Mutation visibility gates
+use adapter invocation through the successful probe. The report gives
+acknowledgement-to-visibility times separately. A driver request already in
+flight may finish after the probe's deadline, in which case the sample counts
+as a failure.
 
 The technical adapter gate requires confirmed ANN use, recall@10 of at least
 0.95, search p95 of at most 100 ms and p99 of at most 250 ms, fewer than 0.5%

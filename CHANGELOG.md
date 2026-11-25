@@ -4,6 +4,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Add a Tier 2 registry overlap pilot that replays verified skill revisions
+  into PostgreSQL with pgvector and returns bounded nearest-neighbor candidates
+  with provenance. The pilot includes generation rebuild and activation
+  commands, same-profile embedding reuse, and an index benchmark with pinned
+  proxy-corpus inputs. The benchmark validates mutation probes before load and
+  tracks acknowledged deletes with unavailable visibility separately.
+
 ## 1.2.1 - 2026-11-24
 
 ### Added
@@ -11,11 +20,6 @@ All notable changes to SkillEvaluator are documented in this file.
 - Add a locked Tier 2 CI container with credential-free build verification and
   opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
   Tier 2 together from the Repository Integration guide.
-- Add a Tier 2 registry overlap pilot that replays verified skill revisions
-  into PostgreSQL with pgvector and returns bounded nearest-neighbor candidates
-  with provenance. The pilot includes generation rebuild and activation
-  commands, same-profile embedding reuse, and an index benchmark with pinned
-  proxy-corpus inputs.
 
 ### Fixed
 

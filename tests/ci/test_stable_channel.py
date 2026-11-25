@@ -78,6 +78,34 @@ def test_stable_workflows_pair_the_release_with_delegated_provenance(bundle):
     assert set(comments["on"]["workflow_call"]["inputs"]) == {"run-id", "run-attempt", "trusted-caller-blobs"}
 
 
+def test_manual_stable_comment_template_matches_the_callable_workflow(bundle):
+    from ci.stable_channel import COMMENTS_WORKFLOW, render
+
+    template = ROOT / "ci/templates/manual" / COMMENTS_WORKFLOW
+    manual = yaml.load(template.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    callable_workflow = yaml.load(render(bundle)[COMMENTS_WORKFLOW], Loader=yaml.BaseLoader)
+
+    assert set(manual["on"]) == {"workflow_run", "workflow_dispatch"}
+    assert manual["on"]["workflow_run"] == {"workflows": ["Skill checks"], "types": ["completed"]}
+    dispatch_inputs = manual["on"]["workflow_dispatch"]["inputs"]
+    assert set(dispatch_inputs) == {"run-id", "run-attempt"}
+    for field in dispatch_inputs.values():
+        assert field["type"] == "string"
+        assert field["required"] == "true"
+
+    assert manual["permissions"] == {}
+    assert set(manual["jobs"]) == {"comment"}
+    job = manual["jobs"]["comment"]
+    assert job["uses"] == f"NVIDIA/SkillEvaluator/.github/workflows/{COMMENTS_WORKFLOW}@stable"
+    assert job["permissions"] == callable_workflow["jobs"]["comment"]["permissions"]
+    assert set(job["with"]) == set(callable_workflow["on"]["workflow_call"]["inputs"])
+    assert job["with"] == {
+        "run-id": "${{ format('{0}', github.event.workflow_run.id || inputs.run-id) }}",
+        "run-attempt": "${{ format('{0}', github.event.workflow_run.run_attempt || inputs.run-attempt) }}",
+        "trusted-caller-blobs": "APPROVED_SCAN_FILE_BLOB",
+    }
+
+
 @pytest.mark.parametrize(
     ("filename", "key", "value", "match"),
     [

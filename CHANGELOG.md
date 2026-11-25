@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Run bounded Tier 1 component scans and Tier 2 overlap checks on supported
+  bundles. Reports include component inventory and scan evidence. Saved
+  runtime evidence can be rendered again without rerunning the evaluation.
 - The local-mode run preflight and `doctor --env-mode local` check the
   installed Claude Code and Codex CLI against the selected models and stop
   before any trial when one is too old. Use `--agent-model AGENT=MODEL` to
@@ -16,6 +19,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Tier 1 plugin reports label the validator `Plugin Schema & Component Checks` and
+  use `manifest_missing_or_unsafe` for absent or unsafe manifests. Manifest schema
+  validation runs even when `--checks` selects other checks. Auto-detection
+  recognizes `.codex-plugin/plugin.json`, `.cursor-plugin/plugin.json`,
+  `openclaw.plugin.json`, and root `plugin.json` files that declare the Agent
+  Plugins schema.
 - Local OpenCode trials carry on after a denied permission request instead of
   ending the agent's turn: local mode runs OpenCode without
   `--dangerously-skip-permissions`, so such requests are always rejected.

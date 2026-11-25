@@ -46,6 +46,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## 1.2.1 - 2026-11-24
 
+- Publish the verified 1.2.1 CI bundle with matching scanner, workflow, and CLI pins.
+
 ### Added
 
 - Add a locked Tier 2 CI container with credential-free build verification and

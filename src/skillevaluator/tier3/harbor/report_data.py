@@ -23,7 +23,7 @@ from typing import Any
 
 from skillevaluator.tier3.declarative_coverage import agent_declarative_checks
 from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
-from skillevaluator.tier3.harbor import baseline_timeouts
+from skillevaluator.tier3.harbor import baseline_timeouts, stats
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -858,6 +858,14 @@ def _withheld_attempt_usage(rewards: list[dict[str, Any]]) -> list[dict[str, Any
     return rows
 
 
+def _load_statistics(agent_dir: Path) -> dict[str, Any]:
+    """Read ``statistics.json`` silently: a missing, oversize, linked or malformed file gives no blocks."""
+    raw = _load_bounded_json(agent_dir / "statistics.json", [], artifact="statistics")
+    if not isinstance(raw, dict):
+        return {}
+    return {field: raw[field] for field in stats.RUN_STATISTICS_FIELDS if isinstance(raw.get(field), dict)}
+
+
 def load_agent_data(
     results_dir: Path,
     *,
@@ -1026,6 +1034,8 @@ def load_agent_data(
             custom_lift = _load_bounded_json(custom_lift_file, agent_diagnostics, artifact="custom_lift")
             if custom_lift is not _INVALID_JSON:
                 agent_info["custom_lift"] = custom_lift if isinstance(custom_lift, dict) else {}
+
+        agent_info.update(_load_statistics(agent_dir))
 
         tolerance_record: Any = None
         tolerance_file = agent_dir / baseline_timeouts.RECORD_ARTIFACT

@@ -10,8 +10,9 @@ metric, dimension, overall score, verdict or gate.
 
 - Prompt counters include cached tokens (ATIF ``total_prompt_tokens`` does), so
   cached tokens are a part of the prompt and are never added again.
-  ``total_tokens`` is prompt plus completion, and ``uncached_prompt_tokens`` is
-  prompt minus cached.
+  ``total_tokens`` is prompt plus completion, ``uncached_prompt_tokens`` is
+  prompt minus cached, and ``efficiency_tokens`` is uncached prompt plus
+  completion.
 - Nothing is estimated. An attempt with a missing or invalid counter adds no
   tokens. Its arm's coverage is then ``partial`` (other attempts were measured)
   or ``unavailable`` (none were), and the totals cover only measured attempts.
@@ -25,7 +26,8 @@ metric, dimension, overall score, verdict or gate.
   ``case_id_validation`` names it, so no report shows it as a dataset case.
 - A change (with skill minus baseline) needs complete counts in both arms for
   the same cases and attempts, and both arms must have succeeded: the report
-  withholds the scores of an arm that failed or has no known run status.
+  withholds the scores of an arm that failed or has no known run status. It
+  covers every measure, and its percentage is relative to the baseline total.
 - A sum above 2**53 - 1, the largest integer JSON keeps exact, is not reported.
 
 ``resource_comparison`` keeps its own totals, which need every attempt of an
@@ -35,7 +37,6 @@ arm scored and measured; this module does not change them.
 from __future__ import annotations
 
 import re
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -43,6 +44,8 @@ from typing import Any
 from skillevaluator.tier3.harbor.resource_usage import _MAX_SAFE_INTEGER, _is_measurement
 
 TOKEN_USAGE_SCHEMA_VERSION = "1"
+#: Where the counters come from: each attempt's ATIF ``final_metrics``, for every agent backend.
+TOKEN_USAGE_SOURCE = "atif_final_metrics"
 TOKEN_MEASURES = (
     "prompt_tokens",
     "cached_tokens",
@@ -50,6 +53,8 @@ TOKEN_MEASURES = (
     "completion_tokens",
     "total_tokens",
 )
+#: ``efficiency_tokens`` is not a counter: it is derived from the sums of the others.
+REPORTED_MEASURES = (*TOKEN_MEASURES, "efficiency_tokens")
 # Loaded agent data keeps, per arm, the attempts whose usage no report trial
 # carries: attempts without a usable reward (``scored`` false) and scored
 # attempts of an arm whose scores are withheld. See ``report_data.load_agent_data``.
@@ -77,7 +82,8 @@ _ACCOUNTING = {
     "prompt_includes_cached": True,
     "total_tokens": "prompt_tokens + completion_tokens",
     "uncached_prompt_tokens": "prompt_tokens - cached_tokens",
-    "change": "with_skill - baseline total_tokens; percent of the baseline total",
+    "efficiency_tokens": "uncached_prompt_tokens + completion_tokens",
+    "change": "with_skill - baseline for every measure; percent of the baseline total_tokens",
 }
 
 
@@ -170,8 +176,8 @@ def _stop_on_pass_case(trial_id: str, case: str) -> bool:
     )
 
 
-def _matching_case(label: str, trial_id: str, known_cases: set[str]) -> str:
-    """Map an attempt to its case when exactly one case matches.
+class _CaseMatcher:
+    """Resolve labels against one agent's cases, indexing Harbor's cut names once.
 
     Every attempt is resolved against the dataset's IDs, scored or not: a
     scored attempt whose ``entry_id`` fell back to Harbor's cut of the case
@@ -182,15 +188,25 @@ def _matching_case(label: str, trial_id: str, known_cases: set[str]) -> str:
     name, a stop-on-pass trial name or Harbor's 32-character cut of the case
     name decides.
     """
-    if label in known_cases:
-        return label
-    for matches in (
-        [case for case in known_cases if _stop_on_pass_case(trial_id, case)],
-        [case for case in known_cases if case[:_HARBOR_TRIAL_NAME_CHARS].rstrip("_-") == label],
-    ):
-        if len(matches) == 1:
-            return matches[0]
-    return label
+
+    def __init__(self, known_cases: set[str]) -> None:
+        self.known_cases = known_cases
+        self.cut_names: dict[str, str | None] = {}
+        for case in known_cases:
+            cut = case[:_HARBOR_TRIAL_NAME_CHARS].rstrip("_-")
+            self.cut_names[cut] = None if cut in self.cut_names else case
+
+    def match(self, label: str, trial_id: str) -> str:
+        if label in self.known_cases:
+            return label
+        # Ordinary Harbor names cannot match a stop-on-pass attempt. Avoid a
+        # full case scan for those names while retaining its precedence.
+        if _STOP_ON_PASS_ATTEMPT.search(trial_id) is not None:
+            matches = [case for case in self.known_cases if _stop_on_pass_case(trial_id, case)]
+            if len(matches) == 1:
+                return matches[0]
+        matched = self.cut_names.get(label)
+        return matched if matched is not None else label
 
 
 def _attempt_tokens(row: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -219,7 +235,7 @@ def _known_cases(agent: Mapping[str, Any], dataset_cases: frozenset[str]) -> set
     return known
 
 
-def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str, list[_Attempt]]:
+def _agent_attempts(agent: Mapping[str, Any], matcher: _CaseMatcher) -> dict[str, list[_Attempt]]:
     attempts: dict[str, list[_Attempt]] = {}
     for arm, _condition, key, usage_key in _ARMS:
         attempts[arm] = []
@@ -236,7 +252,7 @@ def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str
                 continue
             attempts[arm].append(
                 _Attempt(
-                    _matching_case(_case_label(trial), trial_id if isinstance(trial_id, str) else "", known_cases),
+                    matcher.match(_case_label(trial), trial_id if isinstance(trial_id, str) else ""),
                     _attempt_tokens(trial),
                     trial.get("scored") is not False,
                 )
@@ -250,7 +266,7 @@ def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str
             trial_id = row.get("trial_id")
             attempts[arm].append(
                 _Attempt(
-                    _matching_case(_case_label(row), trial_id if isinstance(trial_id, str) else "", known_cases),
+                    matcher.match(_case_label(row), trial_id if isinstance(trial_id, str) else ""),
                     _attempt_tokens(row),
                     scored,
                 )
@@ -295,7 +311,7 @@ def _arm_expected(agent: Mapping[str, Any], condition: str, observed: int) -> in
     return max(observed, expected + (_count(record.get("recovered_attempts_total")) or 0))
 
 
-def _pass_at_k_cases(agent: Mapping[str, Any], condition: str, known_cases: set[str]) -> dict[str, Mapping[str, Any]]:
+def _pass_at_k_cases(agent: Mapping[str, Any], condition: str, matcher: _CaseMatcher) -> dict[str, Mapping[str, Any]]:
     """Return an arm's pass@k record per case, under the case names the rows use.
 
     Two keys can canonicalize onto one case, Harbor's cut of a name beside the
@@ -308,9 +324,9 @@ def _pass_at_k_cases(agent: Mapping[str, Any], condition: str, known_cases: set[
     """
     ranked: dict[str, tuple[tuple[int, int], Mapping[str, Any]]] = {}
     for case, record in _mapping(_pass_at_k_branch(agent, condition).get("cases")).items():
-        name = _matching_case(str(case), "", known_cases)
+        name = matcher.match(str(case), "")
         fields = _mapping(record)
-        rank = (int(str(case) in known_cases), _count(fields.get("attempts_skipped")) or 0)
+        rank = (int(str(case) in matcher.known_cases), _count(fields.get("attempts_skipped")) or 0)
         if name not in ranked or rank > ranked[name][0]:
             ranked[name] = (rank, fields)
     return {name: fields for name, (_rank, fields) in ranked.items()}
@@ -357,6 +373,7 @@ def _arm_summary(attempts: list[_Attempt], *, expected: int, not_run: bool) -> d
         measured += 1
         for measure in TOKEN_MEASURES:
             totals[measure] += tokens[measure]
+    totals["efficiency_tokens"] = totals["uncached_prompt_tokens"] + totals["completion_tokens"]
     observed = len(attempts)
     # ``total_tokens`` is the largest sum, so it alone can pass the exact JSON range.
     if measured and totals["total_tokens"] > _MAX_SAFE_INTEGER:
@@ -391,11 +408,11 @@ def _combine(summaries: list[dict[str, Any]]) -> dict[str, Any]:
 
     A part whose total is out of the exact JSON range makes the sum out of range too.
     """
-    totals = dict.fromkeys(TOKEN_MEASURES, 0)
+    totals = dict.fromkeys(REPORTED_MEASURES, 0)
     coverage = dict.fromkeys(("expected_attempts", "observed_attempts", "measured_attempts", "unscored_attempts"), 0)
     reasons: set[str] = set()
     for summary in summaries:
-        for measure in TOKEN_MEASURES:
+        for measure in REPORTED_MEASURES:
             totals[measure] += (summary["totals"] or {}).get(measure, 0)
         for key in coverage:
             coverage[key] += summary["coverage"][key]
@@ -423,7 +440,7 @@ def _delta(
     *,
     blockers: list[tuple[str, str]],
 ) -> dict[str, Any]:
-    """Return with skill minus baseline total tokens, or why there is none.
+    """Return with skill minus baseline for every measure, or why there is none.
 
     ``blockers`` are ``(code, sentence)`` pairs found by the caller, such as a
     failed arm or arms that ran different cases.
@@ -463,12 +480,16 @@ def _delta(
             "reason_codes": [code for code, _sentence in reasons],
             "reason": " ".join(sentence for _code, sentence in reasons),
         }
-    difference = with_skill["totals"]["total_tokens"] - baseline["totals"]["total_tokens"]
+    differences = {
+        measure: with_skill["totals"][measure] - baseline["totals"][measure] for measure in REPORTED_MEASURES
+    }
     baseline_total = baseline["totals"]["total_tokens"]
     return {
         "status": "available",
-        "total_tokens": difference,
-        "total_tokens_change_percent": round(difference / baseline_total * 100.0, 2) if baseline_total else None,
+        **differences,
+        "total_tokens_change_percent": (
+            round(differences["total_tokens"] / baseline_total * 100.0, 2) if baseline_total else None
+        ),
         "reason_codes": [] if baseline_total else ["zero_baseline"],
         "reason": None if baseline_total else "The baseline used no tokens, so there is no percentage change.",
     }
@@ -497,9 +518,9 @@ def _withheld_arm_blockers(agent: Mapping[str, Any], arms: Mapping[str, Mapping[
 def _agent_usage(
     agent: Mapping[str, Any], unexecuted: frozenset[str], dataset_cases: frozenset[str]
 ) -> dict[str, Any] | None:
-    known_cases = _known_cases(agent, dataset_cases)
-    attempts = _agent_attempts(agent, known_cases)
-    pass_at_k = {condition: _pass_at_k_cases(agent, condition, known_cases) for _a, condition, _k, _u in _ARMS}
+    matcher = _CaseMatcher(_known_cases(agent, dataset_cases))
+    attempts = _agent_attempts(agent, matcher)
+    pass_at_k = {condition: _pass_at_k_cases(agent, condition, matcher) for _a, condition, _k, _u in _ARMS}
     arms: dict[str, dict[str, Any]] = {}
     for arm, condition, _key, _unscored in _ARMS:
         not_run = _condition_not_run(
@@ -514,7 +535,14 @@ def _agent_usage(
     if all(summary["coverage"]["status"] == "not_run" for summary in arms.values()):
         return None
     withheld = _withheld_arm_blockers(agent, arms)
-    cases_by_arm = {arm: Counter(attempt.case for attempt in attempts[arm]) for arm in arms}
+    attempts_by_case: dict[str, dict[str, list[_Attempt]]] = {}
+    for arm in arms:
+        grouped = attempts_by_case[arm] = {}
+        for attempt in attempts[arm]:
+            grouped.setdefault(attempt.case, []).append(attempt)
+    cases_by_arm = {
+        arm: {case: len(rows) for case, rows in grouped.items()} for arm, grouped in attempts_by_case.items()
+    }
     # An arm without attempts already says why there is no change.
     scope = (
         [("case_scope_mismatch", "The arms ran different cases or attempts per case.")]
@@ -528,7 +556,7 @@ def _agent_usage(
     ):
         case_arms = {}
         for arm, condition, _key, _unscored in _ARMS:
-            case_attempts = [attempt for attempt in attempts[arm] if attempt.case == case]
+            case_attempts = attempts_by_case[arm].get(case, [])
             case_arms[arm] = _arm_summary(
                 case_attempts,
                 expected=0
@@ -602,6 +630,7 @@ def build_token_usage(
     )
     return {
         "schema_version": TOKEN_USAGE_SCHEMA_VERSION,
+        "source": TOKEN_USAGE_SOURCE,
         "scored": False,
         "accounting": dict(_ACCOUNTING),
         **({"baseline_reused": True} if baseline_reused else {}),

@@ -23,6 +23,7 @@ from skillevaluator.constants import (
     SKILL_NOT_SHIPPED_DIRS,
 )
 from skillevaluator.utils.structured_data import (
+    ScalarConstructionError,
     StructuredDataError,
     StructuredDataSyntaxError,
     load_bounded_yaml,
@@ -257,7 +258,7 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
     try:
         load_bounded_yaml(fm_yaml, last_key_wins=True)
     except StructuredDataSyntaxError as exc:
-        return isinstance(exc.__cause__, yaml.YAMLError)
+        return isinstance(exc.__cause__, yaml.YAMLError) and not isinstance(exc.__cause__, ScalarConstructionError)
     except StructuredDataError:
         return False
     return False

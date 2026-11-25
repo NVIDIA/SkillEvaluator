@@ -153,11 +153,12 @@ def _embedding_failure(exc: Exception) -> str:
 
 
 def _probe_chat(http_client: Any, timeout: float) -> str:
-    from skillevaluator.constants import CONTENT_DEDUP_LLM_REASONING_EFFORT
+    from skillevaluator.constants import CONTENT_DEDUP_LLM_MAX_TOKENS, CONTENT_DEDUP_LLM_REASONING_EFFORT
     from skillevaluator.inference.client import LLMClient
 
     # The same client settings as Tier 2 duplicate analysis, without retries.
     client = LLMClient(
+        max_tokens=CONTENT_DEDUP_LLM_MAX_TOKENS,
         reasoning_effort=CONTENT_DEDUP_LLM_REASONING_EFFORT,
         max_retries=0,
         http_client=http_client,

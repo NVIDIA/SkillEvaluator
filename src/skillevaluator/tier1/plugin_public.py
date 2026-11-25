@@ -43,6 +43,7 @@ def run_public_plugin_validation(
     continue_on_failure=False,
     on_check=None,
     skillspector_baseline=None,
+    hook_waivers=None,
     repo_root=None,
     resolve_endpoints=False,
     claude_validate=False,
@@ -57,6 +58,10 @@ def run_public_plugin_validation(
     left out of the staged copy, or a file of a nested skill, as not inspected,
     so a line that names one stays incomplete. The unit of a nested skill
     accepts none, because its lines may name a file elsewhere in the plugin.
+
+    An explicit *hook_waivers* file binds the entire packaged plugin to a
+    single security scan of the reviewed snapshot. The other tree checks
+    still operate on their usual scan units.
 
     *target_root* is the folder that the plugin belongs to when a caller
     validates that folder one skill at a time, as ``validate`` does for a
@@ -142,12 +147,15 @@ def run_public_plugin_validation(
                     return candidate if candidate.is_file() else absolute
             return absolute
 
-        security = SnapshotSecurityValidator(
+        reviewed = hook_waivers is not None
+        security_validator = public.SecurityValidator if reviewed else SnapshotSecurityValidator
+        security = security_validator(
             use_llm=use_llm,
             verify_llm=llm_verify,
             content_type="plugin",
-            skillspector_reference_root=snapshot,
-            skillspector_baseline=mapped_option(skillspector_baseline),
+            skillspector_reference_root=plugin_root if reviewed else snapshot,
+            skillspector_baseline=skillspector_baseline if reviewed else mapped_option(skillspector_baseline),
+            hook_waivers=hook_waivers,
             target_root=target_root,
         )
         pii = public.SecurityValidator(use_llm=False, verify_llm=llm_verify)
@@ -167,6 +175,12 @@ def run_public_plugin_validation(
             return result
 
         def security_scan(view):
+            if reviewed:
+                # Waiver review stages the complete package, including files
+                # pruned from the regular scanner views.
+                return security._run_skillspector(
+                    root, verify_reviewed=lambda result, snapshot: verify(result, security, snapshot)
+                )
             return verify(security._run_skillspector(view), security, view)
 
         def pii_scan(view):
@@ -195,6 +209,7 @@ def run_public_plugin_validation(
             "version": public.VersionValidator(previous_version=previous_version),
         }
 
+    progress_checks = active | {"schema", "endpoint-resolution", "claude-validate"}
     notified = set()
     progress_total, progress_step, progress_started = 0, 0, 0.0
 
@@ -212,7 +227,7 @@ def run_public_plugin_validation(
                 f"[{progress_step}/{progress_total}] {canonical} ...", markup=False, highlight=False
             )
             return
-        if canonical in active and canonical not in notified:
+        if canonical in progress_checks and canonical not in notified:
             notified.add(canonical)
             on_check(canonical)
 
@@ -249,6 +264,7 @@ def run_public_plugin_validation(
             ),
             tree_checks_factory=tree_factory,
             skill_checks_factory=skill_factory,
+            whole_tree_checks=frozenset({"security"}) if hook_waivers is not None else frozenset(),
             fail_fast=fail_fast and not continue_on_failure,
             on_check=notify,
             on_check_plan=plan_progress,

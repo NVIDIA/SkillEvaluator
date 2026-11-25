@@ -310,3 +310,38 @@ class TestResolvePathFunctions:
     def test_resolve_plugin_path_from_directory(self, tmp_path: Path):
         """Test resolve_plugin_path returns a directory unchanged."""
         assert resolve_plugin_path(tmp_path) == tmp_path
+
+
+def test_public_detection_prefers_contained_manifest_over_skill(tmp_path: Path):
+    manifest = tmp_path / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir()
+    manifest.write_text('{"name": "bundle"}')
+    (tmp_path / "SKILL.md").write_text("---\nname: nested\n---\n")
+
+    assert detect_content_type(tmp_path) == CONTENT_TYPE_PLUGIN
+    assert detect_content_type(manifest) == CONTENT_TYPE_PLUGIN
+    assert resolve_plugin_path(manifest) == tmp_path
+
+
+def test_public_detection_leaves_unsafe_manifest_to_bounded_validation(tmp_path: Path):
+    manifest = tmp_path / ".cursor-plugin" / "plugin.json"
+    manifest.parent.mkdir()
+    manifest.symlink_to(tmp_path / "missing.json")
+    (tmp_path / "SKILL.md").write_text("---\nname: nested\n---\n")
+
+    assert detect_content_type(tmp_path) == CONTENT_TYPE_PLUGIN
+    assert detect_content_type(manifest) == CONTENT_TYPE_PLUGIN
+    assert resolve_plugin_path(manifest) == tmp_path
+
+
+def test_public_detection_requires_opt_in_for_direct_root_json(tmp_path: Path):
+    manifest = tmp_path / "plugin.json"
+    manifest.write_text('{"name": "unrelated"}')
+    (tmp_path / "SKILL.md").write_text("---\nname: nested\n---\n")
+
+    assert detect_content_type(tmp_path) == CONTENT_TYPE_SKILL
+    assert detect_content_type(manifest) == CONTENT_TYPE_UNKNOWN
+
+    manifest.write_text('{"$schema": "https://agent-plugins.org/schemas/plugin/v1", "name": "bundle"}')
+    assert detect_content_type(tmp_path) == CONTENT_TYPE_PLUGIN
+    assert detect_content_type(manifest) == CONTENT_TYPE_PLUGIN

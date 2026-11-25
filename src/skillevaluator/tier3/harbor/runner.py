@@ -123,6 +123,11 @@ from skillevaluator.tier3.harbor.collector import (
     harbor_timeout_job_recovered,
     validate_harbor_job_result,
 )
+from skillevaluator.tier3.harbor.endpoint_failure import (
+    detect_model_endpoint_failure,
+    endpoint_failure_warning,
+    provider_hosts,
+)
 from skillevaluator.tier3.harbor.gke_environment import (
     GKE_ALLOW_WORKLOAD_IDENTITY_ENV,
     GKE_BOUND_SERVICE_ACCOUNT_ERROR_TEMPLATE,
@@ -2623,8 +2628,13 @@ def _check_prerequisites(
     environment_kwargs: Mapping[str, Any] | None = None,
     verify_live_cluster: bool = False,
     subprocess_env: Mapping[str, str] | None = None,
+    agent_models: Mapping[str, Sequence[str]] | None = None,
 ) -> list[str]:
-    """Check Harbor and the selected environment (built-in, backend, GKE, or local mode)."""
+    """Check Harbor and the selected environment (built-in, backend, GKE, or local mode).
+
+    ``agent_models`` maps an agent to the models it will run; local mode checks
+    the installed agent CLIs against them before any trial starts.
+    """
     if not is_env_mode(env_mode):
         return [
             f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(_supported_env_modes()))}"
@@ -2755,7 +2765,9 @@ def _check_prerequisites(
             return [f"Local mode supports only claude-code, codex, opencode. Unsupported: {', '.join(unsupported)}."]
         try:
             strict_reads = local_sandbox.coerce_flag(None, env_var=local_sandbox.STRICT_READS_ENV)
-            return ensure_local_runtimes(selected_agents, sandbox=sandbox, strict_reads=strict_reads)
+            return ensure_local_runtimes(
+                selected_agents, sandbox=sandbox, strict_reads=strict_reads, agent_models=agent_models
+            )
         except ValueError as exc:
             return [f"Invalid local runtime configuration: {exc}"]
 
@@ -4844,13 +4856,31 @@ def _counts_as_judge_call(attempt: object) -> bool:
     return not (method == "ragas" and "prompt_sha256" in attempt)
 
 
+def _valid_budget_metric(value: Any, *, integer: bool = False) -> bool:
+    """Reject malformed usage before summing it or converting it to a float."""
+    if type(value) not in ((int,) if integer else (int, float)) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _budget_usage(job_dir: Path) -> dict[str, Any]:
     """Read attempt usage from Harbor's retained trajectory and judge artifacts."""
     usage: dict[str, Any] = {}
-    for trajectory_path in job_dir.glob("**/trajectory.json"):
+    tokens_complete = True
+    cost_complete = True
+    trajectory_paths = (
+        path
+        for pattern in ("*/agent/trajectory.json", "*/steps/*/agent/trajectory.json", "*/trajectory.json")
+        for path in job_dir.glob(pattern)
+    )
+    for trajectory_path in trajectory_paths:
         try:
             payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            tokens_complete = cost_complete = False
             continue
         final_metrics = payload.get("final_metrics", {}) if isinstance(payload, dict) else {}
         if isinstance(final_metrics, dict):
@@ -4858,25 +4888,50 @@ def _budget_usage(job_dir: Path) -> dict[str, Any]:
             completion = final_metrics.get("total_completion_tokens")
             cached = final_metrics.get("total_cached_tokens")
             cost = final_metrics.get("total_cost_usd")
-            if isinstance(prompt, int) and isinstance(completion, int):
+            if _valid_budget_metric(prompt, integer=True) and _valid_budget_metric(completion, integer=True):
                 usage["input_tokens"] = usage.get("input_tokens", 0) + prompt
                 usage["output_tokens"] = usage.get("output_tokens", 0) + completion
-                if isinstance(cached, int) and not isinstance(cached, bool):
+                if _valid_budget_metric(cached, integer=True):
                     usage["cached_input_tokens"] = usage.get("cached_input_tokens", 0) + cached
-            if isinstance(cost, int | float) and not isinstance(cost, bool):
+            else:
+                tokens_complete = False
+            if _valid_budget_metric(cost):
                 usage["cost_usd"] = usage.get("cost_usd", 0.0) + float(cost)
+            else:
+                cost_complete = False
+        else:
+            tokens_complete = cost_complete = False
+
+    token_keys = ("input_tokens", "output_tokens", "cached_input_tokens")
+    if not tokens_complete or any(
+        not _valid_budget_metric(usage[key], integer=True) for key in token_keys if key in usage
+    ):
+        for key in token_keys:
+            usage.pop(key, None)
+    if not cost_complete or ("cost_usd" in usage and not _valid_budget_metric(usage["cost_usd"])):
+        usage.pop("cost_usd", None)
+
     judge_calls = 0
     saw_judge_artifact = False
-    for artifact_path in job_dir.glob("**/judge_attempts.json"):
+    judge_complete = True
+    judge_paths = (
+        path
+        for pattern in ("*/verifier/judge_attempts.json", "*/steps/*/verifier/judge_attempts.json")
+        for path in job_dir.glob(pattern)
+    )
+    for artifact_path in judge_paths:
         saw_judge_artifact = True
         try:
             payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            judge_complete = False
             continue
         attempts = payload.get("attempts") if isinstance(payload, dict) else payload
-        if isinstance(attempts, list):
+        if isinstance(attempts, list) and all(isinstance(attempt, dict) for attempt in attempts):
             judge_calls += sum(1 for attempt in attempts if _counts_as_judge_call(attempt))
-    if saw_judge_artifact:
+        else:
+            judge_complete = False
+    if saw_judge_artifact and judge_complete:
         usage["judge_calls"] = judge_calls
     return usage
 
@@ -5865,6 +5920,7 @@ def _run_harbor_eval_impl(
         agents=agents,
         environment_kwargs=effective_environment_kwargs,
         subprocess_env=prerequisite_subprocess_env,
+        agent_models={agent: [model_resolution[agent]["model"]] for agent in agents},
     )
     if prereq_errors:
         reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
@@ -6641,24 +6697,24 @@ def _run_harbor_eval_impl(
     run_config["budget"] = budget.metadata()
     variants = 2 - int(skip_baseline) - int(skip_with_skill)
     matrix_trials = expected_trials * sum(variants + len(additional_arms.get(agent, ())) for agent in agents)
+    arm_jobs = {
+        agent: {
+            **({"with_skill": jobs_dir / f"{skill_path.name}-{agent}-with"} if not skip_with_skill else {}),
+            **({"without_skill": jobs_dir / f"{skill_path.name}-{agent}-without"} if not skip_baseline else {}),
+            **{
+                {"sumofparts": "sum_of_parts", "looseparts": "loose_parts"}[variant]: jobs_dir
+                / f"{skill_path.name}-{agent}-{variant}"
+                for variant, _, _ in additional_arms.get(agent, ())
+            },
+        }
+        for agent in agents
+    }
     try:
         if comparison_plan is not None:
             comparison_plan.bind_execution(
                 case_ids, n_attempts=n_attempts, stop_on_pass=bool(stop_on_pass), pass_threshold=float(pass_threshold)
             )
-            jobs = {
-                agent: {
-                    **({"with_skill": jobs_dir / f"{skill_path.name}-{agent}-with"} if not skip_with_skill else {}),
-                    **({"without_skill": jobs_dir / f"{skill_path.name}-{agent}-without"} if not skip_baseline else {}),
-                    **{
-                        {"sumofparts": "sum_of_parts", "looseparts": "loose_parts"}[variant]: jobs_dir
-                        / f"{skill_path.name}-{agent}-{variant}"
-                        for variant, _, _ in additional_arms.get(agent, ())
-                    },
-                }
-                for agent in agents
-            }
-            private_hooks.configure_run(case_id_by_task_selector=case_id_by_task_selector, arm_jobs=jobs)
+            private_hooks.configure_run(case_id_by_task_selector=case_id_by_task_selector, arm_jobs=arm_jobs)
             run_config["private_comparisons"] = comparison_plan.run_config()
     except (OSError, ValueError) as exc:
         return _persist_pre_execution_failure([str(exc)])
@@ -6952,6 +7008,17 @@ def _run_harbor_eval_impl(
             "partial": bool(budget.not_run),
         }
     )
+    if endpoint_diagnostic := detect_model_endpoint_failure(
+        job_dir for agent_jobs in arm_jobs.values() for job_dir in agent_jobs.values()
+    ):
+        results["model_endpoint_diagnostic"] = endpoint_diagnostic
+        results.setdefault("warnings", []).append(
+            endpoint_failure_warning(
+                endpoint_diagnostic,
+                env_mode=env_mode,
+                hosts=provider_hosts(runtime_plans[agent].provider.base_url for agent in agents),
+            )
+        )
     from skillevaluator.evaluation.tier3_report import (
         _agent_score_policy,
         _build_agent,

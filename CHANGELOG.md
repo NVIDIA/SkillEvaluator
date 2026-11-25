@@ -43,6 +43,24 @@ All notable changes to SkillEvaluator are documented in this file.
   Each step keeps its own verifier output and trajectory after job cleanup,
   including steps completed before a failure. Gym masks configured credential
   values in trajectory text, verifier output, and step failure messages.
+- The bundled create-custom-grader skill now tells agents to run
+  `skillevaluator tier3 validate --harbor-contract`, the only command with that
+  flag, and to write datasets with a top-level `skill_name` and per-case `prompt`.
+  It named `skillevaluator validate --harbor-contract`, which rejects the option,
+  and legacy `question` fields that the agentskills dataset shape rejects.
+- The recorded token usage table in the HTML report now fills the Efficiency
+  Tokens column and the per-measure Change cells and names its accounting source.
+  `token_usage` totals add `efficiency_tokens`, deltas cover every total and the
+  payload carries `source`.
+- `tier3 validate`, the Tier 3 step of `validate` and CI's strict dataset
+  preflight now report an `expected_skill` that is not a string or `null`, a
+  whitespace-only `expected_skill`, and `assertions` or `expected_behavior` that
+  is not a list of strings. A dataset that used `false`, `0` or `[]` for a
+  negative case must now use `null`. Before, `validate` accepted them: a number
+  or list in `expected_skill` failed late with a `TypeError` while tasks were
+  generated, a whitespace-only name was scored as a positive case that never
+  matches, and a string in `assertions` was judged one character at a time
+  unless the run started with `tier3 PATH`.
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
 - The api-caller reference skill keeps a `Content-Type` passed with `--headers`

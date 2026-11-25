@@ -50,6 +50,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `application/merge-patch+json` or a JSON:API request
   `application/vnd.api+json`. It was always replaced with `application/json`,
   whatever the header name's case.
+- Bare Hugging Face (`hf_`), npm (`npm_`) and PyPI (`pypi-`) tokens are masked in
+  redacted report and Tier 3 result text, not only after a credential name such
+  as `HF_TOKEN=`.
 
 ## 1.2.0 - 2026-11-23
 

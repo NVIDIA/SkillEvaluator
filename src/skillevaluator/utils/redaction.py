@@ -174,6 +174,21 @@ _REDACTIONS = (
     (re.compile(r"(?i)xox[baprs]-[A-Za-z0-9-]{10,}"), "slack-token-<redacted>"),
     (re.compile(r"AIza[A-Za-z0-9_-]{20,}"), "google-api-key-<redacted>"),
     (re.compile(r"(?i)glpat-[A-Za-z0-9_-]{20,}"), "gitlab-token-<redacted>"),
+    # Package-registry tokens. The lookbehind keeps identifiers such as
+    # ``hf_hub_download`` or ``npm_config_registry`` and words such as ``pypi-simple``
+    # intact, and the bodies are open-ended so a longer token is masked whole.
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9_-])hf_(?:"
+            # OAuth and JWT prefixes also appear in lowercase snake_case settings.
+            # Exempt only a complete identifier so longer token bodies are still masked.
+            r"(?:oauth|jwt)_(?![a-z]++(?:_[a-z]++)++(?![A-Za-z0-9._~-]))[A-Za-z0-9._~-]{16,}"
+            r"|[A-Za-z0-9]{34,})"
+        ),
+        "huggingface-token-<redacted>",
+    ),
+    (re.compile(r"(?<![A-Za-z0-9_-])npm_[A-Za-z0-9]{36,}"), "npm-token-<redacted>"),
+    (re.compile(r"(?<![A-Za-z0-9_-])pypi-[A-Za-z0-9_-]{85,}"), "pypi-token-<redacted>"),
 )
 
 

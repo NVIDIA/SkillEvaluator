@@ -3357,7 +3357,7 @@ validate.help_group_descriptions = {
 
 
 @cli.command("harness-check")
-@_target_argument
+@click.argument("target_path", type=click.Path(exists=True, path_type=Path))
 @click.option(
     "--harness",
     default="all",
@@ -3439,16 +3439,17 @@ def harness_check(
                 f"unknown harness {', '.join(unknown)}; choose from {', '.join(sorted(known))}",
                 param_hint="--harness-version",
             )
+        target = plugin_root_for(target_path, resolve_path=True)
         block = run_harness_check(
-            target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose, config=config
+            target, harness, harness_profiles, console=make_view_console(), verbose=verbose, config=config
         )
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if not block:
-        raise click.ClickException(f"No skills found in {target_path}")
+        raise click.ClickException(f"No skills found in {target_path.resolve()}")
     from skillevaluator.validators.schema import SchemaValidator
 
-    plugin_entry = plugin_key(plugin_root_for(target_path))  # the plugin's own rows: a label, not a skill folder
+    plugin_entry = plugin_key(target)
     for skill in block:
         if skill == plugin_entry:
             continue

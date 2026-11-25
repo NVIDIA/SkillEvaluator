@@ -26,6 +26,7 @@ MANIFESTS = {
     "root_json": "plugin.json",
     "hermes_native": "plugin.yaml",
 }
+ROOT_MANIFESTS = frozenset(rel for rel in MANIFESTS.values() if "/" not in rel)
 AGENT_PLUGINS_SCHEMA = "https://agent-plugins.org/schemas/"
 COMPONENTS = {
     "skills": lambda r: len(_skill_sizes(r)),
@@ -102,8 +103,8 @@ def _json_keys(path: Path, key: str | None = None) -> int:
     return len(section) if isinstance(section, (dict, list)) else 1
 
 
-def _manifest_folder_owner(folder: Path) -> Path | None:
-    """The plugin folder that a manifest folder belongs to, going by its name alone.
+def _manifest_folder_location(folder: Path) -> tuple[Path, str] | None:
+    """The expected plugin root and manifest path for a conventional manifest folder.
 
     That is the parent of ``.claude-plugin/``, ``.codex-plugin/``, ``.cursor-plugin/`` or ``.plugin/``,
     and two levels up from ``.github/plugin/``. Any other folder gives ``None``.
@@ -111,7 +112,7 @@ def _manifest_folder_owner(folder: Path) -> Path | None:
     for rel in MANIFESTS.values():
         parts = Path(rel).parent.parts
         if parts and folder.parts[-len(parts) :] == parts:
-            return folder.parents[len(parts) - 1]
+            return folder.parents[len(parts) - 1], rel
     return None
 
 
@@ -121,21 +122,32 @@ def is_plugin_root(path: Path) -> bool:
     The ``plugin.json`` inside a manifest folder is the manifest of the plugin above that folder,
     so it does not make the manifest folder a plugin.
     """
-    in_manifest_folder = _manifest_folder_owner(path) is not None
+    in_manifest_folder = _manifest_folder_location(path) is not None
     return any(_is_file(path / rel) for fmt, rel in MANIFESTS.items() if fmt != "root_json" or not in_manifest_folder)
 
 
-def plugin_root_for(target: Path) -> Path:
+def plugin_root_for(target: Path, *, resolve_path: bool = False) -> Path:
     """The folder to check for ``target``: a file stands for its folder, a manifest folder for its plugin.
 
     So ``<plugin>/.claude-plugin/plugin.json``, ``<plugin>/.github/plugin`` and the like give ``<plugin>``,
     the same as naming the plugin folder. A manifest folder is told by its name in the path as given.
+    CLI callers can resolve the result to an absolute path after identifying the manifest's owner.
     """
-    folder = target.parent if _is_file(target) else target
-    owner = _manifest_folder_owner(folder)
-    if owner is not None and is_plugin_root(owner) and not is_plugin_root(folder):
-        return owner
-    return folder
+    is_file = _is_file(target)
+    folder = target.parent if is_file else target
+    location = _manifest_folder_location(folder)
+    if location is not None:
+        owner, manifest = location
+        if _is_file(owner / manifest) and not is_plugin_root(folder):
+            if not resolve_path:
+                return owner
+            if not is_file or target == owner / manifest:
+                return owner.resolve()
+    if not resolve_path:
+        return folder
+    if is_file and target.name in ROOT_MANIFESTS and is_plugin_root(folder):
+        return folder.resolve()
+    return plugin_root_for(target.resolve())
 
 
 def plugin_facts(root: Path) -> dict[str, Any]:

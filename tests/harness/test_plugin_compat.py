@@ -330,14 +330,49 @@ def test_another_file_in_the_manifest_folder_stands_for_the_plugin(tmp_path: Pat
     assert _report(marketplace, tmp_path / "out.json") == _report(root, tmp_path / "out.json")
 
 
-def test_manifest_folder_without_a_plugin_manifest_is_not_read_as_its_parent(tmp_path: Path):
+@pytest.mark.parametrize("with_codex_manifest", [False, True])
+def test_manifest_folder_without_a_plugin_manifest_is_not_read_as_its_parent(tmp_path: Path, with_codex_manifest: bool):
     repo = tmp_path / "repo"
     (repo / ".claude-plugin").mkdir(parents=True)
-    (repo / ".claude-plugin" / "marketplace.json").write_text('{"name": "m", "plugins": []}', encoding="utf-8")
+    marketplace = repo / ".claude-plugin" / "marketplace.json"
+    marketplace.write_text('{"name": "m", "plugins": []}', encoding="utf-8")
+    if with_codex_manifest:
+        (repo / ".codex-plugin").mkdir()
+        (repo / ".codex-plugin/plugin.json").write_text('{"name": "codex-demo"}', encoding="utf-8")
     (repo / "skills" / "demo").mkdir(parents=True)
     (repo / "skills" / "demo" / "SKILL.md").write_text("---\nname: demo\ndescription: Use when testing.\n---\nBody\n")
-    result = CliRunner().invoke(cli, ["harness-check", str(repo / ".claude-plugin")])
-    assert result.exit_code != 0 and "No skills found" in result.output
+    for target in (marketplace.parent, marketplace):
+        result = CliRunner().invoke(cli, ["harness-check", str(target)])
+        assert result.exit_code != 0 and "No skills found" in result.output
+
+
+@pytest.mark.parametrize("manifest", [".claude-plugin/plugin.json", "plugin.json", "plugin.yaml"])
+def test_symlinked_manifest_is_checked_from_its_plugin_root(tmp_path: Path, manifest: str):
+    root = _plugin(tmp_path / "demo-plugin", manifest)
+    link = root / manifest
+    contents = tmp_path / "shared-manifest"
+    link.rename(contents)
+    try:
+        link.symlink_to(contents)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    assert _report(link, tmp_path / "out.json") == _report(root, tmp_path / "out.json")
+
+
+@pytest.mark.parametrize("alias_folder", ["", ".claude-plugin"])
+def test_other_symlinked_file_still_checks_its_destination_directory(tmp_path: Path, alias_folder: str):
+    root = _plugin(tmp_path / "demo-plugin", ".claude-plugin/plugin.json")
+    readme = root / "README.md"
+    readme.write_text("# Demo", encoding="utf-8")
+    other = _plugin(tmp_path / "other-plugin", ".claude-plugin/plugin.json")
+    alias = other / alias_folder / "shared-readme.md"
+    try:
+        alias.symlink_to(readme)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    assert _report(alias, tmp_path / "out.json") == _report(root, tmp_path / "out.json")
 
 
 def test_plugin_root_for_keeps_relative_paths_and_agrees_with_validate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

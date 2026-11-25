@@ -4,6 +4,25 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Experimental `pi` Tier 3 agent (the Earendil Works pi Coding Agent, pinned
+  to 1.6.0) for Docker, local, GKE, every other Harbor environment (e2b,
+  Daytona, and the rest route pi through the pinned wrapper), and the native
+  plugin arm. Ships a Tier 1
+  `pi` profile for `harness-check`, stages skills to the agent-native
+  `$HOME/.agents/skills`, and stages MCP servers through pi's native config-dir
+  mcp.json with HTTP headers kept as approved `${VAR}` references; a
+  post-staging `pi mcp list` check fails the trial when pi does not report the
+  configured servers (Harbor's pi-mcp-adapter targets pi 0.85.x and is replaced
+  by a no-op extension shim). Existing agent defaults are unchanged. The OpenAI
+  and OpenAI-compatible providers accept it (gateway endpoints pass pi the
+  `model_api` completions option, while the public OpenAI endpoint stays on
+  pi's built-in provider with its full model catalog, and the Anthropic
+  default is provider-qualified),
+  and Anthropic accepts it on the public endpoint only; NVIDIA Build and other
+  providers fail early.
+
 ## 1.2.1 - 2026-11-24
 
 ### Added
@@ -201,22 +220,6 @@ notes below describe the new policy and backend configuration behavior.
   same readiness rows as one JSON object on stdout, so CI can read scanner
   and credential failures without scraping the table. Guided installation is
   not part of this change.
-- Experimental `pi` Tier 3 agent (the Earendil Works pi Coding Agent, pinned
-  to 1.6.0) for Docker, local, GKE, every other Harbor environment (e2b,
-  Daytona, and the rest route pi through the pinned wrapper), and the native
-  plugin arm. Ships a Tier 1
-  `pi` profile for `harness-check`, stages skills to the agent-native
-  `$HOME/.agents/skills`, and stages MCP servers through pi's native config-dir
-  mcp.json with HTTP headers kept as approved `${VAR}` references; a
-  post-staging `pi mcp list` check fails the trial when pi does not report the
-  configured servers (Harbor's pi-mcp-adapter targets pi 0.85.x and is replaced
-  by a no-op extension shim). Existing agent defaults are unchanged. The OpenAI
-  and OpenAI-compatible providers accept it (gateway endpoints pass pi the
-  `model_api` completions option, while the public OpenAI endpoint stays on
-  pi's built-in provider with its full model catalog, and the Anthropic
-  default is provider-qualified),
-  and Anthropic accepts it on the public endpoint only; NVIDIA Build and other
-  providers fail early.
 - Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible
   command hooks in an exact, reviewed plugin package. Applied waivers are
   reported and clear only the matching unmodeled-hook gate.

@@ -15,7 +15,11 @@ import stat
 from pathlib import Path
 from typing import Any
 
+import json5
+
+from skillevaluator.constants import PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule, version_finding
+from skillevaluator.plugin_format_schema import _claude_name_refused_by_path
 
 MANIFESTS = {
     "claude": ".claude-plugin/plugin.json",
@@ -27,6 +31,18 @@ MANIFESTS = {
     "hermes_native": "plugin.yaml",
 }
 AGENT_PLUGINS_SCHEMA = "https://agent-plugins.org/schemas/"
+# OpenClaw v2026.10.9 selects the first present client manifest before reading it.
+OPENCLAW_CLIENT_MANIFESTS = tuple(MANIFESTS[fmt] for fmt in ("codex", "cursor", "claude"))
+OPENCLAW_AGENT_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+OPENCLAW_DEFAULT_MARKERS = (
+    "skills",
+    "commands",
+    "agents",
+    "hooks/hooks.json",
+    ".mcp.json",
+    ".lsp.json",
+    "settings.json",
+)
 COMPONENTS = {
     "skills": lambda r: len(_skill_sizes(r)),
     "commands": lambda r: len(list((r / "commands").rglob("*.md"))) if (r / "commands").is_dir() else 0,
@@ -37,8 +53,7 @@ COMPONENTS = {
 }
 # Folders a harness can pick up without any manifest (Claude Code inline plugins).
 DEFAULT_DIRS = ("skills", "commands", "agents", "hooks")
-# Root files that, with the folders above, make up the default Claude layout. Claude Code and OpenClaw
-# both document these places for a bundle that has no manifest they read.
+# Root files that, with the folders above, make up the default Claude Code layout.
 DEFAULT_FILES = (".mcp.json", ".lsp.json")
 DECLARED_COMPONENT_KEYS = ("skills", "commands", "agents", "hooks", "mcpServers", "lspServers")
 # What a component outcome means for the plugin's status. Outcomes come from canary probes.
@@ -98,12 +113,22 @@ def _json_keys(path: Path, key: str | None = None) -> int:
 
 
 _UNPARSED = object()
+_PARSE_LIMIT = object()
 
 
 def _name(data: Any) -> str:
     """The manifest's ``name`` when it is a non-empty string, else ``""``."""
     name = data.get("name") if isinstance(data, dict) else None
     return name if isinstance(name, str) else ""
+
+
+def _declares_components(data: Any) -> bool:
+    return isinstance(data, dict) and any(data.get(key) for key in DECLARED_COMPONENT_KEYS)
+
+
+def _claude_name_invalid(data: Any) -> bool:
+    name = _name(data)
+    return not name or _claude_name_refused_by_path(name)
 
 
 def _claude_lenient(path: Path) -> Any:
@@ -118,6 +143,27 @@ def _claude_lenient(path: Path) -> Any:
         return _UNPARSED
 
 
+def _openclaw_manifest(path: Path) -> Any:
+    """Read the selected client manifest as OpenClaw JSON/JSON5, with its 256 KiB byte limit."""
+    try:
+        if not _is_file(path):
+            return _UNPARSED
+        with path.open("rb") as handle:
+            raw = handle.read(PLUGIN_CONFIG_MAX_BYTES + 1)
+        if len(raw) > PLUGIN_CONFIG_MAX_BYTES:
+            return _UNPARSED
+        source = raw.decode("utf-8", "replace")
+        try:
+            return json.loads(source, parse_int=float)
+        except json.JSONDecodeError:
+            return json5.loads(source)
+    except (OSError, ValueError):
+        return _UNPARSED
+    except RecursionError:
+        # Python's recursion limit does not establish whether the upstream parser accepts it.
+        return _PARSE_LIMIT
+
+
 def is_plugin_root(path: Path) -> bool:
     return any((path / rel).is_file() for rel in MANIFESTS.values())
 
@@ -128,14 +174,15 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     ``invalid_<fmt>`` says that this format's JSON manifest is there but could not be read or parsed as
     strict UTF-8 JSON: a syntax error, a byte order mark, bytes that are not UTF-8, or a file that cannot be
     opened. Such a manifest file also clears its own ``fmt_<fmt>``. ``unparsed_claude`` is narrower: the
-    Claude manifest also fails the more lenient read Claude Code does. ``nameless_claude`` says the Claude
-    manifest parses but gives no ``name`` that is a non-empty string (a manifest that is not an object counts).
+    Claude manifest also fails the more lenient read Claude Code does. ``nameless_claude`` covers missing
+    names and names refused by Claude Code's path loader.
     ``default_dirs`` is any default component folder; ``default_layout`` also counts a root ``.mcp.json``
-    or ``.lsp.json``.
+    or ``.lsp.json``. OpenClaw uses separate facts for its selected manifest and default markers.
     """
     facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
     facts.update({f"invalid_{fmt}": False for fmt, rel in MANIFESTS.items() if rel.endswith(".json")})
-    facts["nameless_claude"] = facts["unparsed_claude"] = False
+    facts["nameless_claude"] = facts["unparsed_claude"] = facts["claude_declares_components"] = False
+    facts["openclaw_agent_manifest"] = facts["openclaw_agent_name_invalid"] = False
     for fmt, rel in MANIFESTS.items():
         path = root / rel
         facts[f"fmt_{fmt}"] = path.is_file()
@@ -150,24 +197,39 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             if fmt == "claude":
                 lenient = _claude_lenient(path)
                 facts["unparsed_claude"] = lenient is _UNPARSED
-                facts["nameless_claude"] = lenient is not _UNPARSED and not _name(lenient)
+                facts["nameless_claude"] = lenient is not _UNPARSED and _claude_name_invalid(lenient)
+                facts["claude_declares_components"] = _declares_components(lenient)
             continue
         if name := _name(data):
             facts["plugin_name"] = name
-        elif fmt == "claude":
-            facts["nameless_claude"] = True
-        if isinstance(data, dict) and any(data.get(key) for key in DECLARED_COMPONENT_KEYS):
+        if fmt == "claude":
+            facts["nameless_claude"] = _claude_name_invalid(data)
+        if _declares_components(data):
             facts["declares_components"] = True
         if fmt == "root_json":
             facts["fmt_agent_v1"] = isinstance(data, dict) and str(data.get("$schema", "")).startswith(
                 AGENT_PLUGINS_SCHEMA
             )
+            facts["openclaw_agent_manifest"] = isinstance(data, dict) and data.get("$schema") == OPENCLAW_AGENT_SCHEMA
+            facts["openclaw_agent_name_invalid"] = facts["openclaw_agent_manifest"] and not _name(data).strip()
     facts["fmt_copilot"] = facts["fmt_copilot"] or facts.pop("fmt_copilot_alt")
     facts["invalid_copilot"] = facts.pop("invalid_copilot_alt") or facts["invalid_copilot"]
     facts.setdefault("fmt_agent_v1", False)
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["default_layout"] = facts["default_dirs"] or any(_is_file(root / f) for f in DEFAULT_FILES)
+    selected = next((rel for rel in OPENCLAW_CLIENT_MANIFESTS if (root / rel).exists()), "")
+    manifest = _openclaw_manifest(root / selected) if selected else None
+    facts["openclaw_selected_manifest"] = selected
+    facts["openclaw_manifest_invalid"] = (
+        bool(selected) and manifest is not _PARSE_LIMIT and not isinstance(manifest, dict)
+    )
+    facts["openclaw_manifest_unchecked"] = manifest is _PARSE_LIMIT
+    facts["openclaw_default_layout"] = any((root / marker).exists() for marker in OPENCLAW_DEFAULT_MARKERS)
+    claude_layout = selected == MANIFESTS["claude"] or (not selected and not facts["openclaw_agent_manifest"])
+    facts["openclaw_declares_components"] = _declares_components(manifest) or (
+        claude_layout and _is_file(root / "settings.json")
+    )
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
     facts["max_skill_bytes"] = max(_skill_sizes(root).values(), default=0)
     return facts
@@ -205,7 +267,12 @@ def evaluate_plugin(
                 }
             )
             worst = max(worst, _EFFECT_RANK[effect])
-        if facts.get("any_manifest") and not facts["declares_components"] and not any(facts["components"].values()):
+        declares_components = facts["declares_components"]
+        if profile["harness"] == "claude-code":
+            declares_components = declares_components or facts.get("claude_declares_components", False)
+        elif profile["harness"] == "openclaw":
+            declares_components = declares_components or facts.get("openclaw_declares_components", False)
+        if facts.get("any_manifest") and not declares_components and not any(facts["components"].values()):
             prefix = str(profile["rules"][0]["id"]).split("-")[0]
             findings.append(
                 {

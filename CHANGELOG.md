@@ -6,14 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- `harness-check` gives more accurate answers on which plugin bundles Claude
-  Code and OpenClaw load. Claude Code: a manifest that can't be read as JSON
-  (`CC-PLUGIN-MANIFEST-INVALID`) or has no usable name
-  (`CC-PLUGIN-MANIFEST-NAME`) is not loaded; a bundle whose only default
-  content is a root `.mcp.json` or `.lsp.json` loads. OpenClaw: a bundle in the
-  default layout without a manifest OpenClaw reads loads, a broken manifest is
-  reported as `OW-PLUGIN-MANIFEST-INVALID`, and the rule `OW-PLUGIN-CODEX-MCP`
-  is removed.
+- The `harness-check` plugin panel distinguishes broken Claude Code manifests
+  from missing manifests, checks plugin names, and recognizes declared
+  components in manifests with a UTF-8 byte order mark. For OpenClaw, the
+  panel checks the first present Codex, Cursor, or Claude manifest as JSON5
+  and recognizes the loader's default bundle markers. MCP notes apply across
+  OpenClaw bundle formats. The panel requires the checked folder to contain
+  a recognized plugin manifest.
 
 ## 1.2.1 - 2026-11-24
 

@@ -1168,6 +1168,15 @@ wheels = [
 ]
 
 [[package]]
+name = "json5"
+version = "0.17.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/1f/58a4d7ee466f81bc3c7337036380fc6d49de3afb7855d74f8121b1e89b32/json5-0.17.3.tar.gz", hash = "sha256:8d0278ad34ebaa9c3af76d9519274811830224a2d1cd5af156dbd067f461b8a4", size = 54234, upload-time = "2026-10-09T21:19:28.335Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/39/e689b616c4279a821d5842a8a85c1874540f8d58e35028df93f2182120c2/json5-0.17.3-py3-none-any.whl", hash = "sha256:2c8b22a893c35cd6a3c5ccbf1dd1c7d02c25dc1b5897fea658f9bf08c2e05f9a", size = 34809, upload-time = "2026-10-09T21:19:27.357Z" },
+]
+
+[[package]]
 name = "jsonschema"
 version = "4.25.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2624,6 +2633,7 @@ dependencies = [
     { name = "click" },
     { name = "idna" },
     { name = "jinja2" },
+    { name = "json5" },
     { name = "markdown-it-py" },
     { name = "packaging" },
     { name = "pydantic" },
@@ -2734,6 +2744,7 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "idna", specifier = ">=3.10,<4" },
     { name = "jinja2", specifier = ">=3.1" },
+    { name = "json5", specifier = ">=0.17.3,<1" },
     { name = "litellm", marker = "extra == 'llm'", specifier = ">=1.110.2,<1.111.0.dev0" },
     { name = "markdown-it-py", specifier = ">=4.2,<5" },
     { name = "mcp", marker = "extra == 'tier3'", specifier = ">=1.30.0,<2" },

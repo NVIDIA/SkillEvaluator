@@ -11,6 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
+from skillevaluator.constants import PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.harness import evaluate_plugin, is_plugin_root, load_profiles, plugin_facts
 
 AGENT_V1 = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
@@ -361,13 +362,21 @@ def test_claude_code_names_the_broken_or_nameless_manifest(tmp_path: Path):
 
 @pytest.mark.parametrize(
     "text",
-    ['{"version": "0.1.0"}', '{"name": "", "version": "0.1.0"}', '{"name": 42, "version": "0.1.0"}', "[]"],
-    ids=["missing", "empty", "not-a-string", "not-an-object"],
+    [
+        '{"version": "0.1.0"}',
+        '{"name": "", "version": "0.1.0"}',
+        '{"name": 42, "version": "0.1.0"}',
+        "[]",
+        '{"name": "Demo Tools"}',
+        '\ufeff{"name": "Demo Tools"}',
+        '{"name": "demo/tools"}',
+    ],
+    ids=["missing", "empty", "not-a-string", "not-an-object", "spaces", "bom-with-spaces", "slash"],
 )
 def test_claude_code_does_not_load_a_manifest_without_a_usable_name(tmp_path: Path, text: str):
     root = _manifest(_plugin(tmp_path / "p", None), ".claude-plugin/plugin.json", text)
     assert _status(root)["claude-code"] == ("not_loaded", ["CC-PLUGIN-MANIFEST-NAME"])
-    assert plugin_facts(root)["nameless_claude"] and not plugin_facts(root)["invalid_claude"]
+    assert plugin_facts(root)["nameless_claude"] and not plugin_facts(root)["unparsed_claude"]
 
 
 def test_claude_code_loads_a_bundle_whose_only_default_content_is_mcp_or_lsp_config(tmp_path: Path):
@@ -456,23 +465,104 @@ def test_openclaw_reads_the_valid_manifest_it_prefers_over_a_broken_claude_one(t
 
 
 @pytest.mark.parametrize(
-    ("content", "claude_code"),
+    ("preferred", "fallback"),
     [
-        (b"\xef\xbb\xbf" + VALID.encode(), ("loads", [])),
-        (b'{"name": "demo", "description": "caf\xe9"}', ("loads", [])),
-        (b"\xef\xbb\xbf" + b'{"version": "0.1.0"}', ("not_loaded", ["CC-PLUGIN-MANIFEST-NAME"])),
-        (VALID.encode("utf-16"), ("not_loaded", ["CC-PLUGIN-MANIFEST-INVALID"])),
-        (BROKEN.encode(), ("not_loaded", ["CC-PLUGIN-MANIFEST-INVALID"])),
+        (".codex-plugin/plugin.json", ".claude-plugin/plugin.json"),
+        (".codex-plugin/plugin.json", ".cursor-plugin/plugin.json"),
+        (".cursor-plugin/plugin.json", ".claude-plugin/plugin.json"),
+        (".claude-plugin/plugin.json", "plugin.json"),
+    ],
+)
+@pytest.mark.parametrize("invalid", [BROKEN, "[]"], ids=["corrupt", "non-object"])
+def test_openclaw_does_not_fall_back_after_selecting_a_bundle_manifest(
+    tmp_path: Path, preferred: str, fallback: str, invalid: str
+):
+    root = _plugin(tmp_path / "p", fallback, {"name": "fallback", "$schema": AGENT_V1})
+    _manifest(root, preferred, invalid)
+    result = _openclaw(root)
+    assert result.status == "not_loaded"
+    assert [finding["id"] for finding in result.findings] == ["OW-PLUGIN-MANIFEST-INVALID"]
+    assert preferred in result.findings[0]["message"]
+
+
+@pytest.mark.parametrize("content", ['{"name": "demo",}', "// comment\n{name: 'demo',}"])
+def test_openclaw_accepts_json5_in_the_selected_manifest(tmp_path: Path, content: str):
+    root = _manifest(_plugin(tmp_path / "p", None), ".claude-plugin/plugin.json", BROKEN)
+    _manifest(root, ".codex-plugin/plugin.json", content)
+    assert _status(root)["openclaw"] == ("loads", [])
+    assert plugin_facts(root)["invalid_codex"]
+
+
+def test_openclaw_selected_manifest_respects_the_loader_byte_limit(tmp_path: Path):
+    relative_path = ".codex-plugin/plugin.json"
+    root = _manifest(_plugin(tmp_path / "p", None), relative_path, VALID.ljust(PLUGIN_CONFIG_MAX_BYTES))
+    assert _status(root)["openclaw"] == ("loads", [])
+    _manifest(root, relative_path, VALID.ljust(PLUGIN_CONFIG_MAX_BYTES + 1))
+    assert _status(root)["openclaw"] == ("not_loaded", ["OW-PLUGIN-MANIFEST-INVALID"])
+
+
+@pytest.mark.parametrize(
+    ("path", "loads"),
+    [("hooks/readme.txt", False), ("hooks/hooks.json", True), ("settings.json", True)],
+)
+def test_openclaw_default_markers_match_bundle_discovery(tmp_path: Path, path: str, loads: bool):
+    root = _manifest(_plugin(tmp_path / "p", None, components=()), "plugin.yaml", "name: demo\n")
+    _manifest(root, path, "{}")
+    status, ids = _status(root)["openclaw"]
+    assert status == ("loads" if loads else "not_loaded")
+    assert ("OW-PLUGIN-FORMAT" in ids) is not loads
+    if path == "settings.json":
+        assert "OW-PLUGIN-NO-COMPONENTS" not in ids
+
+
+@pytest.mark.parametrize("schema", [None, AGENT_V1, "https://agent-plugins.org/schemas/9.9.0/plugin.schema.json"])
+def test_openclaw_accepts_root_manifest_only_with_supported_agent_schema(tmp_path: Path, schema: str | None):
+    data = {"name": "root-demo"}
+    if schema is not None:
+        data["$schema"] = schema
+    root = _plugin(tmp_path / "p", "plugin.json", data, components=())
+    status, ids = _status(root)["openclaw"]
+    assert status == ("loads" if schema == AGENT_V1 else "not_loaded")
+    assert ("OW-PLUGIN-FORMAT" in ids) is (schema != AGENT_V1)
+
+
+@pytest.mark.parametrize("name", [None, "", " \t ", 42], ids=["missing", "empty", "blank", "not-a-string"])
+def test_openclaw_selected_agent_manifest_needs_a_name_even_with_default_markers(tmp_path: Path, name: object):
+    data = {"$schema": AGENT_V1}
+    if name is not None:
+        data["name"] = name
+    root = _plugin(tmp_path / "p", "plugin.json", data)
+    assert _status(root)["openclaw"] == ("not_loaded", ["OW-PLUGIN-MANIFEST-NAME"])
+    _manifest(root, ".claude-plugin/plugin.json", VALID)
+    assert _status(root)["openclaw"] == ("loads", [])
+
+
+def test_claude_lenient_manifest_keeps_its_declared_components(tmp_path: Path):
+    root = _manifest(tmp_path / "mixed", "plugin.yaml", "name: demo\n")
+    _manifest(root, "custom/commands/hello.md", "# Hello\n")
+    _manifest(root, ".claude-plugin/plugin.json", '\ufeff{"name": "demo", "commands": "./custom/commands"}')
+    assert _status(root)["claude-code"] == ("loads", [])
+    assert not plugin_facts(root)["declares_components"]
+
+
+@pytest.mark.parametrize(
+    ("content", "claude_code", "openclaw_loads"),
+    [
+        (b"\xef\xbb\xbf" + VALID.encode(), ("loads", []), True),
+        (b'{"name": "demo", "description": "caf\xe9"}', ("loads", []), True),
+        (b"\xef\xbb\xbf" + b'{"version": "0.1.0"}', ("not_loaded", ["CC-PLUGIN-MANIFEST-NAME"]), True),
+        (VALID.encode("utf-16"), ("not_loaded", ["CC-PLUGIN-MANIFEST-INVALID"]), False),
+        (BROKEN.encode(), ("not_loaded", ["CC-PLUGIN-MANIFEST-INVALID"]), False),
     ],
     ids=["byte-order-mark", "stray-byte", "byte-order-mark-no-name", "utf-16", "truncated"],
 )
 def test_claude_code_reads_its_manifest_more_leniently_than_strict_json(
-    tmp_path: Path, content: bytes, claude_code: tuple[str, list[str]]
+    tmp_path: Path, content: bytes, claude_code: tuple[str, list[str]], openclaw_loads: bool
 ):
     root = _plugin(tmp_path / "p", None)
     (root / ".claude-plugin").mkdir()
     (root / ".claude-plugin/plugin.json").write_bytes(content)
     s = _status(root)
     assert s["claude-code"] == claude_code
-    # The strict fact, which the OpenClaw row reads, is the same for all of them.
-    assert plugin_facts(root)["invalid_claude"] and s["openclaw"] == ("not_loaded", ["OW-PLUGIN-MANIFEST-INVALID"])
+    assert plugin_facts(root)["invalid_claude"]
+    assert s["openclaw"] == (("loads", []) if openclaw_loads else ("not_loaded", ["OW-PLUGIN-MANIFEST-INVALID"]))

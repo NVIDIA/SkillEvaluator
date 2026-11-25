@@ -166,6 +166,10 @@ All notable changes to SkillEvaluator are documented in this file.
   such as `"index": 1e400` no longer raises `OverflowError` and discards the
   entire verdict reply; independent valid verdicts are retained.
 
+- Tier 3 token reports reuse per-agent case-name and attempt indexes, avoiding
+  repeated whole-dataset scans for truncated Harbor names and per-case totals
+  while preserving ambiguous-name handling and stop-on-pass precedence.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

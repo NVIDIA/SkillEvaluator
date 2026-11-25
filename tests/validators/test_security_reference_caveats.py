@@ -39,8 +39,17 @@ class ReportText(HTMLParser):
             self.parts.append(data)
 
 
-def captured_report() -> dict:
-    return json.loads((FIXTURE / "report.json").read_text())
+def captured_report(*, dependency_metadata: bool = False) -> dict:
+    report = json.loads((FIXTURE / "report.json").read_text())
+    if dependency_metadata:
+        # Exercise the partial-report path with the newer optional block. The
+        # captured 2.13.6 report itself uses complete_with_caveats, not partial.
+        newer = json.loads((FIXTURE.parent / "skillspector-2.13.6-missing-reference-no-llm.json").read_text())
+        report["metadata"]["skillspector_version"] = newer["metadata"]["skillspector_version"]
+        report["analysis_completeness"]["dependency_inspection"] = newer["analysis_completeness"][
+            "dependency_inspection"
+        ]
+    return report
 
 
 def validate_report(report: dict, *, use_llm: bool = False) -> ValidationResult:
@@ -58,9 +67,10 @@ def validate_report(report: dict, *, use_llm: bool = False) -> ValidationResult:
     return result
 
 
-def test_fully_inspected_missing_reference_report_is_a_visible_warning():
+@pytest.mark.parametrize("dependency_metadata", [False, True])
+def test_fully_inspected_missing_reference_report_is_a_visible_warning(dependency_metadata):
     """A generic partial gate must not discard complete bundled-file evidence."""
-    report = captured_report()
+    report = captured_report(dependency_metadata=dependency_metadata)
     result = validate_report(report)
 
     assert not result.is_incomplete, result.errors
@@ -77,6 +87,27 @@ def test_fully_inspected_missing_reference_report_is_a_visible_warning():
     }
     assert report["analysis_completeness"]["is_complete"] is False
     assert report["risk_assessment"]["recommendation"] == "CAUTION"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("enabled", True),
+        ("status", "partial"),
+        ("locked_entries", 1),
+        ("inspected_artifacts", False),
+        ("artifacts", [{}]),
+        ("unknown_limit", True),
+    ],
+)
+def test_report_only_dependency_metadata_must_confirm_inspection_was_not_requested(field, value):
+    report = captured_report(dependency_metadata=True)
+    report["analysis_completeness"]["dependency_inspection"][field] = value
+
+    result = validate_report(report)
+
+    assert result.is_incomplete
+    assert "skillspector_reference_caveats" not in result.metadata
 
 
 @pytest.mark.parametrize(
@@ -118,8 +149,9 @@ def test_other_or_unverifiable_ledger_evidence_still_blocks(field, value):
         ("scope_exclusions", [{"fatal": True}]),
     ],
 )
-def test_missing_reference_exception_does_not_hide_other_coverage_gaps(field, value):
-    report = captured_report()
+@pytest.mark.parametrize("dependency_metadata", [False, True])
+def test_missing_reference_exception_does_not_hide_other_coverage_gaps(field, value, dependency_metadata):
+    report = captured_report(dependency_metadata=dependency_metadata)
     report["analysis_completeness"][field] = value
 
     result = validate_report(report)
@@ -206,8 +238,9 @@ def test_claiming_safe_or_hiding_an_inventory_entry_still_blocks():
     assert validate_report(report).is_incomplete
 
 
-def test_reference_warning_and_original_status_survive_report_serialization():
-    result = validate_report(captured_report())
+@pytest.mark.parametrize("dependency_metadata", [False, True])
+def test_reference_warning_and_original_status_survive_report_serialization(dependency_metadata):
+    result = validate_report(captured_report(dependency_metadata=dependency_metadata))
 
     payload = json.loads(JSONReporter(include_timestamp=False).render(result))
     assert payload["skillspector_reference_caveats"]["status"] == "partial"
@@ -220,10 +253,11 @@ def test_reference_warning_and_original_status_survive_report_serialization():
     assert "Referenced targets were not verified" in HTMLReporter().render(reloaded)
 
 
-def test_reference_caveat_is_visible_in_actual_ci_render_all_outputs(tmp_path):
+@pytest.mark.parametrize("dependency_metadata", [False, True])
+def test_reference_caveat_is_visible_in_actual_ci_render_all_outputs(tmp_path, dependency_metadata):
     from ci.secret_redaction import sanitized_outputs
 
-    result = validate_report(captured_report())
+    result = validate_report(captured_report(dependency_metadata=dependency_metadata))
     payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
     restored = retained_results(payload)
     (tmp_path / "skillevaluator-tier1.json").write_text(json.dumps(payload))

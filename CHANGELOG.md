@@ -651,6 +651,11 @@ notes below describe the new policy and backend configuration behavior.
   and citation or footnote markers such as `[1]` or `[^1]` after the terminator
   still end it. `--file` on a directory or an unreadable path prints `Error:`
   on stderr and exits 1 instead of a traceback.
+- The bundled api-caller skill resolves OpenAPI 3 operation, path-item and
+  document `servers` URLs (including relative URLs against the final spec URL
+  after redirects), builds Swagger 2.0 base URLs from `schemes`, `host` and
+  `basePath`, substitutes server variable defaults, and reports missing path
+  parameters as an input error instead of requesting a placeholder path.
 - Restore a temporary-cleanup exemption for a narrow, NUL-delimited
   find-to-xargs pipeline under a literal temporary root: these pipelines now
   score Security `1.0` instead of a destructive-command finding. Unknown

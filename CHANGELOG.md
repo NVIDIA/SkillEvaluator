@@ -22,8 +22,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Pin the supported NVIDIA Build embedding model in SkillEvaluator's Tier 2 CI
-  and document the setting for GitHub and GitLab callers.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,
@@ -45,6 +43,8 @@ All notable changes to SkillEvaluator are documented in this file.
   instead of as part of the command.
 - The CLI reference now covers `ci init`, `ci status`, `ci demo` and `--hook-waivers`. A test
   fails when a visible command or long option is missing from the page.
+- Document how to select `nvidia/nemotron-3.5-embed-1b` for Tier 2 CI on GitHub
+  and GitLab. NVIDIA Build retired the previous default's hosted endpoint.
 
 ## 1.2.1 - 2026-11-24
 

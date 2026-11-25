@@ -12,7 +12,7 @@
         "The agent chooses top-level BYOG with grading.mode default_plus_custom unless the user asks to replace default metrics.",
         "The agent maps benchmark prompts, target skill, trigger boundaries, fixtures, and rubric criteria into evaluator files instead of storing all benchmark metadata blindly in evals.json.",
         "The agent implements executable grader logic that writes /logs/verifier/reward.json and /logs/verifier/reward.txt with numeric custom metrics.",
-        "The agent runs or explicitly plans skillevaluator validate --harbor-contract and reports what was proven."
+        "The agent runs or explicitly plans skillevaluator tier3 validate --harbor-contract and reports what was proven."
       ],
       "files": [
         "files/create-custom-grader-001"

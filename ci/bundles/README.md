@@ -6,24 +6,24 @@ needed for manual setup.
 
 | Result | Current configuration | Copy destination |
 | --- | --- | --- |
-| GitHub checks | [skill-checks.yml](1.2.0/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
-| GitHub PR comments without hosting | [comment-skill-checks.yml](1.2.0/comment-skill-checks.yml) | Second workflow; follow the [comment setup](1.2.0/README.md#pr-comment-setup) |
-| GitHub hosted reports and PR comments | [publish-skill-reports.yml](1.2.0/publish-skill-reports.yml) | Second workflow; follow the [setup instructions](1.2.0/README.md) |
-| GitLab checks | [gitlab-skill-checks.yml](1.2.0/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
-| Optional manual LLM checks | [skill-checks-llm.yml](1.2.0/skill-checks-llm.yml) | `.github/workflows/skill-checks-llm.yml` |
+| GitHub checks | [skill-checks.yml](1.2.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitHub PR comments without hosting | [comment-skill-checks.yml](1.2.1/comment-skill-checks.yml) | Second workflow; follow the [comment setup](1.2.1/README.md#pr-comment-setup) |
+| GitHub hosted reports and PR comments | [publish-skill-reports.yml](1.2.1/publish-skill-reports.yml) | Second workflow; follow the [setup instructions](1.2.1/README.md) |
+| GitLab checks | [gitlab-skill-checks.yml](1.2.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
+| Optional manual LLM checks | [skill-checks-llm.yml](1.2.1/skill-checks-llm.yml) | `.github/workflows/skill-checks-llm.yml` |
 
 Open a file and use GitHub's **Raw** view to copy its full contents. Workflow
-commits and the container image digest are already pinned. [Full setup](1.2.0/README.md).
+commits and the container image digest are already pinned. [Full setup](1.2.1/README.md).
 
 ## Download and verification
 
-[Download the current ZIP](1.2.0/skillevaluator-ci-1.2.0.zip). Each version folder
+[Download the current ZIP](1.2.1/skillevaluator-ci-1.2.1.zip). Each version folder
 contains the exact generated files, checksums, source/image identities and
 scanner verification records. The historical [0.7.0 files](0.7.0/), [0.7.1 files](0.7.1/) [0.7.2 files](0.7.2/) and [0.8.0 files](0.8.0/) remain
-available for existing configurations, alongside [0.9.0](0.9.0/) and [1.0.1](1.0.1/); use 1.2.0 for current onboarding.
+available for existing configurations, alongside [0.9.0](0.9.0/) [1.0.1](1.0.1/), and [1.2.0](1.2.0/); use 1.2.1 for current onboarding.
 
 These manual configurations run Tier 1. The all-tier CLI was already included in
-0.9.0; 1.2.0 refreshes its separately packaged schema-version 2 descriptor.
+0.9.0; 1.2.1 refreshes its separately packaged schema-version 2 descriptor.
 Use `skillevaluator ci init --tiers 1,2,3` for that opt-in, with the matching
 release installed. Existing committed workflow pins do not change when the CLI
 is upgraded.

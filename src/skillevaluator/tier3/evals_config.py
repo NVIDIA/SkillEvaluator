@@ -24,6 +24,7 @@ from skillevaluator.quality_config import _yaml_error_detail
 from skillevaluator.tier3.harbor import canonical_agent_name
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.utils.structured_data import (
+    ScalarConstructionError,
     StructuredDataLimitError,
     StructuredDataSyntaxError,
     _UniqueKeySafeLoader,
@@ -207,11 +208,11 @@ def _parse_config_text(text: str, config_path: Path) -> Any:
             return yaml.load(text, Loader=_UniqueKeySafeLoader)  # nosec B506
     except StructuredDataLimitError as e:
         raise EvalsConfigError(f"{config_path}: invalid YAML: {e}") from e
-    except yaml.YAMLError as e:
-        raise EvalsConfigError(f"{config_path}: invalid YAML: {_yaml_error_text(e)}") from e
-    except (ValueError, IndexError, KeyError, AttributeError, TypeError) as e:
+    except (ScalarConstructionError, ValueError, IndexError, KeyError, AttributeError, TypeError) as e:
         # SafeLoader's scalar constructors raise these for values such as ``!!int abc`` or the date ``2026-13-01``.
         raise EvalsConfigError(f"{config_path}: invalid YAML: cannot parse a value") from e
+    except yaml.YAMLError as e:
+        raise EvalsConfigError(f"{config_path}: invalid YAML: {_yaml_error_text(e)}") from e
 
 
 def _yaml_error_text(exc: yaml.YAMLError) -> str:

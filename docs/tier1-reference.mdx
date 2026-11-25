@@ -961,7 +961,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/hooks/count-builds.sh"
 python3 "$CODEX_PLUGIN_ROOT/hooks/session-start.py"
 ```
 
-The command format permits one script path. Additional arguments, pipes, shell substitutions, HTTP handlers, mixed handler types, and paths outside the package leave the gate in place. The JSON manifest supports hook groups, optional matchers, and positive integer timeouts. SkillSpector must report the manifest and scripts as local components and confirm the declaration count. The managed SkillSpector 2.13.6 supports this evidence.
+The command format permits one script path. Additional arguments, pipes, shell substitutions, HTTP handlers, mixed handler types, and paths outside the package leave the gate in place. The JSON manifest supports hook groups, optional matchers, and positive integer timeouts. SkillSpector must report the manifest and scripts as local components and confirm the declaration count. SkillSpector 2.13.6 supports this evidence.
 
 Use a regular directory tree without symlinks, hard links, or filesystem mounts. The package limit is 20,000 paths, with a maximum directory depth of 64 and a path length of 1,024 bytes in UTF-8. Files can be up to 16 MiB each and 128 MiB in total. The waiver file can be up to 1 MiB, with 32 waivers and 512 payload entries per waiver.
 
@@ -1036,9 +1036,10 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     line that names the helper quotes the same span in its suggestion
     (`at target lines 74-170`), read from that ledger row; the reason in
     its `skillspector_evidence` metadata has
-    `line_source: "parser_diagnostic"`. Updating SkillSpector does
-    not clear this limit today. If the helper is valid and the command is
-    safe, report a minimal reproducer to SkillSpector. JSON reports keep a
+    `line_source: "parser_diagnostic"`. Re-scan with SkillSpector 2.13.7 or
+    later for improved JavaScript command-boundary analysis. If a valid
+    helper still triggers the limit, report a minimal reproducer to
+    SkillSpector. JSON reports keep a
     bounded `parser_diagnostic` on the matching
     `skillspector_completeness` row (`cause`, `check`, `start_line`,
     `end_line`, `unchecked_scope`, `full_input_checked`; never source text or
@@ -1077,8 +1078,8 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     2,048 or more declarations does. See the `security` check under
     [The checks](#the-checks).
 
-    The managed SkillSpector v2.13.6 no longer reports a parse limit for a
-    valid hook `"timeout"` key. An unmodeled hook still raises
+    SkillSpector v2.13.6 fixed a parse limit triggered by a valid hook
+    `"timeout"` key. An unmodeled hook still raises
     `skillspector_hook_payload_unverified` without a matching review waiver.
     SkillSpector v2.13.4 misread the key as a command wrapper and recorded
     `hooks/hooks.json:11 [static; static_parse_limit; boundary_unresolved command_word_boundary; analyzers=static_patterns_tool_misuse]`.

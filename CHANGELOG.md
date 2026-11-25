@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- The reusable Tier 1 workflow can opt in to uploading complete full-scan
+  SARIF results to GitHub Code Scanning with a caller-selected category.
 - The local-mode run preflight and `doctor --env-mode local` check the
   installed Claude Code and Codex CLI against the selected models and stop
   before any trial when one is too old. Use `--agent-model AGENT=MODEL` to

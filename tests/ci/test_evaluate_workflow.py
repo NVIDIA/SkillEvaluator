@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -89,6 +90,7 @@ def test_scan_shell_preserves_container_failures(tmp_path, mode, exit_code):
             **os.environ,
             "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
             "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
             "GITHUB_WORKSPACE": str(tmp_path / "checkout"),
             "IMAGE": "ghcr.io/example/scanner@sha256:" + "a" * 64,
             "REPORT_BASE_URL": "",
@@ -117,6 +119,7 @@ def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(t
         "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
         "CAPTURE": str(captured),
         "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(tmp_path / "output"),
         "GITHUB_WORKSPACE": str(tmp_path / "checkout"),
         "IMAGE": "ghcr.io/example/scanner@sha256:" + "a" * 64,
         "REPORT_BASE_URL": "",
@@ -232,3 +235,191 @@ def test_signed_receipt_is_separate_and_retained_after_a_failed_scan():
 def test_scan_worker_input_defaults_to_four_parallel_scans():
     workers = _workflow()["on"]["workflow_call"]["inputs"]["scan-workers"]
     assert (workers["type"], workers["default"]) == ("number", "4")
+
+
+def _sarif_step():
+    return next(step for step in _job()["steps"] if step.get("id") == "sarif")
+
+
+def _sarif_document(rule):
+    return {
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {"name": "SkillEvaluator", "rules": [{"id": rule}]}},
+            "results": [{"ruleId": rule, "message": {"text": "finding"}}],
+            "invocations": [{"executionSuccessful": True}],
+        }],
+    }
+
+
+def _sarif_evidence(tmp_path, count=2):
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    rows = []
+    for index in range(1, count + 1):
+        name = f"skill-{index:03d}"
+        directory = reports / name
+        directory.mkdir()
+        (directory / "skillevaluator-tier1.sarif.json").write_text(json.dumps(_sarif_document(f"rule-{index}")))
+        rows.append({
+            "path": f"skills/{index}", "report_dir": name, "overall_status": "passed",
+            "incomplete_scans": [], "exit_code": 0,
+        })
+    summary = {
+        "total": count, "skills": rows,
+        "selection": {"mode": "all", "discovered": count, "selected": [row["path"] for row in rows]},
+    }
+    (reports / "summary.json").write_text(json.dumps(summary))
+    output = tmp_path / "output"
+    output.mkdir()
+    return reports, output, summary
+
+
+def _prepare_sarif(reports, output):
+    script = _sarif_step()["run"].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    workspace = reports.parent / "workspace"
+    workspace.mkdir(exist_ok=True)
+    return subprocess.run(
+        [sys.executable, "-c", script, str(reports), str(output), str(workspace)],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
+        capture_output=True, text=True,
+    )
+
+
+def test_sarif_upload_is_opt_in_and_failures_are_not_suppressed():
+    inputs = _workflow()["on"]["workflow_call"]["inputs"]
+    assert inputs["upload-sarif"]["default"] == "false"
+    assert inputs["sarif-category"]["default"] == "skillevaluator"
+    prepare = _sarif_step()
+    assert "always()" in prepare["if"] and "inputs.upload-sarif" in prepare["if"]
+    upload = next(step for step in _job()["steps"] if step.get("name") == "Upload SARIF to GitHub Code Scanning")
+    assert "always()" in upload["if"] and "steps.sarif.outputs.ready == 'true'" in upload["if"]
+    assert upload.get("continue-on-error", "false") == "false"
+    assert upload["with"]["category"] == "${{ inputs.sarif-category }}"
+    assert "refs/pull/{0}/head" in upload["with"]["ref"]
+    assert upload["with"]["sha"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    assert "permissions" not in _job()
+
+
+def test_complete_reports_are_merged_even_with_a_failed_verdict(tmp_path):
+    reports, output, summary = _sarif_evidence(tmp_path)
+    summary["skills"][0].update(overall_status="failed", exit_code=1)
+    (reports / "summary.json").write_text(json.dumps(summary))
+    result = _prepare_sarif(reports, output)
+    assert result.returncode == 0, result.stderr
+    document = json.loads((output / "catalog.sarif.json").read_text())
+    assert len(document["runs"]) == 1
+    run = document["runs"][0]
+    assert "automationDetails" not in run
+    assert [item["ruleId"] for item in run["results"]] == ["rule-1", "rule-2"]
+    assert [item["id"] for item in run["tool"]["driver"]["rules"]] == ["rule-1", "rule-2"]
+
+
+@pytest.mark.parametrize(
+    "uri,expected",
+    [("file:///workspace/skills/1/SKILL.md", "skills/1/SKILL.md"), ("SKILL.md", "skills/1/SKILL.md")],
+)
+def test_sarif_locations_resolve_to_the_scanned_workspace(tmp_path, uri, expected):
+    reports, output, _ = _sarif_evidence(tmp_path, 1)
+    child = reports / "skill-001/skillevaluator-tier1.sarif.json"
+    document = json.loads(child.read_text())
+    document["runs"][0]["results"][0]["locations"] = [{
+        "physicalLocation": {"artifactLocation": {"uri": uri}},
+    }]
+    child.write_text(json.dumps(document))
+    result = _prepare_sarif(reports, output)
+    assert result.returncode == 0, result.stderr
+    merged = json.loads((output / "catalog.sarif.json").read_text())
+    location = merged["runs"][0]["results"][0]["locations"][0]
+    assert location["physicalLocation"]["artifactLocation"]["uri"] == expected
+
+
+def test_external_sarif_location_cannot_be_attributed_to_the_workspace(tmp_path):
+    reports, output, _ = _sarif_evidence(tmp_path, 1)
+    child = reports / "skill-001/skillevaluator-tier1.sarif.json"
+    document = json.loads(child.read_text())
+    document["runs"][0]["results"][0]["locations"] = [{
+        "physicalLocation": {"artifactLocation": {"uri": "file:///tmp/other"}},
+    }]
+    child.write_text(json.dumps(document))
+    result = _prepare_sarif(reports, output)
+    assert result.returncode != 0
+    assert "outside the workspace" in result.stderr
+
+
+@pytest.mark.parametrize("case", ["missing", "malformed", "bad-shape", "incomplete", "error", "partial", "empty"])
+def test_incomplete_or_invalid_full_scans_do_not_publish(tmp_path, case):
+    reports, output, summary = _sarif_evidence(tmp_path)
+    child = reports / "skill-002/skillevaluator-tier1.sarif.json"
+    if case == "missing":
+        child.unlink()
+    elif case == "malformed":
+        child.write_text("{")
+    elif case == "bad-shape":
+        child.write_text(json.dumps({"version": "2.1.0", "runs": []}))
+    elif case == "incomplete":
+        summary["skills"][1]["incomplete_scans"] = ["semgrep"]
+    elif case == "error":
+        summary["skills"][1]["overall_status"] = "error"
+    elif case == "partial":
+        summary["selection"]["discovered"] = 3
+    else:
+        summary.update(total=0, skills=[])
+        summary["selection"].update(discovered=0, selected=[])
+    (reports / "summary.json").write_text(json.dumps(summary))
+    result = _prepare_sarif(reports, output)
+    assert result.returncode != 0
+    assert "Code Scanning upload skipped" in result.stderr
+    assert not (output / "catalog.sarif.json").exists()
+
+
+@pytest.mark.parametrize("exit_code", ["0", "1", ""])
+def test_changed_only_scans_skip_upload_including_no_changes(tmp_path, exit_code):
+    step = _sarif_step()
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        env={**os.environ, "SCAN_MODE": "changed", "SCAN_EXIT_CODE": exit_code, "SARIF_CATEGORY": "catalog"},
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert "changed-only scans cannot replace a complete baseline" in result.stdout
+
+
+@pytest.mark.parametrize("exit_code", ["", "125", "137"])
+def test_aborted_full_scan_does_not_attempt_upload(tmp_path, exit_code):
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", _sarif_step()["run"]],
+        env={
+            **os.environ, "SCAN_MODE": "all", "SCAN_EXIT_CODE": exit_code, "SARIF_CATEGORY": "catalog",
+            "FORK_PR": "false",
+        },
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "did not finish normally" in result.stdout
+
+
+def test_fork_pr_full_scan_fails_instead_of_uploading_to_the_wrong_commit(tmp_path):
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", _sarif_step()["run"]],
+        env={
+            **os.environ, "SCAN_MODE": "all", "SCAN_EXIT_CODE": "0", "SARIF_CATEGORY": "catalog",
+            "FORK_PR": "true",
+        },
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "cannot target the scanned head commit" in result.stdout
+
+
+def test_pull_request_target_cannot_publish_head_results_as_base_results():
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", _sarif_step()["run"]],
+        env={
+            **os.environ, "SCAN_MODE": "all", "SCAN_EXIT_CODE": "0", "SARIF_CATEGORY": "catalog",
+            "FORK_PR": "false", "EVENT_NAME": "pull_request_target",
+        },
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "not supported on pull_request_target" in result.stdout

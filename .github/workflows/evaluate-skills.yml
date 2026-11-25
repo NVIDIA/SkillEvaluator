@@ -52,11 +52,20 @@ on:
         description: Apply per-skill baselines from the reviewed target/current commit manifest
         type: boolean
         default: false
+      upload-sarif:
+        description: Upload complete full-scan SARIF to GitHub Code Scanning
+        type: boolean
+        default: false
+      sarif-category:
+        description: Stable Code Scanning category, unique to this scan configuration
+        type: string
+        default: skillevaluator
     secrets:
       LLM_API_KEY:
         required: false
 # Inherit the caller's permissions: basic scans need only contents: read.
 # Hosted reports additionally opt in to id-token: write in the caller.
+# Code Scanning publication additionally requires security-events: write.
 jobs:
   tier1:
     name: Tier 1 scan
@@ -145,6 +154,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/anonymous-docker-config"
           docker --config "$RUNNER_TEMP/anonymous-docker-config" pull "$IMAGE"
       - name: Evaluate selected skills
+        id: scan
         env:
           ENFORCEMENT_MODE: ${{ inputs.enforcement-mode }}
           IMAGE: ${{ inputs.image }}
@@ -179,6 +189,7 @@ jobs:
           if [ "$ENFORCEMENT_MODE" = advisory ]; then
             enforcement_args=(--enforcement-mode advisory)
           fi
+          set +e
           docker run --rm --user "$(id -u):$(id -g)" \
             --read-only --tmpfs /tmp:rw,nosuid,noexec,size=1g \
             --tmpfs /audit-tmp:rw,nosuid,noexec,mode=1777,size=1g --env TMPDIR=/audit-tmp \
@@ -191,6 +202,10 @@ jobs:
             --env CALLER_WORKFLOW_SHA \
             --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \
             "$IMAGE" "${enforcement_args[@]}"
+          status=$?
+          set -e
+          echo "exit-code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
       - name: Add the result to the workflow summary
         if: always()
         run: |
@@ -226,3 +241,132 @@ jobs:
             ${{ runner.temp }}/skill-reports/skill-*/skillevaluator-tier1.json
           if-no-files-found: warn
           retention-days: 14
+      - name: Prepare complete SARIF for Code Scanning
+        id: sarif
+        if: ${{ always() && !cancelled() && inputs.upload-sarif }}
+        env:
+          IMAGE: ${{ inputs.image }}
+          SCAN_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}
+          SARIF_CATEGORY: ${{ inputs.sarif-category }}
+          EVENT_NAME: ${{ github.event_name }}
+          FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          if [[ -z "${SARIF_CATEGORY//[[:space:]]/}" ]]; then
+            echo "::error::sarif-category must not be empty"
+            exit 1
+          fi
+          if [ "$SCAN_MODE" = changed ]; then
+            echo "Code Scanning upload skipped: changed-only scans cannot replace a complete baseline."
+            exit 0
+          fi
+          if [ "$EVENT_NAME" = pull_request_target ]; then
+            echo "::error::Code Scanning upload is not supported on pull_request_target."
+            exit 1
+          fi
+          if [ "$FORK_PR" = true ]; then
+            echo "::error::Code Scanning upload skipped: fork PR uploads cannot target the scanned head commit."
+            exit 1
+          fi
+          if [ "$SCAN_EXIT_CODE" != 0 ] && [ "$SCAN_EXIT_CODE" != 1 ]; then
+            echo "::error::Code Scanning upload skipped: the scan did not finish normally."
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/skill-sarif"
+          docker run --rm -i --user "$(id -u):$(id -g)" \
+            --read-only --tmpfs /tmp:rw,nosuid,noexec,size=1g \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --mount "type=bind,src=$RUNNER_TEMP/skill-reports,dst=/reports,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP/skill-sarif,dst=/output" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --workdir /tmp --entrypoint python "$IMAGE" -I - /reports /output /workspace <<'PY'
+          import json, os, pathlib, sys, urllib.parse
+          from skillevaluator.reporting.sarif_reporter import merge_catalog_sarif_documents
+
+          reports, output, workspace = map(pathlib.Path, sys.argv[1:])
+
+          def normalize_location(location, skill):
+              physical = location.get("physicalLocation")
+              if not physical or "artifactLocation" not in physical:
+                  return
+              artifact = physical["artifactLocation"]
+              uri = urllib.parse.urlsplit(artifact["uri"])
+              if uri.query or uri.fragment or uri.netloc or uri.scheme not in ("", "file"):
+                  raise ValueError("a SARIF location cannot be mapped to the workspace")
+              path = pathlib.PurePosixPath(os.fsdecode(urllib.parse.unquote_to_bytes(uri.path)))
+              if path.is_absolute():
+                  if uri.scheme != "file" or not path.is_relative_to("/workspace"):
+                      raise ValueError("a SARIF location is outside the workspace")
+                  path = path.relative_to("/workspace")
+              elif uri.scheme:
+                  raise ValueError("a SARIF location cannot be mapped to the workspace")
+              else:
+                  skill_path = pathlib.PurePosixPath(skill) / path
+                  root_exists = (workspace / path).exists()
+                  skill_exists = (workspace / skill_path).exists()
+                  if root_exists and skill_exists and path != skill_path:
+                      raise ValueError("a SARIF location is ambiguous")
+                  if not root_exists:
+                      path = skill_path
+              if ".." in path.parts:
+                  raise ValueError("a SARIF location escapes the workspace")
+              artifact["uri"] = urllib.parse.quote(os.fsencode(str(path)), safe="/")
+
+          try:
+              summary = json.loads((reports / "summary.json").read_text(encoding="utf-8"))
+              selection = summary["selection"]
+              rows = summary["skills"]
+              selected = selection["selected"]
+              if (selection["mode"] != "all" or not isinstance(rows, list)
+                  or not isinstance(selected, list) or not selected
+                  or len(rows) != len(selected) or summary["total"] != len(rows)
+                  or selection["discovered"] != len(rows)
+                  or [row["path"] for row in rows] != selected
+                  or summary.get("error")):
+                  raise ValueError("the full scan selection is missing or inconsistent")
+              documents = []
+              for index, row in enumerate(rows, 1):
+                  if (row["report_dir"] != f"skill-{index:03d}"
+                      or row["overall_status"] not in ("passed", "failed")
+                      or row["incomplete_scans"] != []
+                      or row["exit_code"] not in (0, 1) or row.get("error")):
+                      raise ValueError("one or more skills did not complete")
+                  path = reports / row["report_dir"] / "skillevaluator-tier1.sarif.json"
+                  if path.is_symlink() or not path.is_file():
+                      raise ValueError("a skill SARIF report is missing")
+                  document = json.loads(path.read_text(encoding="utf-8"))
+                  runs = document["runs"]
+                  if (document["version"] != "2.1.0" or not isinstance(runs, list) or len(runs) != 1
+                      or not isinstance(runs[0], dict)):
+                      raise ValueError("a skill SARIF report has an invalid version or runs")
+                  run = runs[0]
+                  driver = run["tool"]["driver"]
+                  if (not isinstance(driver, dict) or not isinstance(driver.get("name"), str)
+                      or not driver["name"] or not isinstance(driver.get("rules"), list)
+                      or any(not isinstance(rule, dict) or not isinstance(rule.get("id"), str)
+                             or not rule["id"] for rule in driver["rules"])
+                      or not isinstance(run.get("results"), list)
+                      or any(not isinstance(result, dict) for result in run["results"])
+                      or not isinstance(run.get("invocations"), list) or not run["invocations"]
+                      or any(not isinstance(invocation, dict) or invocation.get("executionSuccessful") is not True
+                             for invocation in run.get("invocations", []))):
+                      raise ValueError("a skill SARIF report is malformed or incomplete")
+                  for result in run["results"]:
+                      for location in result.get("locations", []):
+                          normalize_location(location, row["path"])
+                  documents.append(document)
+              merged = merge_catalog_sarif_documents(documents)
+              # upload-sarif only applies its category when automationDetails is absent.
+              merged["runs"][0].pop("automationDetails", None)
+              (output / "catalog.sarif.json").write_text(json.dumps(merged), encoding="utf-8")
+          except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
+              raise SystemExit(f"Code Scanning upload skipped: missing, malformed, or incomplete scan evidence ({exc}).")
+          PY
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - name: Upload SARIF to GitHub Code Scanning
+        if: ${{ always() && !cancelled() && steps.sarif.outputs.ready == 'true' }}
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ runner.temp }}/skill-sarif/catalog.sarif.json
+          category: ${{ inputs.sarif-category }}
+          ref: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || github.ref }}
+          sha: ${{ github.event.pull_request.head.sha || github.sha }}

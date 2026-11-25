@@ -212,7 +212,8 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["mcp_claude_manifest_invalid"] = False
     if flat_count is not None:
         facts["mcp_claude"] = flat_count
-    if claude_manifest and "mcpServers" in claude_manifest:
+    # Empty collections contribute no servers and leave default discovery unchanged.
+    if claude_manifest and claude_manifest.get("mcpServers", {}) not in ({}, []):
         # Claude Code merges declared configurations with its default .mcp.json by server name.
         reader = PluginRootReader(root)
         manifest_rel = MANIFESTS["claude"]

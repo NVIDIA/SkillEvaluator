@@ -369,6 +369,19 @@ def test_claude_mcp_manifest_merges_with_any_default_shape(tmp_path: Path, defau
     assert finding["message"].startswith(f"{expected} mcp:")
 
 
+@pytest.mark.parametrize("declaration", [[], {}], ids=["empty-list", "empty-map"])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["flat", "wrapped"])
+def test_claude_empty_mcp_declaration_keeps_bundled_default(tmp_path: Path, declaration: object, wrapped: bool):
+    root = _bare_manifest(tmp_path / "p", data={"name": "demo", "mcpServers": declaration})
+    servers = {"demo": {"command": "demo"}}
+    (root / "servers.json").write_text(json.dumps({"mcpServers": servers} if wrapped else servers))
+    (root / ".mcp.json").symlink_to("servers.json")
+
+    [finding] = _component_rows(root)["claude-code"]
+    assert (finding["id"], finding["outcome"]) == ("CC-PLUGIN-MCP", "deferred")
+    assert finding["message"].startswith("1 mcp:")
+
+
 @pytest.mark.parametrize("filename", [".mcp.json", "servers.json"])
 def test_claude_mcp_manifest_can_explicitly_name_a_flat_config_file(tmp_path: Path, filename: str):
     manifest = {

@@ -10,6 +10,9 @@ All notable changes to SkillEvaluator are documented in this file.
   (`…-PLUGIN-NO-COMPONENTS`) only for a folder that holds nothing but a
   descriptive manifest. A `.mcp.json` without the `mcpServers` wrapper counts
   for Claude Code; other harnesses get the new note `…-PLUGIN-MCP-FLAT`.
+- `harness-check` reports a Claude Code plugin as `not_loaded`
+  (`CC-PLUGIN-MCP-MANIFEST`) when Claude Code rejects its `mcpServers`
+  manifest declaration. Empty lists and maps preserve default MCP discovery.
 
 ## 1.2.1 - 2026-11-24
 

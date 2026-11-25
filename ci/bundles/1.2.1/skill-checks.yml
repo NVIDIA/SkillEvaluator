@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# Use the release-generated copy with reviewed workflow and image pins.
+# The image uses the default OSS validation policy for public and private repos.
+# No internal/external input is needed; report visibility is configured separately.
+name: Skill checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+  # PR comments or hosted reports: uncomment this, then refresh trusted-caller-blobs.
+  # id-token: write
+jobs:
+  skills:
+    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@e1bcdd00d4dcf43f0986ed6686f7e7f89573f3c6
+    with:
+      image: ghcr.io/nvidia/skillevaluator-tier1@sha256:c7a63f850211f08ebe40df28033527788b4c53f527b3fff608612a2403b43779
+      paths: skills
+      min-score: 70
+      # Enable only after the reviewed baseline manifest reaches the target branch.
+      security-baselines: false
+      scan-mode: auto
+      llm: false

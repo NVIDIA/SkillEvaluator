@@ -1,0 +1,7 @@
+{
+  "repository": "NVIDIA/SkillEvaluator",
+  "workflow_ref": "e1bcdd00d4dcf43f0986ed6686f7e7f89573f3c6",
+  "publisher_ref": "e1bcdd00d4dcf43f0986ed6686f7e7f89573f3c6",
+  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:c7a63f850211f08ebe40df28033527788b4c53f527b3fff608612a2403b43779",
+  "caller_blob": "458c08aa27733cf7828c63243388a6cc5f3e351b"
+}

@@ -1,0 +1,33 @@
+{
+  "bandit": {
+    "command": "bandit --version",
+    "version": "1.9.4"
+  },
+  "pip-audit": {
+    "command": "pip-audit --version",
+    "version": "2.10.1"
+  },
+  "skillspector": {
+    "command": "skillspector --version",
+    "version": "2.13.6"
+  },
+  "skillevaluator": {
+    "command": "skillevaluator --version",
+    "version": "1.2.1"
+  },
+  "semgrep": {
+    "command": "semgrep --version",
+    "version": "1.182.0"
+  },
+  "gitleaks": {
+    "command": "gitleaks version",
+    "version": "8.30.0"
+  },
+  "verification": {
+    "method": "Version commands executed in the anonymously pulled image used in all five smoke cases.",
+    "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:c7a63f850211f08ebe40df28033527788b4c53f527b3fff608612a2403b43779",
+    "source_revision": "e1bcdd00d4dcf43f0986ed6686f7e7f89573f3c6",
+    "build_run": "https://github.com/NVIDIA/SkillEvaluator/actions/runs/45672659524",
+    "runtime_observation_sha256": "72e6f79c86b3e57c8210c21ced01a59f70a8646156a0cd3934d80895db1fbc01"
+  }
+}

@@ -43,6 +43,30 @@ jobs:
           fi
           python3 "$classifier" --base "$BASE_SHA" --head "$HEAD_SHA"
 
+  # Report-only: this job shows the size of the pull request against the line
+  # budgets in CONTRIBUTING.md and never fails. A crash is a warning annotation.
+  size-report:
+    name: Size report
+    needs: classify-changes
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Report pull request size
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/size_guard.py --base "$BASE_SHA" --head "$HEAD_SHA" | tee -a "$GITHUB_STEP_SUMMARY" ||
+            echo "::warning title=Size report::scripts/ci/size_guard.py failed; the error is in this step's log."
+
   test-python-312:
     name: Tests (Python 3.12)
     needs: classify-changes

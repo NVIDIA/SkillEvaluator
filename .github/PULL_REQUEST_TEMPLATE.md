@@ -2,6 +2,12 @@
 
 Describe the user-visible behavior and why the change is needed.
 
+## Size
+
+- Net lines, `src/` / `tests/`:
+- Existing test or table extended:
+- Code removed or reused:
+
 ## Verification
 
 - [ ] I am familiar with the [Contributing Guidelines](../CONTRIBUTING.md)

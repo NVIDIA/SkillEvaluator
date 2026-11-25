@@ -147,6 +147,28 @@ def test_ci_classifier_is_pull_request_only_and_exports_docs_only() -> None:
     }
 
 
+def test_ci_size_report_is_advisory_and_pull_request_only() -> None:
+    jobs = _load("ci.yml")["jobs"]
+    report = jobs["size-report"]
+
+    assert report["needs"] == "classify-changes"
+    assert report["if"] == (
+        "${{ !cancelled() && github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only != 'true' }}"
+    )
+    assert "size-report" not in REQUIRED_CI_JOBS
+    for job in jobs.values():
+        needs = job.get("needs", [])
+        assert "size-report" not in ([needs] if isinstance(needs, str) else needs)
+
+    run = _runs(report)
+    setup, pipeline, fallback = run.strip().splitlines()
+    assert setup == "set -euo pipefail"
+    assert pipeline.startswith("python3 scripts/ci/size_guard.py ")
+    assert pipeline.endswith(' | tee -a "$GITHUB_STEP_SUMMARY" ||')
+    assert fallback.lstrip().startswith('echo "::warning')
+    assert "--enforce" not in run
+
+
 def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     job = _load("ci.yml")["jobs"]["test-python-312"]
 

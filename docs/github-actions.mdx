@@ -107,7 +107,7 @@ stable releases without a caller edit. Published reports verify the scan's
 historically resolved workflow and signed receipt. The first switch adds a
 reusable job level, so check any required status-check names on a new PR.
 
-### Set up stable PR comments
+## Set up stable PR comments
 
 <Note>
   Use this setup after the [comment workflow appears on the stable tag](https://github.com/NVIDIA/SkillEvaluator/tree/stable/.github/workflows).
@@ -115,19 +115,34 @@ reusable job level, so check any required status-check names on a new PR.
   without hosting.
 </Note>
 
-1. Set up the stable scan above. Keep `id-token: write` on the scan job.
-2. Copy the [stable comment template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/manual/comment-skill-checks-stable.yml)
-   to `.github/workflows/comment-skill-checks.yml`. If you're switching from
-   hosted reports, remove `.github/workflows/publish-skill-reports.yml` in the
-   same setup PR. Set `workflow_run.workflows` to your scan workflow's name if
-   you changed it from **Skill checks**.
-3. Run `git hash-object .github/workflows/skill-checks.yml` and paste the
-   result into `trusted-caller-blobs` in the comment file. Refresh this value
-   when you edit the scan file. Both workflows follow future stable releases
-   automatically.
-4. Merge the setup PR and open a PR that changes a skill. The scored comment
-   appears in **Conversation**. Download the HTML report from the scan run in
-   **Actions**.
+<Steps>
+
+### Enable signed scan results
+
+Set up the [stable scan](#follow-the-latest-stable-release). Keep
+`id-token: write` on the scan job.
+
+### Add the comment workflow
+
+Copy the [stable comment template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/manual/comment-skill-checks-stable.yml)
+to `.github/workflows/comment-skill-checks.yml`. If you're switching from
+hosted reports, remove `.github/workflows/publish-skill-reports.yml` in the
+same setup PR. Set `workflow_run.workflows` to your scan workflow's name if
+you changed it from **Skill checks**.
+
+### Approve the scan file
+
+Run `git hash-object .github/workflows/skill-checks.yml` and paste the result
+into `trusted-caller-blobs` in the comment file. Refresh this value when you
+edit the scan file. Both workflows follow future stable releases automatically.
+
+### Verify the comment
+
+Merge the setup PR, then open a skill-change PR from a branch in the same
+repository. Look for the scored comment in **Conversation**, and download the
+HTML report from the scan run in **Actions**.
+
+</Steps>
 
 ## See what happened
 

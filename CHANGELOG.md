@@ -118,6 +118,54 @@ All notable changes to SkillEvaluator are documented in this file.
   redacted report and Tier 3 result text, not only after a credential name such
   as `HF_TOKEN=`.
 
+- Reuse occurrence indexes while merging collection finding summaries, avoiding
+  repeated scans of every previously collected location when many skills share
+  a finding. Finding identities, severity, ordering, and counts are preserved.
+
+- JUnit report generation remembers the next case-name suffix for repeated
+  checks, avoiding quadratic name searches in large collection reports while
+  preserving existing names and collisions with explicitly numbered checks.
+
+- Keep deeply nested retained JSON from aborting run discovery and Tier 3
+  history. Undecodable runs are excluded from the latest-run fallback; history
+  also isolates recursive retained metadata during JSON export, while keeping
+  healthy runs readable.
+
+- Report source links encode reserved characters, UTF-8 names, and retained
+  filename/ref bytes so refs and skill paths link to the intended GitHub and
+  GitLab locations. HTML labels remain readable while link targets stay encoded.
+
+- Invalid YAML scalar values and Unicode escapes retain their actual source
+  location in diagnostics. Frontmatter keeps the existing bounded-loader
+  complexity checks, and duplicate-key inspection handles scanner range errors.
+  Unconstructible scalars still fail manifest scoping closed, keep evals config
+  and dataset values out of error messages, and do not make valid block-scalar
+  tabs invalid. Dataset scalar errors retain their line and column without
+  revealing the value.
+
+- Tier 3 budget accounting keeps incomplete token, cost, and judge-call evidence
+  unmeasured instead of accepting partial subtotals or malformed judge logs as
+  zero calls, stopping further admissions under the affected configured limit.
+  Only retained ATIF trajectory and verifier artifact locations contribute;
+  copied skill examples named trajectory.json or judge_attempts.json do not
+  consume or invalidate the attempt budget.
+
+- Pre-commit skill mapping stays inside its repository root. A changed directory
+  link checks the skill containing the link instead of the linked target, and
+  paths outside the checkout no longer select unrelated skills.
+
+- Keep generated plugin evaluation case IDs within Harbor's portable path contract, including length limits, Windows device names, and case-insensitive collisions.
+
+- Preserve warnings from passing rules, workflows, and workflow references when
+  validating collections, including each member's context and warning counts.
+  Single-workflow JSON reports include reference warning messages. Markdown
+  reports count these warnings in the summary.
+
+- Python content chunks preserve complete multiline function and class headers
+  without inline implementation bodies, including continued bodies and decorated
+  members. More definitions can clear the 80-character minimum, increasing
+  embedding work and reaching the 1,024-chunk limit sooner in Python-heavy skills.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

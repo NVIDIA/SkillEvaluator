@@ -57,6 +57,28 @@ def _render(results: list[ValidationResult]) -> str:
     return HTMLReporter(include_timestamp=False, explicit_skill_name="demo").render_all(results)
 
 
+@pytest.mark.parametrize(
+    ("repo_url", "tree_segment", "target_prefix"),
+    [
+        ("https://github.com/example/project", "/tree/", "example/project/tree/main/skills/"),
+        ("https://gitlab.com/example/project", "/-/tree/", "example/project / skills/"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("encoded_name", "display_name"),
+    [("caf%C3%A9%20%23100%25", "café #100%"), ("skill-%FF", "skill-\ufffd")],
+)
+def test_encoded_target_links_keep_readable_labels(repo_url, tree_segment, target_prefix, encoded_name, display_name):
+    target = f"{repo_url}{tree_segment}main/skills/{encoded_name}"
+    reporter = HTMLReporter(include_timestamp=False, target_path=target)
+
+    html = reporter.render_all([ValidationResult(validator_name="SCHEMA")])
+
+    assert f'<h1 class="agent-hero-title" id="report-title">skills/{display_name}</h1>' in html
+    assert f'title="{target}">{target_prefix}{display_name}</a>' in html
+    assert f'href="{target}"' in html
+
+
 class _Outline(HTMLParser):
     def __init__(self) -> None:
         super().__init__()

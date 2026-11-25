@@ -55,6 +55,10 @@ class StructuredDataLimitError(StructuredDataError):
     """The input exceeds a parser or object-graph complexity ceiling."""
 
 
+class ScalarConstructionError(ConstructorError):
+    """A parsed YAML scalar could not be converted to its native value."""
+
+
 class _MergeBoundedSafeLoader(yaml.SafeLoader):
     """Check merge expansion on composed nodes before constructing any values."""
 
@@ -62,6 +66,22 @@ class _MergeBoundedSafeLoader(yaml.SafeLoader):
         node = super().compose_document()
         _preflight_yaml_merge_work(node)
         return node
+
+    def fetch_more_tokens(self) -> None:
+        try:
+            super().fetch_more_tokens()
+        except (ValueError, OverflowError) as exc:
+            raise yaml.scanner.ScannerError(None, None, f"invalid YAML value: {exc}", self.get_mark()) from exc
+
+    def construct_object(self, node: Node, deep: bool = False) -> Any:
+        try:
+            return super().construct_object(node, deep=deep)
+        except StructuredDataError:
+            raise
+        except (ValueError, OverflowError, IndexError, KeyError, AttributeError, TypeError) as exc:
+            value = node.value[:80] if isinstance(node.value, str) else ""
+            kind = node.tag.rsplit(":", 1)[-1]
+            raise ScalarConstructionError(None, None, f"invalid {kind} value {value!r}", node.start_mark) from exc
 
 
 class _UniqueKeySafeLoader(_MergeBoundedSafeLoader):

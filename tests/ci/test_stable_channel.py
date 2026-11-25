@@ -279,14 +279,38 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
     )
     fake_gh.chmod(0o755)
 
+    # Exercise real fetches and pushes against the bare remote while simulating
+    # the production URL allowlist for the manual entry point.
+    git_wrapper = bin_dir / "git"
+    git_wrapper.write_text(
+        "#!/bin/bash\n"
+        "if [[ ${1:-} == remote && ${2:-} == get-url && ${TEST_APPROVED_ORIGIN:-} == true ]]; then\n"
+        "    echo https://github.com/NVIDIA/SkillEvaluator.git\n"
+        "    exit 0\n"
+        "fi\n"
+        'exec "$TEST_REAL_GIT" "$@"\n',
+        encoding="utf-8",
+    )
+    git_wrapper.chmod(0o755)
+
     assets = tmp_path / "assets"
     assets.mkdir()
 
     def promote(
-        tag, *, source_tree=None, bootstrap_sha="", event="workflow_dispatch", index_problem=None, expected_release=None
+        tag,
+        *,
+        source_tree=None,
+        bootstrap_sha="",
+        event=None,
+        index_problem=None,
+        expected_release=None,
+        mode=None,
+        approved_origin=True,
     ):
+        if event is None:
+            event = "" if mode else "workflow_dispatch"
         if expected_release is None:
-            expected_release = tag if event == "workflow_dispatch" else ""
+            expected_release = tag if mode or event == "workflow_dispatch" else ""
         version = tag.removeprefix("v")
         commit = git("rev-parse", f"refs/tags/{tag}^{{commit}}")
         archive = repo / "ci/bundles" / version / f"skillevaluator-ci-{version}.zip"
@@ -322,11 +346,12 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
             encoding="utf-8",
         )
         return subprocess.run(
-            ["bash", "ci/promote_stable.sh"],
+            ["bash", "ci/promote_stable.sh", *([mode, expected_release] if mode else [])],
             cwd=repo,
             env={
                 **os.environ,
                 "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                "PYTHONDONTWRITEBYTECODE": "1",
                 "PYTHONPATH": str(bin_dir),
                 "TEST_RELEASE_RECORD": (
                     f"{tag}\tsha256:{manifest_digest}\t{len(body)}\tsha256:{archive_digest}\t{archive_size}"
@@ -334,10 +359,12 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
                 "TEST_ASSETS": str(assets),
                 "TEST_INDEX_RESPONSES": index_responses(assets, version, artifacts, index_problem),
                 "RELEASE_DEVZONE_INDEX_URL": DEVZONE_URL,
-                "STABLE_PUSH_TOKEN": "synthetic-test-token",
+                "STABLE_PUSH_TOKEN": "" if mode else "synthetic-test-token",
                 "STABLE_BOOTSTRAP_SHA": bootstrap_sha,
                 "STABLE_EXPECTED_RELEASE": expected_release,
                 "GITHUB_EVENT_NAME": event,
+                "TEST_APPROVED_ORIGIN": str(approved_origin).lower(),
+                "TEST_REAL_GIT": shutil.which("git"),
             },
             check=False,
             text=True,
@@ -352,11 +379,19 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
         assert blocked.returncode != 0
         assert "bootstrap-sha" in blocked.stderr
         assert not git("ls-remote", "origin", "refs/tags/stable")
+    manual_bootstrap = promote("v1.0.1", mode="--manual")
+    assert manual_bootstrap.returncode != 0
+    assert "STABLE_BOOTSTRAP_SHA" in manual_bootstrap.stderr
     if not existing_github_only:
         pending = promote("v1.0.1", bootstrap_sha=first, index_problem="missing-sdist")
         assert pending.returncode != 0
         assert "DevZone artifacts are not visible yet" in pending.stderr
         assert not git("ls-remote", "origin", "refs/tags/stable")
+        manual_promoted = promote("v1.0.1", bootstrap_sha=first, mode="--manual")
+        assert manual_promoted.returncode == 0, manual_promoted.stderr
+        assert published_ref() == first
+        # Restore the unbootstrapped remote to test the Actions entry point too.
+        git("push", "origin", "--delete", "stable")
     promoted = promote("v1.0.1", bootstrap_sha=first)
     if existing_github_only:
         assert promoted.returncode != 0
@@ -391,12 +426,30 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
     corrupt = promote("v1.0.2", index_problem="wrong-bytes")
     assert corrupt.returncode != 0 and published_ref() == first
     assert "PyPI download has different bytes" in corrupt.stderr
-    promoted = promote("v1.0.2", event="workflow_run")
+    wrong_remote = promote("v1.0.2", mode="--manual", approved_origin=False)
+    assert wrong_remote.returncode != 0 and published_ref() == first
+    assert "requires the official HTTPS SkillEvaluator origin" in wrong_remote.stderr
+    pending = promote("v1.0.2", mode="--manual", index_problem="missing-sdist")
+    assert pending.returncode != 0 and published_ref() == first
+    assert "DevZone artifacts are not visible yet" in pending.stderr
+    checked = promote("v1.0.2", mode="--verify-only")
+    assert checked.returncode == 0 and published_ref() == first, checked.stderr
+    assert f"Verified v1.0.2 at {second} for stable promotion." in checked.stdout
+    if existing_github_only:
+        promoted = promote("v1.0.2", mode="--manual")
+    else:
+        promoted = promote("v1.0.2", event="workflow_run")
     assert promoted.returncode == 0, promoted.stderr
     assert "Verified SkillEvaluator 1.0.2 wheel and source distribution on PyPI and DevZone" in promoted.stdout
     assert published_ref() == second
     assert "# SkillEvaluator release: v1.0.2" in git("show", f"{second}:ci/gitlab/stable-tier1.yml")
     assert "already serves v1.0.2" in promote("v1.0.2").stdout
+    missing_package = promote("v1.0.2", mode="--verify-only", index_problem="missing-sdist")
+    assert missing_package.returncode != 0 and published_ref() == second
+    assert "DevZone artifacts are not visible yet" in missing_package.stderr
+    rechecked = promote("v1.0.2", mode="--verify-only")
+    assert rechecked.returncode == 0 and published_ref() == second, rechecked.stderr
+    assert "Verified SkillEvaluator 1.0.2 wheel and source distribution on PyPI and DevZone" in rechecked.stdout
 
     git("checkout", "--detach", first)
     stale = promote("v1.0.1")

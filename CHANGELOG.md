@@ -49,6 +49,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## 1.2.1 - 2026-11-24
 
+- Publish the verified 1.2.1 CI bundle with matching scanner, workflow, and CLI pins.
+
 ### Added
 
 - Add a locked Tier 2 CI container with credential-free build verification and
@@ -172,6 +174,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 token reports reuse per-agent case-name and attempt indexes, avoiding
   repeated whole-dataset scans for truncated Harbor names and per-case totals
   while preserving ambiguous-name handling and stop-on-pass precedence.
+
+- Keep file, check, and severity totals when validation results are merged with
+  member prefixes. Collection file totals include passing and failing members,
+  without double-counting schema findings.
 
 ## 1.2.0 - 2026-11-23
 

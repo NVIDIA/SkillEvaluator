@@ -250,6 +250,12 @@ the verified artifacts, or another maintainer moves the tag after verification
 starts. GitHub and GitLab consumers following the stable channel pick up the
 approved workflow and image on subsequent runs.
 
+For the historical `v1.0.1` bootstrap, if it is still GitHub Latest and
+`stable` does not exist, set `STABLE_BOOTSTRAP_SHA` to the full reviewed
+`main` commit containing the generated workflows and GitLab include, then
+run the command above with `v1.0.1`. The published CI bundle must match
+the bootstrap commit.
+
 ### Automate stable promotion
 
 Publishing a stable release can signal **Promote stable GitHub workflows**.

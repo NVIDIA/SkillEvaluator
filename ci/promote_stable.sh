@@ -11,6 +11,7 @@ gitlab_template=ci/templates/stable/${gitlab##*/}
 event=${GITHUB_EVENT_NAME:-}
 expected_release=${STABLE_EXPECTED_RELEASE:-}
 manual=false
+mode=""
 if (( $# )); then
     if [[ $# != 2 || ($1 != --manual && $1 != --verify-only) ]]; then
         echo "Usage: bash ci/promote_stable.sh {--manual|--verify-only} vX.Y.Z" >&2
@@ -112,7 +113,7 @@ if ! git cat-file -e "$release_commit:$scanner" 2>/dev/null ||
         candidate=${STABLE_BOOTSTRAP_SHA:-}
         if [[ ($manual != true && $event != workflow_dispatch) || ! $candidate =~ ^[0-9a-f]{40}$ ||
               $(git cat-file -t "$candidate" 2>/dev/null) != commit ]]; then
-            echo "Bootstrap v1.0.1 by dispatching this workflow with a reviewed main commit as bootstrap-sha." >&2
+            echo "Bootstrap v1.0.1 with the full reviewed main SHA as STABLE_BOOTSTRAP_SHA locally or bootstrap-sha in Actions." >&2
             exit 1
         fi
     fi
@@ -164,8 +165,10 @@ if [[ $previous_release == "$release" ]]; then
         echo "The existing stable tag for $release points to a different commit." >&2
         exit 1
     fi
-    echo "Stable already serves $release."
-    exit 0
+    if [[ $mode != --verify-only ]]; then
+        echo "Stable already serves $release."
+        exit 0
+    fi
 fi
 
 # Keep the checked manifest and CI archive as the reference for both public indexes.

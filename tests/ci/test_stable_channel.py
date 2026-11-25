@@ -377,6 +377,9 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
         assert blocked.returncode != 0
         assert "bootstrap-sha" in blocked.stderr
         assert not git("ls-remote", "origin", "refs/tags/stable")
+    manual_bootstrap = promote("v1.0.1", mode="--manual")
+    assert manual_bootstrap.returncode != 0
+    assert "STABLE_BOOTSTRAP_SHA" in manual_bootstrap.stderr
     if not existing_github_only:
         pending = promote("v1.0.1", bootstrap_sha=first, index_problem="missing-sdist")
         assert pending.returncode != 0
@@ -434,6 +437,12 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
     assert published_ref() == second
     assert "# SkillEvaluator release: v1.0.2" in git("show", f"{second}:ci/gitlab/stable-tier1.yml")
     assert "already serves v1.0.2" in promote("v1.0.2").stdout
+    missing_package = promote("v1.0.2", mode="--verify-only", index_problem="missing-sdist")
+    assert missing_package.returncode != 0 and published_ref() == second
+    assert "DevZone artifacts are not visible yet" in missing_package.stderr
+    rechecked = promote("v1.0.2", mode="--verify-only")
+    assert rechecked.returncode == 0 and published_ref() == second, rechecked.stderr
+    assert "Verified SkillEvaluator 1.0.2 wheel and source distribution on PyPI and DevZone" in rechecked.stdout
 
     git("checkout", "--detach", first)
     stale = promote("v1.0.1")

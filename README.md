@@ -211,7 +211,7 @@ Choose checks and optional hosted feedback, then review the setup PR.
 | --- | --- | --- |
 | GitHub | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
 | GitLab | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
-| GitHub PR comments without hosting | [Optional comments](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/comment-skill-checks.yml) | Second workflow; complete [comment setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/README.md#pr-comment-setup) |
+| GitHub PR comments without hosting | [Optional comments](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/comment-skill-checks.yml) | [Setup for pinned and stable scans](https://docs.nvidia.com/skills/skillevaluator/github-actions#enable-pr-comments) |
 | GitHub hosted reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/publish-skill-reports.yml) | Second workflow; complete [publisher setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/README.md#one-time-publisher-setup) |
 
 Pick one optional feedback workflow. These run Tier 1 checks without a model

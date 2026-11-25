@@ -15,6 +15,9 @@ needed for manual setup.
 Open a file and use GitHub's **Raw** view to copy its full contents. Workflow
 commits and the container image digest are already pinned. [Full setup](1.2.1/README.md).
 
+For GitHub checks following `@stable`, see
+[Set up stable PR comments](https://docs.nvidia.com/skills/skillevaluator/github-actions#set-up-stable-pr-comments).
+
 ## Download and verification
 
 [Download the current ZIP](1.2.1/skillevaluator-ci-1.2.1.zip). Each version folder

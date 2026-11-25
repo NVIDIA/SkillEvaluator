@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- GitHub stable channel setups can opt into the standard skill check PR comment
+  without GitHub Pages or version pins in the caller workflow. Full reports
+  remain downloadable from the Actions run.
 - Run bounded Tier 1 component scans and Tier 2 overlap checks on supported
   bundles. Reports include component inventory and scan evidence. Saved
   runtime evidence can be rendered again without rerunning the evaluation.

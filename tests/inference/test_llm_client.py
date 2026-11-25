@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
-from skillevaluator.constants import RUBRIC_CRITERIA
+from skillevaluator.constants import CONTENT_DEDUP_LLM_MAX_TOKENS, RUBRIC_CRITERIA
 from skillevaluator.inference import (
     EmptyLLMResponseError,
     FindingVerifier,
@@ -563,6 +563,22 @@ class TestCompletions:
         else:
             assert call_kwargs["max_tokens"] == 0
             assert "max_completion_tokens" not in call_kwargs
+
+    @pytest.mark.parametrize("profile", ["us.openai.gpt-5.5", "us.openai.gpt-6-luna"])
+    def test_bedrock_openai_profiles_raise_explicit_verdict_token_limit(
+        self, monkeypatch: pytest.MonkeyPatch, profile: str
+    ) -> None:
+        _use_provider(monkeypatch, "bedrock", profile)
+        response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Done"))])
+
+        with patch("litellm.completion", return_value=response) as completion:
+            content = LLMClient(max_tokens=CONTENT_DEDUP_LLM_MAX_TOKENS).completions("system", "user")
+
+        assert content == "Done"
+        call_kwargs = completion.call_args.kwargs
+        assert call_kwargs["model"] == f"bedrock/{profile}"
+        assert call_kwargs["max_tokens"] == REASONING_MAX_COMPLETION_TOKENS
+        assert "max_completion_tokens" not in call_kwargs
 
     @pytest.mark.parametrize(("timeout", "expected"), [(None, {}), (5.0, {"timeout": 5.0})])
     def test_bedrock_forwards_only_an_explicit_timeout(

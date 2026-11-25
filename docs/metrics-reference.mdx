@@ -44,6 +44,8 @@ Two things to know before reading further:
 | [Pass-rate difference](#attempt-verdicts-and-passk) | `pass_at_k_lift.json` | −1.0 to +1.0, a difference of two rates | Difference of the two arms' pass rates |
 | [Pass-rate difference, as displayed](#attempt-verdicts-and-passk) | HTML, CLI | −100 to +100 percentage points | The same difference, multiplied by 100 for display |
 | [Skill Lift](#skill-lift) | CLI, HTML, `lift.json` | −1.0 to +1.0, in Overall Score units | With-skill Overall minus baseline Overall |
+| [Paired-case lift interval](#skill-lift) | Lift Uncertainty table, `statistics.json` | −1.0 to +1.0, in Overall Score units | Paired case bootstrap of the per-case lift |
+| [pass^k](#reliability-across-attempts) | Reliability table, `statistics.json` | 0.0–1.0 (shown as a percentage) | Counting cases where every one of the `k` attempts passed |
 | [Uplift in `BENCHMARK.md`](#percentages-and-points-in-benchmarkmd) | `BENCHMARK.md` | percentage points | Difference of the two displayed percentages |
 | [Quality Score](#tier-1-quality-score) | `quality-check`, `validate`, HTML | 0–100 points | Tier 1 static analysis of `SKILL.md` |
 | [Estimated tokens](#tier-1-quality-score) | Tier 1 reports | count, estimated | `len(SKILL.md) // 4`, not a tokenizer |
@@ -378,6 +380,30 @@ pairs. With five or fewer discordant pairs no two-sided exact result can fall
 below 0.05 at all; the report labels that case resolution-limited rather than
 reporting it as evidence of no effect.
 
+## Reliability across attempts
+
+**Measures:** how repeatable a pass is. It is report-only: it appears beside the
+scores, and no score, dimension, verdict, gate or exit code reads it. It is
+written per agent to `<run>/<agent>/statistics.json` under `reliability`, and
+shown in the "Reliability (advisory)" table of the Markdown and HTML reports and
+of the full terminal report (`validate --verbose`, `tier3 evaluate --verbose`)
+when the run made more than one attempt per case and did not stop early.
+With one attempt pass^k equals pass@k, and after an early stop it is `null`, so
+the table is left out. An arm that did not complete has no reliability, so a
+partial number never contradicts the scores the report withholds for that arm.
+
+**pass^k** asks whether *every* one of a case's `k` attempts passed, where pass@k
+asks whether any did. It uses the same attempt verdict as pass@k:
+
+```text
+pass^k = cases where all k attempts passed / total cases
+```
+
+A case that passes one attempt and fails another counts for pass@k and not for
+pass^k, so two runs with the same pass@k can differ in how steady they were.
+With `--stop-on-pass` and `k` above 1, the attempts after the first pass never
+run, so pass^k is `null` rather than a guess.
+
 ## Skill Lift
 
 **Measures:** the signed difference the skill made, in Overall Score units.
@@ -405,15 +431,32 @@ agent runs are noisy at low attempt counts. They color-code the lift as diagnost
 evidence; they do not determine the run's verdict, which comes from the five
 dimensions.
 
-Where paired per-case scores are available, the run also reports an interval for
-the mean paired lift
-([`stats.py`, `paired_case_bootstrap`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/stats.py)):
-whole cases are resampled with replacement from a seeded stream (seed `0`, at
-least 2,000 resamples, 95% confidence), using Hesterberg's expanded percentile
-tails because a plain percentile bootstrap over 5–10 cases is overconfident. It
-is deterministic for a given input: the same results produce the same interval.
-With a single paired case no interval is reported, because a zero-width one
-would look final.
+Where paired per-case scores are available, the run also reports a **paired-case
+lift estimate** and its interval. The estimate gives each case equal weight and
+uses the dimensions both arms can score for that case. The scored Skill Lift
+averages each metric across its shared cases before applying the score policy.
+If a judge fallback changes which metrics can be compared on some cases, the
+two estimates can differ in magnitude and sign, even with equal attempts per
+case.
+
+The bootstrap resamples whole cases with replacement from a seeded stream
+(seed `0`, at least 2,000 resamples, 95% confidence). It uses Hesterberg's
+expanded percentile tails to address overconfidence with 5–10 cases. The same
+results produce the same interval. A single paired case yields a point
+estimate only.
+[`stats.py`, `paired_case_bootstrap`](https://github.com/NVIDIA/SkillEvaluator/blob/main/src/skillevaluator/tier3/harbor/stats.py)
+
+The interval is **report-only**. It is written to `<run>/<agent>/statistics.json`
+under `lift_uncertainty.effectiveness` and shown as the "Lift Uncertainty
+(advisory)" table in the Markdown and HTML reports and in the full terminal
+report (`validate --verbose`, `tier3 evaluate --verbose`). The collector
+withholds it when an arm fails, the skill fails to activate, or an arm's cases
+make different numbers of attempts, as after `--stop-on-pass`. The
+**precision** label is `insufficient` below 5
+paired cases, `low` below 10 paired cases or when the interval is wider than
+0.20, and `adequate` otherwise. `partial` is true when fewer cases were paired
+than expected or an arm did not complete. When the interval includes zero the
+report warns, "Paired-case lift interval includes zero".
 
 Lift needs both arms. With `--skip-baseline` there is no lift to report, and the
 report says `no baseline` rather than `0.00`.
@@ -545,6 +588,12 @@ excluded. The case ids themselves are not in `judge_mixed_cases`; they appear in
 `delta` and `count_derived_delta` are differences of the two arms' `rate`
 values, so they are fractions from −1.0 to +1.0, not percentage points —
 multiply by 100 to get the figure the HTML and CLI print.
+
+**Run statistics** — `<run>/<agent>/statistics.json`:
+`lift_uncertainty.effectiveness` (`estimate`, `ci_low`, `ci_high`, `n_cases`,
+`precision`, `ci_includes_zero`, `partial`) and `reliability.<arm>` (`pass_at_k`,
+`pass_hat_k`, `k`). The same two blocks are on each agent in `result.json` and
+in the report JSON. They are absent from runs made before statistics existed.
 
 **The run configuration that produced them** — `run_config.json` records the
 judge provider and model separately from the agent's, and `result.json` embeds

@@ -12,6 +12,43 @@ All notable changes to SkillEvaluator are documented in this file.
   commands, same-profile embedding reuse, and an index benchmark with pinned
   proxy-corpus inputs. The benchmark validates mutation probes before load and
   tracks acknowledged deletes with unavailable visibility separately.
+- The local-mode run preflight and `doctor --env-mode local` check the
+  installed Claude Code and Codex CLI against the selected models and stop
+  before any trial when one is too old. Use `--agent-model AGENT=MODEL` to
+  choose an older model.
+- Tier 3 results flag a run in which at least 80 percent of trials timed out
+  with no observed model tokens. The console shows a warning, and
+  `result.json` records `model_endpoint_diagnostic`.
+
+### Changed
+
+- Local OpenCode trials carry on after a denied permission request instead of
+  ending the agent's turn: local mode runs OpenCode without
+  `--dangerously-skip-permissions`, so such requests are always rejected.
+
+### Fixed
+
+- `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
+  lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
+- Tier 2 deduplication verdict requests carry the documented output ceiling,
+  16,384 tokens or 32,768 for GPT-5 and GPT-6 reasoning models. Only Anthropic
+  requests sent it. NVIDIA Build, OpenAI, OpenAI-compatible and Bedrock requests
+  sent none, so the provider default set the limit. `doctor --tier 2
+  --verify-models` sends the same ceiling.
+- Bedrock `apac.` and `us-gov.` inference-profile IDs are recognized as the
+  model they name. Claude 4.7 and later on those profiles no longer receive a
+  `temperature` the provider rejects, and the Tier 3 Bedrock refusal fallback
+  keeps the request's geography prefix.
+
+### Documentation
+
+- Added a guide to MCP servers and Docker Compose sidecars that explains where `localhost`,
+  service names and commands resolve in Docker and local runs, and a cookbook for evaluating
+  a CLI skill that needs a short-lived login using the configured provider's default agent.
+  The stdio example in the dataset reference now passes the script as an argument
+  instead of as part of the command.
+- The CLI reference now covers `ci init`, `ci status`, `ci demo` and `--hook-waivers`. A test
+  fails when a visible command or long option is missing from the page.
 
 ## 1.2.1 - 2026-11-24
 
@@ -20,6 +57,15 @@ All notable changes to SkillEvaluator are documented in this file.
 - Add a locked Tier 2 CI container with credential-free build verification and
   opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
   Tier 2 together from the Repository Integration guide.
+- Tier 3 skill runs report an advisory paired-case lift estimate with a 95%
+  bootstrap interval, a precision label and a warning when the interval
+  includes zero. They also show pass^k beside pass@k when a run makes
+  more than one attempt per case. The statistics are written to
+  `<agent>/statistics.json`, added to the report JSON, and shown in the Markdown
+  and HTML reports and the full terminal report of `validate` and
+  `tier3 evaluate --verbose`.
+  The interval is left out when an arm's cases made different numbers of
+  attempts, as after `--stop-on-pass`.
 
 ### Fixed
 
@@ -43,6 +89,24 @@ All notable changes to SkillEvaluator are documented in this file.
   Each step keeps its own verifier output and trajectory after job cleanup,
   including steps completed before a failure. Gym masks configured credential
   values in trajectory text, verifier output, and step failure messages.
+- The bundled create-custom-grader skill now tells agents to run
+  `skillevaluator tier3 validate --harbor-contract`, the only command with that
+  flag, and to write datasets with a top-level `skill_name` and per-case `prompt`.
+  It named `skillevaluator validate --harbor-contract`, which rejects the option,
+  and legacy `question` fields that the agentskills dataset shape rejects.
+- The recorded token usage table in the HTML report now fills the Efficiency
+  Tokens column and the per-measure Change cells and names its accounting source.
+  `token_usage` totals add `efficiency_tokens`, deltas cover every total and the
+  payload carries `source`.
+- `tier3 validate`, the Tier 3 step of `validate` and CI's strict dataset
+  preflight now report an `expected_skill` that is not a string or `null`, a
+  whitespace-only `expected_skill`, and `assertions` or `expected_behavior` that
+  is not a list of strings. A dataset that used `false`, `0` or `[]` for a
+  negative case must now use `null`. Before, `validate` accepted them: a number
+  or list in `expected_skill` failed late with a `TypeError` while tasks were
+  generated, a whitespace-only name was scored as a positive case that never
+  matches, and a string in `assertions` was judged one character at a time
+  unless the run started with `tier3 PATH`.
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
 - The api-caller reference skill keeps a `Content-Type` passed with `--headers`
@@ -50,6 +114,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `application/merge-patch+json` or a JSON:API request
   `application/vnd.api+json`. It was always replaced with `application/json`,
   whatever the header name's case.
+- Bare Hugging Face (`hf_`), npm (`npm_`) and PyPI (`pypi-`) tokens are masked in
+  redacted report and Tier 3 result text, not only after a credential name such
+  as `HF_TOKEN=`.
 
 ## 1.2.0 - 2026-11-23
 

@@ -10,8 +10,9 @@ metric, dimension, overall score, verdict or gate.
 
 - Prompt counters include cached tokens (ATIF ``total_prompt_tokens`` does), so
   cached tokens are a part of the prompt and are never added again.
-  ``total_tokens`` is prompt plus completion, and ``uncached_prompt_tokens`` is
-  prompt minus cached.
+  ``total_tokens`` is prompt plus completion, ``uncached_prompt_tokens`` is
+  prompt minus cached, and ``efficiency_tokens`` is uncached prompt plus
+  completion.
 - Nothing is estimated. An attempt with a missing or invalid counter adds no
   tokens. Its arm's coverage is then ``partial`` (other attempts were measured)
   or ``unavailable`` (none were), and the totals cover only measured attempts.
@@ -25,7 +26,8 @@ metric, dimension, overall score, verdict or gate.
   ``case_id_validation`` names it, so no report shows it as a dataset case.
 - A change (with skill minus baseline) needs complete counts in both arms for
   the same cases and attempts, and both arms must have succeeded: the report
-  withholds the scores of an arm that failed or has no known run status.
+  withholds the scores of an arm that failed or has no known run status. It
+  covers every measure, and its percentage is relative to the baseline total.
 - A sum above 2**53 - 1, the largest integer JSON keeps exact, is not reported.
 
 ``resource_comparison`` keeps its own totals, which need every attempt of an
@@ -43,6 +45,8 @@ from typing import Any
 from skillevaluator.tier3.harbor.resource_usage import _MAX_SAFE_INTEGER, _is_measurement
 
 TOKEN_USAGE_SCHEMA_VERSION = "1"
+#: Where the counters come from: each attempt's ATIF ``final_metrics``, for every agent backend.
+TOKEN_USAGE_SOURCE = "atif_final_metrics"
 TOKEN_MEASURES = (
     "prompt_tokens",
     "cached_tokens",
@@ -50,6 +54,8 @@ TOKEN_MEASURES = (
     "completion_tokens",
     "total_tokens",
 )
+#: ``efficiency_tokens`` is not a counter: it is derived from the sums of the others.
+REPORTED_MEASURES = (*TOKEN_MEASURES, "efficiency_tokens")
 # Loaded agent data keeps, per arm, the attempts whose usage no report trial
 # carries: attempts without a usable reward (``scored`` false) and scored
 # attempts of an arm whose scores are withheld. See ``report_data.load_agent_data``.
@@ -77,7 +83,8 @@ _ACCOUNTING = {
     "prompt_includes_cached": True,
     "total_tokens": "prompt_tokens + completion_tokens",
     "uncached_prompt_tokens": "prompt_tokens - cached_tokens",
-    "change": "with_skill - baseline total_tokens; percent of the baseline total",
+    "efficiency_tokens": "uncached_prompt_tokens + completion_tokens",
+    "change": "with_skill - baseline for every measure; percent of the baseline total_tokens",
 }
 
 
@@ -357,6 +364,7 @@ def _arm_summary(attempts: list[_Attempt], *, expected: int, not_run: bool) -> d
         measured += 1
         for measure in TOKEN_MEASURES:
             totals[measure] += tokens[measure]
+    totals["efficiency_tokens"] = totals["uncached_prompt_tokens"] + totals["completion_tokens"]
     observed = len(attempts)
     # ``total_tokens`` is the largest sum, so it alone can pass the exact JSON range.
     if measured and totals["total_tokens"] > _MAX_SAFE_INTEGER:
@@ -391,11 +399,11 @@ def _combine(summaries: list[dict[str, Any]]) -> dict[str, Any]:
 
     A part whose total is out of the exact JSON range makes the sum out of range too.
     """
-    totals = dict.fromkeys(TOKEN_MEASURES, 0)
+    totals = dict.fromkeys(REPORTED_MEASURES, 0)
     coverage = dict.fromkeys(("expected_attempts", "observed_attempts", "measured_attempts", "unscored_attempts"), 0)
     reasons: set[str] = set()
     for summary in summaries:
-        for measure in TOKEN_MEASURES:
+        for measure in REPORTED_MEASURES:
             totals[measure] += (summary["totals"] or {}).get(measure, 0)
         for key in coverage:
             coverage[key] += summary["coverage"][key]
@@ -423,7 +431,7 @@ def _delta(
     *,
     blockers: list[tuple[str, str]],
 ) -> dict[str, Any]:
-    """Return with skill minus baseline total tokens, or why there is none.
+    """Return with skill minus baseline for every measure, or why there is none.
 
     ``blockers`` are ``(code, sentence)`` pairs found by the caller, such as a
     failed arm or arms that ran different cases.
@@ -463,12 +471,16 @@ def _delta(
             "reason_codes": [code for code, _sentence in reasons],
             "reason": " ".join(sentence for _code, sentence in reasons),
         }
-    difference = with_skill["totals"]["total_tokens"] - baseline["totals"]["total_tokens"]
+    differences = {
+        measure: with_skill["totals"][measure] - baseline["totals"][measure] for measure in REPORTED_MEASURES
+    }
     baseline_total = baseline["totals"]["total_tokens"]
     return {
         "status": "available",
-        "total_tokens": difference,
-        "total_tokens_change_percent": round(difference / baseline_total * 100.0, 2) if baseline_total else None,
+        **differences,
+        "total_tokens_change_percent": (
+            round(differences["total_tokens"] / baseline_total * 100.0, 2) if baseline_total else None
+        ),
         "reason_codes": [] if baseline_total else ["zero_baseline"],
         "reason": None if baseline_total else "The baseline used no tokens, so there is no percentage change.",
     }
@@ -602,6 +614,7 @@ def build_token_usage(
     )
     return {
         "schema_version": TOKEN_USAGE_SCHEMA_VERSION,
+        "source": TOKEN_USAGE_SOURCE,
         "scored": False,
         "accounting": dict(_ACCOUNTING),
         **({"baseline_reused": True} if baseline_reused else {}),

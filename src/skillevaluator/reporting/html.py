@@ -115,6 +115,7 @@ from skillevaluator.reporting.tier3_scope import (
     tolerated_baseline_agents,
     validate_report_scope,
 )
+from skillevaluator.reporting.tier3_statistics import statistics_section
 from skillevaluator.reporting.tier3_token_usage import token_usage_table
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
@@ -4020,6 +4021,7 @@ class HTMLReporter(ReporterBase):
             tier3_token_usage=token_usage_table(
                 tier3_data.get("token_usage") if isinstance(tier3_data, dict) else None
             ),
+            tier3_statistics=statistics_section(tier3_data.get("agents") if isinstance(tier3_data, dict) else None),
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.
             steps_by_case_chart=steps_by_case_chart(

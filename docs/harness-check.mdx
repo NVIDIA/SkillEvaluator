@@ -313,7 +313,8 @@ repeated runs of each harness in which the request sent to the model was
 captured, so most rules describe what the harness did. A few plugin rules follow the
 harness's own documentation where no run covers the case.
 
-Plugin components are covered less evenly than skills. A harness is marked
+The `untested` plugin component outcome described below is available in the
+repository checkout. Plugin components are covered less evenly than skills. A harness is marked
 degraded for a component kind, such as commands or hooks, only when a test on that
 harness showed the components did not reach the model or run. If the test covered
 only one bundle format or one kind of command, the finding says which. Where no
@@ -326,7 +327,7 @@ Harnesses change between releases, so every profile records the release and date
 it was verified against, and `-v` shows them.
 
 - `--harness-version codex=0.170.0` adds a note when you run a release other than the verified one.
-- `--harness-profiles DIR` uses your own profile YAML files, so you can try changed profiles without waiting for a release. A profile written for a newer release can name facts or outcomes this release doesn't know; the check then stops with an error that says which.
+- `--harness-profiles DIR` uses your own profile YAML files, so you can try changed profiles without waiting for a release. In the repository checkout, the check names any unsupported plugin component outcome or missing top-level fact read while evaluating a plugin rule.
 
 ## Match your setup
 

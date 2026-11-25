@@ -509,6 +509,36 @@ def test_profile_that_names_an_unknown_fact_or_outcome_is_a_clear_error(tmp_path
         evaluate_plugin(newer_outcome, facts)
 
 
+@pytest.mark.parametrize("outcome", ["not_an_outcome", ["delivered"]])
+def test_invalid_profile_outcome_is_reported_even_if_plugin_is_not_loaded(tmp_path: Path, outcome):
+    facts = plugin_facts(_plugin(tmp_path / "p", ".codex-plugin/plugin.json", components=()))
+    profile = _profile_copy()
+    assert evaluate_plugin(profile, facts).status == "not_loaded"
+    profile["plugin"]["components"]["mcp"] = outcome
+    with pytest.raises(ValueError, match="unknown plugin component outcome"):
+        evaluate_plugin(profile, facts)
+
+
+def test_plugin_only_profile_can_report_an_untested_component(tmp_path: Path):
+    facts = plugin_facts(_plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=("mcp",)))
+    profile = _profile_copy()
+    profile["rules"] = []
+    profile["plugin"]["components"]["mcp"] = "untested"
+    result = evaluate_plugin(profile, facts)
+    assert result.status == "loads"
+    assert any(finding["outcome"] == "untested" for finding in result.findings)
+
+
+def test_incompatible_profile_comparison_names_the_rule(tmp_path: Path):
+    facts = plugin_facts(_plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=("mcp",)))
+    profile = _profile_copy()
+    profile["plugin"]["rules"].append(
+        {"id": "CC-PLUGIN-NEW", "when": "components.not_a_kind > 0", "effect": "advisory", "message": "m"}
+    )
+    with pytest.raises(ValueError, match="cannot evaluate rule CC-PLUGIN-NEW"):
+        evaluate_plugin(profile, facts)
+
+
 def test_harness_check_reports_a_profile_it_cannot_read_as_a_usage_error(tmp_path: Path):
     root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=("skills", "mcp"))
     profiles = tmp_path / "profiles"

@@ -134,9 +134,13 @@ def evaluate_plugin(
     """Apply a profile's plugin rules, then add a finding for each component kind the harness does not
     deliver or was not tested with.
 
-    Raises ``ValueError`` when the profile names a fact or a component outcome this version does not know.
+    Raises ``ValueError`` for an unknown component outcome or a missing fact read during rule evaluation.
     """
     section = profile.get("plugin") or {}
+    components = section.get("components") or {}
+    for outcome in components.values():
+        if not isinstance(outcome, str) or outcome not in OUTCOME_EFFECT:
+            raise ValueError(f"{profile['harness']} profile: unknown plugin component outcome {outcome!r}")
     findings: list[dict[str, str]] = []
     worst = -1
     for rule in section.get("rules", []):
@@ -146,6 +150,8 @@ def evaluate_plugin(
             raise ValueError(
                 f"{profile['harness']} profile: rule {rule['id']} reads the fact {exc}, which this version does not provide"
             ) from exc
+        except (AttributeError, TypeError) as exc:
+            raise ValueError(f"{profile['harness']} profile: cannot evaluate rule {rule['id']}: {exc}") from exc
         if not fires:
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
@@ -155,14 +161,13 @@ def evaluate_plugin(
         findings.append(finding)
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
     if worst < 2:
-        for kind, outcome in (section.get("components") or {}).items():
-            if outcome not in OUTCOME_EFFECT:
-                raise ValueError(f"{profile['harness']} profile: unknown plugin component outcome {outcome!r}")
+        first = (profile.get("rules") or section.get("rules") or [{"id": profile["harness"]}])[0]
+        prefix = str(first["id"]).split("-")[0]
+        for kind, outcome in components.items():
             n = facts["components"].get(kind, 0)
             effect = OUTCOME_EFFECT[outcome]
             if not n or effect is None or any(f["id"].endswith(f"-{kind.upper()}") for f in findings):
                 continue
-            prefix = str(profile["rules"][0]["id"]).split("-")[0]
             finding = {
                 "id": f"{prefix}-PLUGIN-{kind.upper()}",
                 "effect": effect,
@@ -174,7 +179,6 @@ def evaluate_plugin(
             findings.append(finding)
             worst = max(worst, _EFFECT_RANK[effect])
         if facts.get("any_manifest") and not facts["declares_components"] and not any(facts["components"].values()):
-            prefix = str(profile["rules"][0]["id"]).split("-")[0]
             findings.append(
                 {
                     "id": f"{prefix}-PLUGIN-NO-COMPONENTS",

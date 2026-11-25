@@ -12,8 +12,8 @@ All notable changes to SkillEvaluator are documented in this file.
   CLI LSP findings, and Hermes component findings for native plugins. New rules
   say what was tested: `CX-PLUGIN-COMMANDS`, `CP-PLUGIN-LSP`,
   `HM-PLUGIN-COMMANDS`, `HM-PLUGIN-AGENTS`, `HM-PLUGIN-HOOKS`, `HM-PLUGIN-MCP`.
-  A profile passed with `--harness-profiles` that names a fact or outcome this
-  release doesn't know now stops with a clear error.
+  Custom plugin profiles report a clear error for an unsupported component
+  outcome or a missing top-level fact read during rule evaluation.
 
 ## 1.2.1 - 2026-11-24
 

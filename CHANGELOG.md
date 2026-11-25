@@ -39,6 +39,11 @@ All notable changes to SkillEvaluator are documented in this file.
   CLI LSP findings, and Hermes component findings for native plugins. New rules
   say what was tested: `CX-PLUGIN-COMMANDS`, `CP-PLUGIN-LSP`,
   `HM-PLUGIN-COMMANDS`, `HM-PLUGIN-AGENTS`, `HM-PLUGIN-HOOKS`, `HM-PLUGIN-MCP`.
+  Hermes uses native component findings when a bundle contains both `plugin.yaml`
+  and a portable manifest. A malformed native manifest reports `not_loaded`.
+  Portable MCP now produces a `disputed` note instead
+  of degrading the Hermes row. The confidence for `CX-PLUGIN-NAMESPACE`,
+  `CP-PLUGIN-MCP-NAMES` and `HM-PLUGIN-DISABLED` is now medium.
   Custom plugin profiles report a clear error for an unsupported component
   outcome or a missing top-level fact read during rule evaluation.
 

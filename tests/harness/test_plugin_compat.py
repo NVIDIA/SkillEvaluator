@@ -437,6 +437,38 @@ def test_hermes_component_findings_are_scoped_to_portable_packages(tmp_path: Pat
     assert _plugin_findings(only_mcp, "hermes")[0] == "loads"
 
 
+def test_hermes_prefers_native_manifest_over_portable_manifest(tmp_path: Path):
+    kinds = ("commands", "agents", "hooks", "mcp", "lsp")
+    mixed = _bundle(tmp_path / "mixed", ("agent", "plugin.yaml"), kinds)
+    native = _bundle(tmp_path / "native", ("plugin.yaml",), kinds)
+
+    status, findings = _plugin_findings(mixed, "hermes")
+    assert status == "loads"
+    assert (status, findings) == _plugin_findings(native, "hermes")
+    assert "HM-PLUGIN-DISABLED" not in findings
+    assert {finding["outcome"] for finding in findings.values()} == {"untested"}
+
+
+@pytest.mark.parametrize("manifest", ["name: [\n", "- not a mapping\n"], ids=["syntax-error", "non-mapping"])
+def test_hermes_rejects_invalid_native_manifest_without_portable_fallback(tmp_path: Path, manifest: str):
+    mixed = _bundle(tmp_path / "mixed", ("agent", "plugin.yaml"), ("commands",))
+    (mixed / "plugin.yaml").write_text(manifest, encoding="utf-8")
+    assert _status(mixed)["hermes"] == ("not_loaded", ["HM-PLUGIN-NATIVE-MANIFEST-INVALID"])
+
+
+def test_hermes_reports_native_manifest_over_read_limit_as_unchecked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from skillevaluator.harness import plugin
+
+    mixed = _bundle(tmp_path / "mixed", ("agent", "plugin.yaml"), ("commands",))
+    monkeypatch.setattr(plugin, "PLUGIN_CONFIG_MAX_BYTES", 8)
+    status, findings = _plugin_findings(mixed, "hermes")
+
+    assert status == "degraded"
+    assert "HM-PLUGIN-NATIVE-MANIFEST-UNCHECKED" in findings
+    assert "HM-PLUGIN-DISABLED" not in findings
+    assert findings["HM-PLUGIN-COMMANDS"]["outcome"] == "untested"
+
+
 def test_copilot_lsp_note_says_the_file_is_not_a_documented_place(tmp_path: Path):
     root = _bundle(tmp_path / "c", (".claude-plugin/plugin.json",), ("lsp",))
     status, findings = _plugin_findings(root, "copilot-cli")

@@ -15,7 +15,9 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.constants import PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule, version_finding
+from skillevaluator.utils.structured_data import StructuredDataLimitError, StructuredDataSyntaxError, load_bounded_yaml
 
 MANIFESTS = {
     "claude": ".claude-plugin/plugin.json",
@@ -93,6 +95,22 @@ def _json_keys(path: Path, key: str | None = None) -> int:
     return len(section) if isinstance(section, (dict, list)) else 1
 
 
+def _hermes_manifest_status(path: Path) -> str:
+    """Check the native manifest without treating local parser limits as a loader rejection."""
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(PLUGIN_CONFIG_MAX_BYTES + 1)
+        if len(raw) > PLUGIN_CONFIG_MAX_BYTES:
+            return "unchecked"
+        data = load_bounded_yaml(raw.decode("utf-8-sig"))
+    except (OSError, StructuredDataLimitError):
+        return "unchecked"
+    except (UnicodeDecodeError, StructuredDataSyntaxError):
+        return "invalid"
+    # Hermes treats an empty document as a mapping with default fields.
+    return "valid" if isinstance(data or {}, dict) else "invalid"
+
+
 def is_plugin_root(path: Path) -> bool:
     return any((path / rel).is_file() for rel in MANIFESTS.values())
 
@@ -121,6 +139,9 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             )
     facts["fmt_copilot"] = facts["fmt_copilot"] or facts.pop("fmt_copilot_alt")
     facts.setdefault("fmt_agent_v1", False)
+    facts["hermes_manifest_status"] = (
+        _hermes_manifest_status(root / MANIFESTS["hermes_native"]) if facts["fmt_hermes_native"] else "absent"
+    )
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}

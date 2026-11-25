@@ -19,6 +19,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Tier 1 plugin reports label the validator `Plugin Schema & Component Checks` and
+  use `manifest_missing_or_unsafe` for absent or unsafe manifests. Manifest schema
+  validation runs even when `--checks` selects other checks. Auto-detection
+  recognizes `.codex-plugin/plugin.json`, `.cursor-plugin/plugin.json`,
+  `openclaw.plugin.json`, and root `plugin.json` files that declare the Agent
+  Plugins schema.
 - Local OpenCode trials carry on after a denied permission request instead of
   ending the agent's turn: local mode runs OpenCode without
   `--dangerously-skip-permissions`, so such requests are always rejected.

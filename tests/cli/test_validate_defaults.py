@@ -176,9 +176,9 @@ def test_validate_bundle_manifest_runs_static_and_dedup_checks_and_reports_inven
 
     assert result.exit_code == 0, result.output
     assert seen == [(manifest, {"content_type": "plugin", "max_chunks": 9, "max_scalar_comparisons": None})]
-    document = json.loads(next(output_dir.glob("*.json")).read_text())
+    document = json.loads(next(output_dir.glob("*.json")).read_text(encoding="utf-8"))
     assert document["plugin_static"]["name"] == "sample-bundle"
-    assert "sample-bundle" in next(output_dir.glob("*.html")).read_text()
+    assert "sample-bundle" in next(output_dir.glob("*.html")).read_text(encoding="utf-8")
 
 
 def test_quiet_bundle_check_progress_includes_optional_checks(monkeypatch, tmp_path):

@@ -280,10 +280,10 @@ def test_public_static_file_report_includes_opt_in_evidence(tmp_path):
     reporter = JSONReporter(include_timestamp=False)
     output_path = tmp_path / "report.json"
     reporter.save(results, output_path)
-    assert output_path.read_text() == reporter.render_all(results)
+    assert output_path.read_text(encoding="utf-8") == reporter.render_all(results)
 
     reporter.save(results, output_path, plugin_static=True)
-    document = json.loads(output_path.read_text())
+    document = json.loads(output_path.read_text(encoding="utf-8"))
     assert document.pop("plugin_static")["name"] == "report-demo"
     assert document == json.loads(reporter.render_all(results))
 
@@ -306,13 +306,13 @@ def test_emit_reports_adds_static_evidence_only_for_plugin_scans(tmp_path):
     emit_reports(
         results, report_formats=("json", "html"), output_dir=tmp_path, basename="plugin", content_label="Plugin"
     )
-    evidence = json.loads((tmp_path / "plugin.json").read_text())["plugin_static"]
+    evidence = json.loads((tmp_path / "plugin.json").read_text(encoding="utf-8"))["plugin_static"]
     assert evidence["name"] == "report-demo"
     assert any(section["key"] == "catalog_skills" for section in evidence["sections"])
-    assert 'id="plugin-static-evidence"' in (tmp_path / "plugin.html").read_text()
+    assert 'id="plugin-static-evidence"' in (tmp_path / "plugin.html").read_text(encoding="utf-8")
 
     emit_reports(results, report_formats=("json",), output_dir=tmp_path, basename="skill")
-    assert "plugin_static" not in json.loads((tmp_path / "skill.json").read_text())
+    assert "plugin_static" not in json.loads((tmp_path / "skill.json").read_text(encoding="utf-8"))
 
 
 def test_emit_reports_preserves_all_catalog_targets_without_a_static_scan(tmp_path):
@@ -326,7 +326,7 @@ def test_emit_reports_preserves_all_catalog_targets_without_a_static_scan(tmp_pa
     stamp_publication_evidence(results, tier=2, check_id="similarity")
 
     emit_reports(results, report_formats=("json",), output_dir=tmp_path, basename="catalog", content_label="Plugin")
-    report = json.loads((tmp_path / "catalog.json").read_text())
+    report = json.loads((tmp_path / "catalog.json").read_text(encoding="utf-8"))
     assert "plugin_static" not in report
     assert [result["plugin_catalog_target"]["path"] for result in report["results"]] == ["one", "two"]
 

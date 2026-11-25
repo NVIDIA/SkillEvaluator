@@ -1982,6 +1982,46 @@ def test_validate_catalog_workers_runs_skills_in_parallel() -> None:
         assert any(Path("out/simple2").glob("*.html"))
 
 
+@pytest.mark.parametrize("workers", [1, 2], ids=["serial", "parallel"])
+def test_catalog_workers_keep_the_discovered_skill_type(tmp_path: Path, workers: int) -> None:
+    catalog = tmp_path / "catalog"
+    skill = catalog / "simple"
+    shutil.copytree(FIXTURE, skill)
+    manifest = skill / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{invalid json", encoding="utf-8")
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(catalog),
+            "--workers",
+            str(workers),
+            "--tiers",
+            "1",
+            "--no-llm",
+            "--checks",
+            "schema",
+            "-r",
+            "json",
+            "-o",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    summary = json.loads((output_dir / "catalog-summary.json").read_text(encoding="utf-8"))
+    (entry,) = summary["skills"]
+    assert entry["name"] == skill.name
+    assert entry["passed"] is True
+    report = json.loads((output_dir / skill.name / entry["json_report"]).read_text(encoding="utf-8"))
+    assert [(row["validator"], row["passed"]) for row in report["results"]] == [
+        ("Schema & Repository Governance", True),
+    ]
+
+
 _EVALUATED_REPOSITORY = "NVIDIA/NVFlare"
 _EVALUATED_COMMIT = "2263a2ebdab903e87f7e7c0a001d22c3a926a9cf"
 _EVALUATOR_CONTAINER = "ghcr.io/nvidia/skillevaluator@sha256:" + "0117bc2e" * 8
@@ -2068,7 +2108,7 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
     not_forwarded = {
         "catalog_root": "each child is given the folder it was found in, not the parent's own value",
         "target_path": "the child is given one skill directory, not the catalog root",
-        "content_type": "the child re-detects the type of the single skill it is handed",
+        "content_type": "each child is given the skill type selected by catalog discovery",
         "workers": "forwarding it would make each child fan out again",
         "output_dir": "each child is given its own per-skill output directory",
         "repo_root": "component resolution applies to a bundle target",

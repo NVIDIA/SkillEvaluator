@@ -3,13 +3,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import click
 
 
 def build_report_plugin_command(
-    *, report_options, console, command_class: type[click.Command] = click.Command, context_settings=None
+    *,
+    report_options,
+    console,
+    resolve_output_dir: Callable[[Path, Path], Path],
+    command_class: type[click.Command] = click.Command,
+    context_settings=None,
 ) -> click.Command:
     """Build the saved report command with the shared report options."""
 
@@ -38,9 +44,14 @@ def build_report_plugin_command(
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
 
+        if any(name != "cli" for name in report_formats):
+            output_dir = resolve_output_dir(run_dir.resolve(), output_dir)
+
         result = ValidationResult(validator_name="Retained runtime evidence")
         result.mark_scan_incomplete("saved-score-summary-unavailable")
-        result.add_message("Replay shows saved observations. Canonical scores and publication eligibility are unavailable.")
+        result.add_message(
+            "Replay shows saved observations. Canonical scores and publication eligibility are unavailable."
+        )
         result.metadata["plugin_runtime_report"] = payload
         results = [result]
 

@@ -1475,7 +1475,7 @@ def _catalog_child_argv_from_ctx(
 ) -> list[str]:
     """Rebuild ``validate`` argv from the active Click context (pytest-safe)."""
     params = ctx.params
-    argv: list[str] = ["validate", str(skill_dir)]
+    argv: list[str] = ["validate", str(skill_dir), "--type", "skill"]
 
     if params.get("verbose"):
         argv.append("--verbose")
@@ -5134,6 +5134,7 @@ tier3.add_command(
     build_report_plugin_command(
         report_options=_report_options,
         console=console,
+        resolve_output_dir=_resolve_report_output_location,
         command_class=tier3.command_class,
         context_settings=CONTEXT_SETTINGS,
     )

@@ -292,7 +292,7 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 
 The [evaluated source provenance](#evaluated-source-provenance) flags also appear in this panel.
 
-Auto-detection recognizes `SKILL.md` for skills, `.mdc` files for rules, and `workflow-rules.mdc` for workflows. For plugins it recognizes `agent_plugin.yaml` or `.yml`, `.claude-plugin/plugin.json`, a root `plugin.json` that declares the Agent Plugins schema, `.codex-plugin/plugin.json`, `.cursor-plugin/plugin.json`, and `openclaw.plugin.json`. A recognized manifest takes precedence over bundled skills. You can pass the root or a manifest file. Tier 1 checks the component inventory, runs the selected scans, and applies applicable quality, lint, and version checks to bundled skills. CLI, JSON, and HTML reports include the inventory.
+Auto-detection recognizes `SKILL.md` for skills, `.mdc` files for rules, and `workflow-rules.mdc` for workflows. For plugins it recognizes `agent_plugin.yaml` or `.yml`, `.claude-plugin/plugin.json`, a root `plugin.json` that declares the Agent Plugins schema, `.codex-plugin/plugin.json`, `.cursor-plugin/plugin.json`, and `openclaw.plugin.json`. A recognized manifest takes precedence over bundled skills. If a supported plugin manifest path holds a dangling link or a special file, auto-detection runs plugin manifest checks and reports the unsafe path. This includes a root `plugin.json` whose schema cannot be checked safely. You can pass the root or a manifest file. Tier 1 always checks the manifest schema and component inventory, even when `--checks` selects other checks. It runs the selected scans and applies applicable quality, lint, and version checks to bundled skills. CLI, JSON, and HTML reports include the inventory.
 
 ```bash title="Check a bundle and save its component report"
 skillevaluator validate ./my-plugin --tiers 1 -r cli,json,html
@@ -805,7 +805,7 @@ skillevaluator tier3 report-plugin ./saved-run -r cli,json,html -o ./replayed-re
 | Option | Default | Effect |
 | --- | --- | --- |
 | `-r, --report FORMAT` | `cli` | Accepts `cli`, `json`, `html`, `markdown`, `sarif`, and `benchmark`. Separate formats with commas or spaces, or repeat the option. File reports use `plugin-report` as the basename. The benchmark card is `BENCHMARK.md`. |
-| `-o, --output-dir DIRECTORY` | `reports` | Destination for file reports. |
+| `-o, --output-dir DIRECTORY` | `reports` | Destination for file reports, outside the saved run directory. If the default directory would be inside the saved run, file reports go to a sibling directory named `<run-name>-reports`. |
 
 ## tier3 history
 

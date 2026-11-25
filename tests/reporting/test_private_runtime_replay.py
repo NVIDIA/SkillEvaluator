@@ -42,10 +42,41 @@ def test_replay_command_writes_reports_from_snapshot_alone(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Plugin runtime evidence" in result.output
-    output = json.loads((output_dir / "plugin-report.json").read_text())
+    output = json.loads((output_dir / "plugin-report.json").read_text(encoding="utf-8"))
     assert output["plugin_runtime"]["name"] == "fixture"
-    assert (output_dir / "BENCHMARK.md").read_text().startswith("# Plugin Benchmark: fixture")
+    assert (output_dir / "BENCHMARK.md").read_text(encoding="utf-8").startswith("# Plugin Benchmark: fixture")
     assert sorted(path.name for path in run_dir.iterdir()) == ["plugin_runtime_report.json"]
+
+
+@pytest.mark.parametrize(("report_format", "output_subdir"), [("json", "."), ("benchmark", "reports")])
+def test_replay_command_refuses_explicit_output_inside_saved_run(tmp_path, report_format, output_subdir):
+    from skillevaluator.cli import cli
+
+    report = api().project_plugin_runtime(sample())
+    io_api().save_plugin_runtime_report(report, tmp_path)
+    output_dir = tmp_path / output_subdir
+    result = CliRunner().invoke(
+        cli, ["tier3", "report-plugin", str(tmp_path), "-r", report_format, "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["plugin_runtime_report.json"]
+
+
+def test_replay_command_relocates_default_output_outside_saved_run(tmp_path, monkeypatch):
+    from skillevaluator.cli import cli
+
+    run_dir = tmp_path / "saved-run"
+    run_dir.mkdir()
+    report = api().project_plugin_runtime(sample())
+    io_api().save_plugin_runtime_report(report, run_dir)
+    monkeypatch.chdir(run_dir)
+
+    result = CliRunner().invoke(cli, ["tier3", "report-plugin", ".", "-r", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert sorted(path.name for path in run_dir.iterdir()) == ["plugin_runtime_report.json"]
+    assert (tmp_path / "saved-run-reports" / "plugin-report.json").is_file()
 
 
 def test_replay_command_reports_missing_snapshot_without_writing_files(tmp_path):

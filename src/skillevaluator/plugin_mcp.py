@@ -176,6 +176,11 @@ def has_mcp_endpoint(config: Any) -> bool:
     )
 
 
+def flat_mcp_endpoints(data: dict[str, Any]) -> dict[str, Any]:
+    """Extract endpoint declarations from a bare MCP server map for compatibility counts."""
+    return {name: entry for name, entry in data.items() if name != "$schema" and has_mcp_endpoint(entry)}
+
+
 def mcp_pinning_summary(declarations: Iterable[McpDeclaration]) -> dict[str, Any]:
     """C1 ``mcp.pinning`` / C2 ``mcp_pinning`` of ``declarations`` (see :func:`summarize_pinning`)."""
     return summarize_pinning(declaration.pinning() for declaration in declarations)
@@ -211,6 +216,7 @@ def collect_mcp_declarations(
     allowed_private_hosts: Iterable[str] = (),
     validate_servers: bool = True,
     profile: FormatProfile = CLAUDE_PROFILE,
+    allow_partial_flat_defaults: bool = False,
 ) -> McpCollection:
     """Collect every MCP server a plugin declares, in Claude Code load order.
 
@@ -230,6 +236,9 @@ def collect_mcp_declarations(
     Findings cover config-source problems (escapes, absolute paths, symlinks,
     missing/oversize/invalid files, duplicate names) and, when
     ``validate_servers`` is set, the per-server static checks.
+    Compatibility counts can set ``allow_partial_flat_defaults`` to retain
+    recognizable endpoints from a flat default file that also contains metadata
+    or invalid entries.
     """
     collection = McpCollection()
     manifest = manifest if isinstance(manifest, dict) else None
@@ -243,7 +252,14 @@ def collect_mcp_declarations(
     #    only when it keeps the declared value).
     if not (contained and declared_value_replaces_default(profile, "mcpServers", declared)):
         _collect_default_files(
-            reader, collection, entries, manifest_rel, profile, declared=declared, contained=contained
+            reader,
+            collection,
+            entries,
+            manifest_rel,
+            profile,
+            declared=declared,
+            contained=contained,
+            allow_partial_flat=allow_partial_flat_defaults,
         )
 
     # 2. Declared shapes in order.
@@ -251,7 +267,15 @@ def collect_mcp_declarations(
         if isinstance(entry, dict):
             _collect_inline_map(reader, collection, entry, manifest_rel)
         elif isinstance(entry, str):
-            _collect_path_ref(reader, collection, entry, manifest_rel, profile, contained=contained)
+            _collect_path_ref(
+                reader,
+                collection,
+                entry,
+                manifest_rel,
+                profile,
+                contained=contained,
+                allow_partial_flat_defaults=allow_partial_flat_defaults,
+            )
         else:
             collection.findings.append(
                 _plugin_finding(
@@ -367,6 +391,7 @@ def _collect_default_files(
     *,
     declared: Any,
     contained: bool,
+    allow_partial_flat: bool,
 ) -> None:
     """The format's default MCP files at the root, unless a declared path names one (then it loads as declared).
 
@@ -386,7 +411,14 @@ def _collect_default_files(
             continue
         kind = reader.kind(default_rel)
         if kind == "file":
-            _load_mcp_file(reader, collection, default_rel, "mcp_json", default_rel.as_posix())
+            _load_mcp_file(
+                reader,
+                collection,
+                default_rel,
+                "mcp_json",
+                default_rel.as_posix(),
+                allow_partial_flat=allow_partial_flat,
+            )
             if contained and declared is not None and "mcpServers" in profile.merged_default_fields:
                 collection.findings.append(_merged_default_mcp_note(reader, default_rel, profile))
         elif kind in {"link", "special"}:
@@ -782,6 +814,7 @@ def _collect_path_ref(
     profile: FormatProfile = CLAUDE_PROFILE,
     *,
     contained: bool = True,
+    allow_partial_flat_defaults: bool = False,
 ) -> None:
     """Collect one ``mcpServers`` string: a remote bundle URL, a ``.json`` config file, or a bundle file.
 
@@ -870,7 +903,14 @@ def _collect_path_ref(
             )
         )
         return
-    _load_mcp_file(reader, collection, rel, "path_ref", shown)
+    _load_mcp_file(
+        reader,
+        collection,
+        rel,
+        "path_ref",
+        shown,
+        allow_partial_flat=allow_partial_flat_defaults and path in profile.default_mcp_files,
+    )
 
 
 def _collect_url_ref(reader: PluginRootReader, collection: McpCollection, raw: str, manifest_rel: str) -> None:
@@ -923,7 +963,13 @@ def _collect_url_ref(reader: PluginRootReader, collection: McpCollection, raw: s
 
 
 def _load_mcp_file(
-    reader: PluginRootReader, collection: McpCollection, rel: PurePosixPath, source: McpSource, raw: str
+    reader: PluginRootReader,
+    collection: McpCollection,
+    rel: PurePosixPath,
+    source: McpSource,
+    raw: str,
+    *,
+    allow_partial_flat: bool = False,
 ) -> None:
     """Collect the servers of one MCP config file; a file that cannot be used is a broken source.
 
@@ -1002,6 +1048,8 @@ def _load_mcp_file(
                 'Use {"mcpServers": {"<name>": {"command"|"url": ...}}}.',
             )
             return
+    elif isinstance(data, dict) and allow_partial_flat:
+        servers = flat_mcp_endpoints(data)
     elif isinstance(data, dict) and all(isinstance(value, dict) for value in data.values()):
         # Documented bare form: servers at the top level without the wrapper.
         servers = data

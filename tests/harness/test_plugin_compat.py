@@ -348,6 +348,40 @@ def test_flat_mcp_count_requires_a_nonempty_string_endpoint(tmp_path: Path):
     assert claude["message"].startswith("1 mcp:")
 
 
+@pytest.mark.parametrize(
+    ("default_file", "expected"),
+    [
+        (None, 1),
+        ({}, 1),
+        ({"$schema": "https://example.invalid/schema.json", "db": {"command": "demo"}}, 2),
+        ({"noise": None, "db": {"command": "demo"}}, 2),
+        ({"mcpServers": {"db": {"command": "demo"}}}, 2),
+    ],
+    ids=["manifest-only", "empty-default", "schema-metadata", "invalid-entry", "wrapped-default"],
+)
+def test_claude_mcp_manifest_merges_with_any_default_shape(tmp_path: Path, default_file: dict | None, expected: int):
+    manifest = {"name": "demo", "mcpServers": {"search": {"url": "https://example.invalid/mcp"}}}
+    root = _bare_manifest(tmp_path / "p", data=manifest)
+    if default_file is not None:
+        (root / ".mcp.json").write_text(json.dumps(default_file))
+    finding = next((f for f in _component_rows(root)["claude-code"] if f["id"] == "CC-PLUGIN-MCP"), None)
+    assert finding is not None
+    assert finding["message"].startswith(f"{expected} mcp:")
+
+
+def test_claude_mcp_manifest_can_explicitly_name_flat_default_file(tmp_path: Path):
+    manifest = {
+        "name": "demo",
+        "mcpServers": ["./.mcp.json", {"search": {"url": "https://example.invalid/mcp"}}],
+    }
+    root = _bare_manifest(tmp_path / "p", data=manifest)
+    (root / ".mcp.json").write_text(
+        json.dumps({"$schema": "https://example.invalid/schema.json", "db": {"command": "demo"}})
+    )
+    finding = next(f for f in _component_rows(root)["claude-code"] if f["id"] == "CC-PLUGIN-MCP")
+    assert finding["message"].startswith("2 mcp:")
+
+
 def test_invalid_flat_mcp_does_not_count_a_different_formats_file(tmp_path: Path):
     root = _bare_manifest(tmp_path / "p")
     (root / ".mcp.json").write_text(json.dumps({"invalid": {"command": ""}}))

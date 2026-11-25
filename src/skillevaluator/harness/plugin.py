@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule, version_finding
-from skillevaluator.plugin_mcp import collect_mcp_declarations, has_mcp_endpoint
+from skillevaluator.plugin_mcp import collect_mcp_declarations, flat_mcp_endpoints, has_mcp_endpoint
 from skillevaluator.plugin_paths import PluginRootReader
 
 MANIFESTS = {
@@ -123,7 +123,7 @@ def _flat_mcp_servers(root: Path) -> int | None:
         return None
     if not isinstance(data, dict) or "mcpServers" in data:
         return None
-    return sum(has_mcp_endpoint(entry) for name, entry in data.items() if name != "$schema")
+    return len(flat_mcp_endpoints(data))
 
 
 def _is_doc(name: str) -> bool:
@@ -174,7 +174,7 @@ def plugin_facts(root: Path) -> dict[str, Any]:
 
     ``declares_components`` says a manifest has a key beyond the descriptive ones, or is not an object.
     ``mcp_flat`` counts servers a ``.mcp.json`` names without the ``mcpServers`` wrapper, and
-    ``mcp_claude`` includes any servers brought in by Claude Code's manifest when that flat file exists.
+    ``mcp_claude`` counts merged servers when the manifest declares MCP or the default file is flat.
     ``other_files`` says the folder holds something besides manifests and documentation.
     """
     facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
@@ -209,16 +209,17 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["mcp_flat"] = flat_count or 0
     if flat_count is not None:
         facts["mcp_claude"] = flat_count
-        if claude_manifest and claude_manifest.get("mcpServers"):
-            # Claude Code merges declared configurations with its default .mcp.json by server name.
-            mcp = collect_mcp_declarations(
-                PluginRootReader(root),
-                claude_manifest,
-                contained=True,
-                manifest_rel=MANIFESTS["claude"],
-                validate_servers=False,
-            )
-            facts["mcp_claude"] = sum(has_mcp_endpoint(declaration.config) for declaration in mcp.effective)
+    if claude_manifest and claude_manifest.get("mcpServers"):
+        # Claude Code merges declared configurations with its default .mcp.json by server name.
+        mcp = collect_mcp_declarations(
+            PluginRootReader(root),
+            claude_manifest,
+            contained=True,
+            manifest_rel=MANIFESTS["claude"],
+            validate_servers=False,
+            allow_partial_flat_defaults=True,
+        )
+        facts["mcp_claude"] = sum(has_mcp_endpoint(declaration.config) for declaration in mcp.effective)
     facts["other_files"] = _has_other_files(root)
     facts["max_skill_bytes"] = max(_skill_sizes(root).values(), default=0)
     return facts

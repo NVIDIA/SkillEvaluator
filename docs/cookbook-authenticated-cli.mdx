@@ -1,0 +1,189 @@
+---
+title: "Cookbook: Evaluate a CLI Skill That Needs Login"
+description: "Evaluate a skill that drives a command-line tool behind a login, using a credential-free image, a short-lived token and a with-skill-only run."
+---
+
+Some skills drive a command-line tool that talks to an account-backed service.
+A trial can only exercise such a skill if the tool is installed and logged in
+before the agent starts. This recipe shows one way to do that without baking a
+credential into an image or a dataset. `service-cli` stands for your own tool;
+replace its install and commands with the real ones.
+
+## Lay out the skill
+
+```text
+svc-cli/
+├── SKILL.md
+└── evals/
+    ├── evals.json
+    ├── config.yml
+    └── environment/
+        └── Dockerfile
+```
+
+`SKILL.md` tells the agent to use the already logged-in tool for read-only
+questions and never to log in itself. The rest of this page covers `evals/`.
+
+## Build an image without credentials
+
+```dockerfile title="svc-cli/evals/environment/Dockerfile"
+FROM python:3.12-slim
+
+# procps: agent setup runs pgrep in custom images.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Replace with your CLI's real, version-pinned install. Never bake a token into the image.
+RUN pip install --no-cache-dir service-cli==1.4.2
+```
+
+The first non-comment line must be `FROM`, and the build context is
+`evals/environment/`. A custom Dockerfile keeps its own base image, so it
+installs `procps` itself; see
+[Dataset Format and Policy](/skills/skillevaluator/eval-datasets#fixtures-and-custom-environments).
+Pin the tool's version so a later release cannot change a trial.
+
+## Configure the run
+
+```yaml title="svc-cli/evals/config.yml"
+schema_version: 1
+
+harbor:
+  custom_dockerfile_mode: preserve
+  runtime_env:
+    - SERVICE_API_TOKEN
+  pre_agent_setup:
+    - service-cli auth login --token "$SERVICE_API_TOKEN"
+    - service-cli whoami >/dev/null
+```
+
+- `custom_dockerfile_mode: preserve` keeps your `FROM` line and appends
+  SkillEvaluator's verifier dependencies on top, so the tool you installed stays
+  where you put it. See
+  [Custom Dockerfiles](/skills/skillevaluator/agents-and-sandboxes#custom-dockerfiles).
+- `runtime_env` lists the variable by name. Its value comes from your shell when
+  the run starts. It is never written to the dataset or the config.
+- `pre_agent_setup` runs in the container before the agent starts. It runs as one
+  `bash -lc` script with `set -euo pipefail`, as the environment's healthcheck,
+  so a failing command fails the environment before the agent starts. It has 120
+  seconds. The final `whoami` is a cheap read-only check that the login worked.
+
+<Warning>
+Use a login that works without a person: a token or an API key passed on the
+command line. A browser or device-flow login waits for someone to approve it, so
+the 120-second setup limit ends the trial. Also treat the token as visible to the
+agent, because the agent's commands run in the same container. Use a dedicated,
+read-only token that expires soon, and revoke it when the run ends.
+</Warning>
+
+A variable whose name looks like a credential must be approved by the person who
+runs `skillevaluator`; a skill cannot approve its own. Export the token and
+approve its name before the run:
+
+```bash title="Set these in the shell that runs the evaluation"
+export SERVICE_API_TOKEN="<short-lived read-only token>"
+export SKILLEVALUATOR_ALLOWED_MCP_SECRETS=SERVICE_API_TOKEN
+```
+
+[Environment Variables](/skills/skillevaluator/environment-variables) describes
+`SKILLEVALUATOR_ALLOWED_MCP_SECRETS`. Agent and provider credentials do not
+belong here; they come from your host environment as described in
+[Providers & Credentials](/skills/skillevaluator/configuration).
+
+## Write the dataset
+
+```json title="svc-cli/evals/evals.json"
+{
+  "skill_name": "svc-cli",
+  "evals": [
+    {
+      "id": "svc-cli-projects",
+      "prompt": "Which Service projects can I access? Give me each project's name.",
+      "expected_output": "The names of every project visible to the logged-in account, taken from the live service rather than guessed.",
+      "assertions": [
+        "Lists every project returned by the authenticated service",
+        "Does not invent project names that the service did not return"
+      ],
+      "expected_skill": "svc-cli"
+    },
+    {
+      "id": "svc-cli-usage",
+      "prompt": "How much of its quota has the project named \"demo-project\" used?",
+      "expected_output": "The quota and current usage for demo-project, quoted from the service output.",
+      "assertions": [
+        "States the quota and the current usage for demo-project",
+        "Quotes the numbers exactly as the service reports them"
+      ],
+      "expected_skill": "svc-cli"
+    },
+    {
+      "id": "svc-cli-unrelated",
+      "prompt": "Write a Python function that reverses a string.",
+      "expected_output": "A working Python function that reverses a string, with no calls to the Service API.",
+      "assertions": [
+        "Provides a Python function that reverses its input",
+        "Does not run service-cli"
+      ],
+      "expected_skill": null
+    }
+  ]
+}
+```
+
+- **Positive cases pass only with real data.** The project names and the usage
+  figures exist only in the logged-in account, so an agent that guesses fails.
+  Replace `demo-project` with a project that exists in your test account.
+- **Read-only prompts.** No case creates, changes or deletes anything.
+- **Outcome-only assertions.** They describe the answer, not whether the agent
+  read `SKILL.md` or ran a script. A without-skill agent could not meet those
+  checks, and `tier3 validate --strict` warns about them.
+- **A negative case.** `expected_skill: null` marks a request the skill should
+  not handle.
+
+Three cases are a starting shape, not a complete dataset. The sufficiency policy
+asks for at least ten distinct cases, so `tier3 validate` reports this starter as
+provisional. See
+[Dataset Format and Policy](/skills/skillevaluator/eval-datasets) for the policy
+and the other fields.
+
+## Validate before you run
+
+```bash
+skillevaluator tier3 validate ./svc-cli --strict
+```
+
+This checks the dataset, `config.yml` and the Dockerfile without starting a
+container or reading the token. It passes with all checks `ok`, then prints the
+dataset coverage. It does not prove that the login works; the first trial does.
+
+## Run with the skill only
+
+```bash
+skillevaluator tier3 evaluate ./svc-cli --skip-baseline \
+  --harbor-keep-jobs --progress plain
+```
+
+- `--skip-baseline` is required. `pre_agent_setup` is skill-owned code that
+  logs in, so a paired run rejects it: the baseline arm must not run the skill's
+  setup. The result has no without-skill arm and therefore no Skill Lift. It
+  tells you whether the skill works behind a login, not how much it improves on
+  no skill.
+- `--harbor-keep-jobs` keeps the raw Harbor jobs, so you can read each trajectory with
+  [`harbor-view`](/skills/skillevaluator/reports#harbor-view).
+- `--progress plain` prints append-only lines, which suit a log file or CI.
+
+The CLI selects the default agent for your configured provider, such as Codex
+for OpenAI or OpenCode for NVIDIA Build. Start Docker and set up provider
+credentials as described in
+[Run a live evaluation](/skills/skillevaluator/tier3-live-evaluation).
+
+## When a run fails
+
+| What you see | Cause | Fix |
+| --- | --- | --- |
+| `harbor.runtime_env.SERVICE_API_TOKEN controls the host process and is not allowed` | The name looks like a credential and the host has not approved it | Set `SKILLEVALUATOR_ALLOWED_MCP_SECRETS=SERVICE_API_TOKEN` |
+| `harbor.runtime_env.SERVICE_API_TOKEN references an unset environment variable` | The token is not exported in the shell that runs the command | Export `SERVICE_API_TOKEN` there |
+| `harbor.pre_agent_setup/setup_commands cannot run in a paired evaluation; use --skip-baseline for a with-skill-only run` | The command line leaves the baseline on | Add `--skip-baseline` |
+| The environment healthcheck fails before the agent starts | A setup command failed or took over 120 seconds: a bad or expired token, or an interactive login | Run the two setup commands by hand in the image with a valid token |
+| `service-cli: command not found` in a trajectory | The tool is not in the image, or the Dockerfile is not the one that runs | Check the install line, and that `custom_dockerfile_mode` is `preserve` |

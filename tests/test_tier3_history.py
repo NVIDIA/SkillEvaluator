@@ -14,6 +14,7 @@ from click.testing import CliRunner
 from rich.console import Console
 
 from skillevaluator.cli import cli
+from skillevaluator.tier3 import history as history_module
 from skillevaluator.tier3.baseline_store import comparison_identity
 from skillevaluator.tier3.harbor.runner import _reserve_run_dir
 from skillevaluator.tier3.history import collect_history, print_history
@@ -146,6 +147,107 @@ def test_unavailable_lift_is_never_zero(tmp_path, failure):
     row = collect_history(skill)["rows"][0]
     assert row["lift_delta"] is None
     assert row["lift_status"] == "unavailable" and row["lift_reasons"]
+
+
+@pytest.mark.parametrize("artifact", ["run_config.json", "result.json"])
+def test_deeply_nested_artifact_does_not_hide_other_history_runs(tmp_path, artifact):
+    skill = tmp_path / "demo"
+    root = skill / "evals/results"
+    _run(root, 1)
+    broken = _run(root, 2)
+    _run(root, 3, score=0.9)
+    depth = 1_000_000  # Decoder stack limits differ across supported Python versions.
+    (broken / artifact).write_text('{"nested":' + "[" * depth + "0" + "]" * depth + "}")
+
+    result = CliRunner().invoke(cli, ["tier3", "history", str(skill), "--json"])
+
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)["rows"]
+    assert [row["run_id"] for row in rows] == ["20260101_010000", "20260101_020000", "20260101_030000"]
+    assert [row["lift_delta"] for row in rows] == [0.3, None, 0.4]
+    assert rows[1]["lift_status"] == "unavailable"
+    assert any(artifact in reason for reason in rows[1]["lift_reasons"])
+
+
+@pytest.mark.parametrize("field", ["publication_target", "attempt_policy", "run_config"])
+def test_decodable_nested_identity_does_not_hide_other_history_runs(tmp_path, field):
+    skill = tmp_path / "demo"
+    root = skill / "evals/results"
+    _run(root, 1)
+    broken = _run(root, 2)
+    _run(root, 3, score=0.9)
+    result_path = broken / "result.json"
+    result = json.loads(result_path.read_text())
+    if field == "run_config":
+        result["comparison_identity"].pop("config")
+        _write(result_path, result)
+        path = broken / "run_config.json"
+        payload = json.loads(path.read_text())
+        payload["nested"] = "nested-identity-placeholder"
+    else:
+        path = result_path
+        payload = result
+        payload[field] = {"nested": "nested-identity-placeholder"}
+    nested = "[" * 2_000 + "0" + "]" * 2_000
+    text = json.dumps(payload).replace('"nested-identity-placeholder"', nested)
+    assert isinstance(json.loads(text), dict)  # The decoder succeeds; the identity walker must be isolated.
+    path.write_text(text)
+
+    result = CliRunner().invoke(cli, ["tier3", "history", str(skill), "--json"])
+
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)["rows"]
+    assert [row["run_id"] for row in rows] == ["20260101_010000", "20260101_020000", "20260101_030000"]
+    assert [row["lift_delta"] for row in rows] == [0.3, None, 0.4]
+    assert rows[1]["status"] == "corrupt"
+    assert rows[1]["lift_status"] == "unavailable"
+    assert rows[1]["lift_reasons"]
+
+
+@pytest.mark.parametrize("field", ["evaluated_source", "publication_target", "evaluated_at"])
+@pytest.mark.parametrize("output", ["stdout", "file"])
+def test_unexportable_retained_values_do_not_hide_other_history_runs(tmp_path, monkeypatch, field, output):
+    skill = tmp_path / "demo"
+    root = skill / "evals/results"
+    _run(root, 1)
+    broken = _run(root, 2)
+    _run(root, 3, score=0.9)
+    path = broken / "result.json"
+    payload = json.loads(path.read_text())
+    retained_value = ["unexportable-retained-value"]
+    if field == "evaluated_at":
+        payload[field] = retained_value
+    else:
+        payload.pop(field, None)
+        payload["comparison_identity"]["skill"][field] = retained_value
+    _write(path, payload)
+    export_history = history_module.export_history
+    rejected_runs = []
+
+    def reject_retained_value(history, suffix):
+        for row in history["rows"]:
+            values = row if field == "evaluated_at" else (row.get("skill_identity") or {})
+            if values.get(field) == retained_value:
+                rejected_runs.append(row["run_id"])
+                raise RecursionError("retained value cannot be exported")
+        return export_history(history, suffix)
+
+    # JSON encoder recursion limits differ across supported interpreters. Fail
+    # at the real export boundary, only for the retained value in the bad run.
+    monkeypatch.setattr(history_module, "export_history", reject_retained_value)
+    destination = tmp_path / "history.json"
+    options = ["--json"] if output == "stdout" else ["--output", str(destination)]
+
+    result = CliRunner().invoke(cli, ["tier3", "history", str(skill), *options])
+
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output if output == "stdout" else destination.read_text())["rows"]
+    assert [row["run_id"] for row in rows] == ["20260101_010000", "20260101_020000", "20260101_030000"]
+    assert [row["lift_delta"] for row in rows] == [0.3, None, 0.4]
+    assert rows[1]["status"] == "corrupt"
+    assert rows[1]["lift_status"] == "unavailable"
+    assert rows[1]["lift_reasons"] == ["retained value cannot be exported"]
+    assert rejected_runs == ["20260101_020000"]
 
 
 def test_unknown_old_identity_does_not_create_a_trend(tmp_path):

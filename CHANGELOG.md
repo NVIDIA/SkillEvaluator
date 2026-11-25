@@ -150,6 +150,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Keep generated plugin evaluation case IDs within Harbor's portable path contract, including length limits, Windows device names, and case-insensitive collisions.
 
+- Preserve warnings from passing rules, workflows, and workflow references when
+  validating collections, including each member's context and warning counts.
+  Single-workflow JSON reports include reference warning messages. Markdown
+  reports count these warnings in the summary.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

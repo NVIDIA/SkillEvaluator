@@ -345,7 +345,7 @@ def test_run_statistics_are_documented_where_the_reports_show_them() -> None:
 
     rows = _table_rows("Number")
     shown_in = {name: cells[0] for name, cells in rows.items()}
-    for name in ("Skill Lift interval", "pass^k"):
+    for name in ("Paired-case lift interval", "pass^k"):
         row = next(cells for label, cells in shown_in.items() if name in label)
         assert "statistics.json" in row, name
 

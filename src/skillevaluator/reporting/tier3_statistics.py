@@ -26,18 +26,18 @@ from skillevaluator.tier3.harbor.metrics import finite_number
 if TYPE_CHECKING:
     from rich.console import Console
 
-#: Title of the terminal table, and caption of the Markdown and HTML tables, of the Skill Lift interval.
+#: Title of the terminal, Markdown and HTML tables for the paired-case lift interval.
 LIFT_TITLE = "Lift Uncertainty (advisory)"
 #: The same for pass^k beside pass@k.
 RELIABILITY_TITLE = "Reliability (advisory)"
 #: The explanation printed with the statistics tables.
 STATISTICS_NOTE = (
-    "Advisory statistics. They are not scored and change no score, verdict or exit code. "
-    "Intervals resample whole cases of this run only; they do not establish that the skill generalizes."
+    "Advisory statistics. Intervals resample whole cases and describe this run only. "
+    "The paired-case lift estimate can differ from the scored Skill Lift when cases are scored on different metrics."
 )
 LIFT_HEADERS = (
     "Agent",
-    "Skill Lift (paired case mean)",
+    "Paired-case lift estimate",
     f"{round(LIFT_BOOTSTRAP_CONFIDENCE * 100)}% interval",
     "Precision",
     "Paired cases",
@@ -137,7 +137,7 @@ def _reliability_rows(name: str, agent: Mapping[str, Any]) -> list[StatisticsRow
 
 
 def statistics_tables(agents: object) -> list[StatisticsTable]:
-    """Return the Skill Lift and reliability tables of *agents*; a table with no usable row is left out."""
+    """Return the paired-case lift and reliability tables for agents with usable rows."""
     lift: list[StatisticsRow] = []
     reliability: list[StatisticsRow] = []
     for name, agent in _agent_items(agents):
@@ -155,7 +155,7 @@ def statistics_tables(agents: object) -> list[StatisticsTable]:
 
 
 def render_statistics_tables(console: Console, agents: object, *, text: Callable[[str], str] = str) -> bool:
-    """Print the Skill Lift interval and reliability tables and the note.
+    """Print the paired-case lift interval and reliability tables and the note.
 
     Returns whether anything printed. ``text`` makes agent names safe for the
     console, for example by redacting secrets. Cells are plain text, never

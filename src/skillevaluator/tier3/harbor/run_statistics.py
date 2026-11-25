@@ -4,7 +4,7 @@
 """Report-only statistics for an ordinary Tier 3 skill run.
 
 The collector hands this module the arms it has already scored. The module
-asks :mod:`skillevaluator.tier3.harbor.stats` for the Skill Lift interval and
+asks :mod:`skillevaluator.tier3.harbor.stats` for a paired-case lift interval and
 pass^k beside pass@k, and writes them to ``<agent>/statistics.json``.
 
 Nothing here is scored. A failure never reaches the caller: :func:`attach`
@@ -74,12 +74,12 @@ def agent_statistics(
     """Return the :data:`stats.RUN_STATISTICS_FIELDS` blocks of one agent, or ``{}`` when no arm ran.
 
     ``arms`` holds the arms that ran, keyed ``with_skill`` and ``without_skill``.
-    An arm that did not succeed has no reliability. The lift interval is built
-    only when the collector reports the headline Skill Lift (``lift_eligible``:
-    both arms succeeded and the skill activated), so a withheld lift never
-    costs a bootstrap. It is also withheld when an arm's cases made different
-    numbers of attempts, as after ``stop_on_pass``: the headline weights every
-    attempt, the interval weights every case, and the two would disagree.
+    Reliability requires a succeeded arm. The bootstrap requires
+    ``lift_eligible``, which the collector sets when both arms succeeded and
+    the activation status permits lift. The bootstrap weights each case
+    equally. The headline aggregates paired metric scores across attempts.
+    The interval is withheld when an arm's cases made different numbers of
+    attempts, as after ``stop_on_pass``.
     """
     if not arms:
         return {}

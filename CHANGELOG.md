@@ -11,13 +11,13 @@ All notable changes to SkillEvaluator are documented in this file.
 - Add a locked Tier 2 CI container with credential-free build verification and
   opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
   Tier 2 together from the Repository Integration guide.
-- Tier 3 skill runs report advisory statistics next to the scores: a 95% paired
-  case-bootstrap interval for Skill Lift with a precision label and a "not
-  distinguishable from zero" warning, and pass^k beside pass@k when a run makes
+- Tier 3 skill runs report an advisory paired-case lift estimate with a 95%
+  bootstrap interval, a precision label and a warning when the interval
+  includes zero. They also show pass^k beside pass@k when a run makes
   more than one attempt per case. The statistics are written to
   `<agent>/statistics.json`, added to the report JSON, and shown in the Markdown
   and HTML reports and the full terminal report of `validate` and
-  `tier3 evaluate --verbose`. They never change a score, verdict or exit code.
+  `tier3 evaluate --verbose`.
   The interval is left out when an arm's cases made different numbers of
   attempts, as after `--stop-on-pass`.
 

@@ -36,7 +36,7 @@ from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.result_display import render_result
 
 FIELDS = stats.RUN_STATISTICS_FIELDS
-ZERO_CROSSING = "Skill Lift not distinguishable from zero"
+ZERO_CROSSING = "Paired-case lift interval includes zero"
 
 
 def _noisy_with_skill() -> dict[str, list[Trial]]:
@@ -174,7 +174,6 @@ def test_zero_crossing_interval_adds_warning_and_keeps_verdict_and_lift(tmp_path
     added = [c for c in with_statistics["conclusions"] if c not in without["conclusions"]]
     assert [(c["severity"], c["title"]) for c in added] == [("warn", ZERO_CROSSING)]
     assert "paired cases" in added[0]["message"]
-    assert "verdict are unchanged" in added[0]["message"]
     assert len(with_statistics["conclusions"]) == len(without["conclusions"]) + 1
     for key in ("verdict", "overall_lift", "composite_lift", "overall_score", "dataset_sufficiency", "summary"):
         assert with_statistics[key] == without[key], key
@@ -189,6 +188,30 @@ def test_an_interval_that_excludes_zero_adds_no_warning(tmp_path: Path) -> None:
 
     assert payload["agents"][AGENT]["lift_uncertainty"]["effectiveness"]["ci_includes_zero"] is False
     assert ZERO_CROSSING not in [conclusion["title"] for conclusion in payload["conclusions"]]
+
+
+def test_mixed_judges_label_the_interval_as_a_separate_paired_case_estimate(tmp_path: Path) -> None:
+    with_skill = uniform(0.4, judge="primary", accuracy=0.9)
+    for case in CASES[:3]:
+        with_skill[case] = [Trial(0.4, judge="fallback", accuracy=0.0)]
+    _, run = collect(tmp_path, with_skill, uniform(0.5, judge="primary", accuracy=0.5))
+
+    result = _result(run)
+    payload = result.metadata["agent_eval"]
+    interval = payload["agents"][AGENT]["lift_uncertainty"]["effectiveness"]
+    assert interval["n_cases"] == len(CASES)
+    assert interval["estimate"] < 0 < payload["overall_lift"]
+    assert interval["ci_includes_zero"] is True
+    warnings = [conclusion["message"] for conclusion in payload["conclusions"] if conclusion["title"] == ZERO_CROSSING]
+    assert len(warnings) == 1
+    assert "interval for the paired-case lift estimate" in warnings[0]
+    for report in (
+        _terminal(payload),
+        MarkdownReporter().render_all([result]),
+        HTMLReporter(include_timestamp=False).render_all([result]),
+    ):
+        assert "Paired-case lift estimate" in report
+        assert "can differ from the scored Skill Lift" in " ".join(report.split())
 
 
 def test_terminal_lift_table(tmp_path: Path) -> None:

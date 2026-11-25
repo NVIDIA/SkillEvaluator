@@ -68,8 +68,8 @@ VERDICT_FAIL = "fail"
 VERDICT_NEUTRAL = "neutral"
 VERDICT_INCONCLUSIVE = "inconclusive"
 
-# Title of the warning added when the Skill Lift interval includes zero.
-LIFT_INTERVAL_WARNING_TITLE = "Skill Lift not distinguishable from zero"
+# Title of the warning added when the paired-case lift interval includes zero.
+LIFT_INTERVAL_WARNING_TITLE = "Paired-case lift interval includes zero"
 
 
 def _never_activated(agent: dict[str, Any]) -> bool:
@@ -4521,7 +4521,7 @@ def _build_conclusions(
 
 
 def _lift_uncertainty_conclusion(agent: dict[str, Any]) -> dict[str, str] | None:
-    """Warn when the Skill Lift interval includes zero; the lift band and the verdict stay as they are."""
+    """Warn when the interval for the paired-case lift estimate includes zero."""
     lift = agent.get("lift_uncertainty")
     interval = lift.get("effectiveness") if isinstance(lift, dict) else None
     if not isinstance(interval, dict) or interval.get("ci_includes_zero") is not True:
@@ -4534,10 +4534,8 @@ def _lift_uncertainty_conclusion(agent: dict[str, Any]) -> dict[str, str] | None
         "severity": "warn",
         "title": LIFT_INTERVAL_WARNING_TITLE,
         "message": (
-            f"The {round(LIFT_BOOTSTRAP_CONFIDENCE * 100)}% interval for the Skill Lift, "
-            f"{low:+.2f} to {high:+.2f} over {cases} paired cases, includes zero. "
-            "The lift band and the verdict are unchanged; add cases or attempts before relying on the "
-            "direction of the lift."
+            f"The {round(LIFT_BOOTSTRAP_CONFIDENCE * 100)}% interval for the paired-case lift estimate, "
+            f"{low:+.2f} to {high:+.2f} over {cases} paired cases, includes zero."
         ),
     }
 

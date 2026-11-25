@@ -5111,16 +5111,23 @@ class _RepeatedInterruptReporter(_RecordingReporter):
             raise KeyboardInterrupt
 
 
+@pytest.mark.parametrize("cleanup_failed", [False, True])
 def test_second_interrupt_forces_running_agents_to_stop(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    cleanup_failed: bool,
 ) -> None:
     observed: list[tuple[bool, bool]] = []
+    cleanup_detail = "Harbor process-tree cleanup also failed: taskkill wait interrupted by forced cancellation"
 
     def run_agent(**kwargs: Any) -> list[str]:
         cancellation = kwargs["cancellation"]
         # A running Harbor job stays in its cleanup grace until it is forced.
         observed.append((cancellation.requested.wait(10), cancellation.forced.wait(10)))
+        if cleanup_failed:
+            cancelled = runner._HarborRunCancelledError("Harbor job stopped")
+            cancelled.add_note(cleanup_detail)
+            raise cancelled
         return []
 
     runner, skill = _stub_runner(monkeypatch, tmp_path, run_agent=run_agent)
@@ -5141,7 +5148,8 @@ def test_second_interrupt_forces_running_agents_to_stop(
     assert stopping[-1] == runner._HARBOR_RUN_STOPPING_DETAIL
     assert stopping[-1].startswith("2nd Ctrl+C skips wait; stopping Harbor jobs")
     assert stopping[-1].endswith("up to 30s of environment cleanup")
-    assert ("agent:codex", "failed", "interrupted before completion") in events
+    expected_detail = cleanup_detail if cleanup_failed else "interrupted before completion"
+    assert ("agent:codex", "failed", expected_detail) in events
     assert events[-1] == ("run-finished", "failed", "Tier 3 evaluation interrupted")
 
 

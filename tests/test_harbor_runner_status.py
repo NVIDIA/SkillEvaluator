@@ -514,10 +514,22 @@ def _cancel_when_ready(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX SIGTERM delivery")
-def test_bounded_harbor_process_cancellation_lets_harbor_finish_cleanup(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cleanup_reports_failure", [False, True])
+def test_bounded_harbor_process_cancellation_lets_harbor_finish_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_reports_failure: bool
+) -> None:
     # Harbor maps SIGTERM to KeyboardInterrupt and then stops its trial
     # environments. Cancellation must wait for that instead of killing the
     # group after the short timeout grace.
+    secret = "fixture-cleanup-secret"
+    if cleanup_reports_failure:
+        terminate = runner._terminate_harbor_process_tree
+
+        def report_cleanup_failure(*args, **kwargs) -> None:
+            terminate(*args, **kwargs)
+            raise RuntimeError(f"cleanup boundary: could not stop process, token={secret}")
+
+        monkeypatch.setattr(runner, "_terminate_harbor_process_tree", report_cleanup_failure)
     ready_path = tmp_path / "ready"
     cleanup_marker = tmp_path / "cleanup-finished"
     script = _sigterm_handling_harbor_script(
@@ -540,13 +552,19 @@ def test_bounded_harbor_process_cancellation_lets_harbor_finish_cleanup(tmp_path
             timeout_seconds=None,
             max_output_bytes=4096,
             diagnostic_tail_chars=128,
-            secret_values=set(),
+            secret_values={secret},
             cancellation=cancellation,
         )
     canceller.join(timeout=5)
 
     assert cleanup_marker.read_text(encoding="utf-8") == "done"
-    assert not getattr(exc_info.value, "__notes__", [])
+    notes = getattr(exc_info.value, "__notes__", [])
+    if cleanup_reports_failure:
+        assert len(notes) == 1
+        assert "could not stop process" in notes[0]
+        assert secret not in notes[0]
+    else:
+        assert not notes
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX SIGTERM delivery")
@@ -935,6 +953,19 @@ def test_windows_tree_cleanup_error_keeps_a_long_taskkill_report_short(monkeypat
     assert len(message) < 600
 
 
+def test_windows_tree_cleanup_retains_the_final_reason_in_a_long_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    report = b"SUCCESS: A child process terminated.\r\n" * 100
+    report += b"ERROR: The root process could not be terminated.\r\nReason: Access is denied.\r\n"
+
+    with pytest.raises(RuntimeError, match="process-tree cleanup could not be confirmed") as exc_info:
+        _clean_up_windows_tree_with_taskkill_report(monkeypatch, returncode=1, report=report)
+
+    message = str(exc_info.value)
+    assert "SUCCESS: A child process terminated." in message
+    assert "Reason: Access is denied." in message
+    assert len(message) < 600
+
+
 def test_windows_tree_cleanup_ignores_the_report_of_a_taskkill_that_succeeded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1166,7 +1197,8 @@ def test_windows_tree_cleanup_stops_waiting_for_taskkill_once_cancellation_is_fo
     # Noticed within a poll slice of the second Ctrl+C, nowhere near the 30 s budget.
     assert clock.now - started == pytest.approx(expected_slices * poll_seconds)
     assert clock.now - started < runner._HARBOR_WINDOWS_TREE_KILL_SECONDS / 10
-    assert isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired)
+    assert "taskkill wait interrupted by forced cancellation" in str(exc_info.value)
+    assert not isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired)
     # taskkill is stopped and reaped on the short budget, and so is the root.
     assert taskkill_process.killed is True
     assert taskkill_process.wait_timeouts[-1] == runner._HARBOR_RUN_REAP_SECONDS

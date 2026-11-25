@@ -17,17 +17,18 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(HERE), str(HERE.parents[1])]
 
 from _cli_surface import build_cli_surface
+from scripts.layout_json import layout
 
 from skillevaluator.cli import cli
 
 
 def main() -> None:
-    snapshot = build_cli_surface(cli)
-    out = Path(__file__).resolve().parent / "cli_surface.json"
-    out.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    out = HERE / "cli_surface.json"
+    out.write_text(layout(json.dumps(build_cli_surface(cli), sort_keys=True)), encoding="utf-8")
     print(f"wrote {out}")
 
 

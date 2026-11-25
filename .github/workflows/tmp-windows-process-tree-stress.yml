@@ -1,9 +1,10 @@
 name: Temporary Windows process-tree stress
 
-# Temporary. This repeats the Windows process-tree tests to catch an
-# intermittent "process-tree cleanup could not be confirmed" failure with the
-# reason in the message. It runs only on a pull request that changes this file,
-# and it is removed before that pull request is ready for review.
+# Temporary. An experiment for one question: when the root of a process tree is
+# a launcher that waits for its child (the venv python.exe, or a console script
+# such as harbor.exe), does `taskkill /T /F` report a failure even though the
+# whole tree is gone? It runs only on a pull request that changes this file, and
+# it is removed before that pull request is ready for review.
 
 on:
   pull_request:
@@ -19,14 +20,13 @@ concurrency:
 
 jobs:
   stress:
-    name: Process-tree stress (${{ matrix.mode }} ${{ matrix.shard }})
+    name: Process-tree experiment (${{ matrix.shard }})
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        mode: [file, full]
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -38,28 +38,59 @@ jobs:
         with:
           version: "0.13.8"
       - run: uv sync --all-extras --locked
-      - name: Repeat the Windows tests
+      - name: Kill launcher-rooted and interpreter-rooted trees
         shell: bash
-        env:
-          STRESS_MODE: ${{ matrix.mode }}
         run: |
           set -uo pipefail
-          if [ "$STRESS_MODE" = "file" ]; then
-            iterations=14
-            command="uv run pytest -q -n auto -p no:cacheprovider tests/test_harbor_runner_status.py"
-          else
-            iterations=3
-            # The exact command of the Tier 2 (windows-latest) job, read from ci.yml.
-            command="$(uv run python -c "import yaml; job = yaml.safe_load(open('.github/workflows/ci.yml', encoding='utf-8'))['jobs']['tier2-windows']; print(' '.join(job['steps'][-1]['run'].split()))")"
-          fi
-          echo "command: $command"
-          failed=0
-          for iteration in $(seq 1 "$iterations"); do
-            echo "=== iteration $iteration of $iterations ==="
-            if ! $command; then
-              failed=$((failed + 1))
-              echo "=== iteration $iteration FAILED ==="
-            fi
-          done
-          echo "failed iterations: $failed of $iterations"
-          test "$failed" -eq 0
+          uv run python - <<'PY'
+          import collections
+          import concurrent.futures
+          import subprocess
+          import sys
+          import time
+
+          from skillevaluator.tier3.harbor import runner
+
+          launcher = sys.executable
+          interpreter = sys._base_executable
+          print("venv python (launcher):", launcher)
+          print("base interpreter      :", interpreter)
+          print("same file:", launcher.lower() == interpreter.lower(), flush=True)
+
+          SLEEP = "import time; time.sleep(120)"
+
+          def kill_one(root: str, with_child: bool) -> str:
+              script = SLEEP
+              if with_child:
+                  script = f"import subprocess, time; subprocess.Popen([{root!r}, '-c', {SLEEP!r}]); time.sleep(120)"
+              process = subprocess.Popen(
+                  [root, "-c", script],
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+              )
+              time.sleep(0.6)  # let a launcher start the real interpreter, and the root start its child
+              try:
+                  runner._terminate_harbor_process_tree(process)
+              except RuntimeError as error:
+                  return str(error)[:420]
+              return "ok"
+
+          def run(label: str, root: str, with_child: bool, count: int, workers: int) -> None:
+              started = time.monotonic()
+              with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                  results = collections.Counter(pool.map(lambda _: kill_one(root, with_child), range(count)))
+              failed = count - results["ok"]
+              print(f"\n== {label}: {failed} of {count} cleanups reported a failure ({time.monotonic() - started:.0f}s, {workers} at a time)")
+              for message, times in results.most_common(6):
+                  if message != "ok":
+                      print(f"   {times:4d} x {message}")
+              sys.stdout.flush()
+
+          for workers in (1, 4):
+              run(f"launcher root, no child of its own, {workers} at a time", launcher, False, 60, workers)
+              run(f"launcher root, with a child, {workers} at a time", launcher, True, 60, workers)
+              run(f"interpreter root, no child, {workers} at a time", interpreter, False, 60, workers)
+              run(f"interpreter root, with a child, {workers} at a time", interpreter, True, 60, workers)
+          PY

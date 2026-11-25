@@ -55,7 +55,17 @@ listing for `/skillevaluator/`.
   secret. The workflow checks both are present before it builds an image.
   The App writes generated files to a release branch and opens the PR.
 
-## Start a release from GitHub Actions
+## Release without a GitHub App
+
+Merge the version-preparation PR and run **Build CI image and bundle**. Open
+the bundle PR yourself using the generated artifact, then run **Validate and
+publish** against its merge SHA. Follow the [CI preparation](#prepare-the-ci-release)
+and [publication](#publish-the-product-release) checks and approvals. Leave
+**promote_stable** unchecked and follow [manual promotion](#promote-stable-manually)
+after the release passes verification. Only the version and bundle changes
+need PRs.
+
+## Start an automated release from GitHub Actions
 
 1. Merge the version-preparation PR described below. Open **SkillEvaluator
    Release → Run workflow** on `main`, choose **Full release**, and enter the
@@ -209,16 +219,48 @@ from the previous stable scanner. The scan and its feedback can resolve the
 channel at different times. Include queued scans, reruns and the full artifact
 retention period when reviewing a publisher compatibility change.
 
-Publishing a stable release signals **Promote stable GitHub workflows**. The
-promotion runs from `main`, verifies the latest immutable release and checks
-its CI archive and runtime identities against the published artifact manifest.
+Promotion verifies the latest immutable release and checks its CI archive and
+runtime identities against the published artifact manifest.
 It verifies the GitHub and GitLab stable configurations against the templates
 at the release commit. Before moving the `stable` tag, it verifies that public
 PyPI and NVIDIA DevZone serve the unyanked wheel and source distribution with
 the exact filenames, SHA-256 digests, and sizes in that same manifest.
 
-Before the first promotion, a repository administrator must configure promotion
-access.
+### Promote stable manually
+
+For the first promotion, a repository administrator must create an active tag
+ruleset targeting exactly `stable` that restricts creation, updates, and
+deletion. Grant bypass to the designated release maintainers' team. Keep
+version-tag protections separate and reserve the name `stable` for the tag.
+
+After **Validate and publish** finishes, use a clean HTTPS checkout of
+`NVIDIA/SkillEvaluator` at current `main`, Python 3.11 or later, and a GitHub
+CLI login with permission to update the tag. Use the approved
+`RELEASE_DEVZONE_INDEX_URL` from the repository Actions variable.
+
+```bash
+RELEASE_DEVZONE_INDEX_URL="$(gh variable get RELEASE_DEVZONE_INDEX_URL --repo NVIDIA/SkillEvaluator)" \
+  bash ci/promote_stable.sh --manual v1.2.1
+```
+
+Substitute the exact reviewed release tag on each promotion. Use
+`--verify-only` in place of `--manual` to run the same checks without updating
+the tag. The update fails if GitHub Latest differs, either package index lacks
+the verified artifacts, or another maintainer moves the tag after verification
+starts. GitHub and GitLab consumers following the stable channel pick up the
+approved workflow and image on subsequent runs.
+
+For the historical `v1.0.1` bootstrap, if it is still GitHub Latest and
+`stable` does not exist, set `STABLE_BOOTSTRAP_SHA` to the full reviewed
+`main` commit containing the generated workflows and GitLab include, then
+run the command above with `v1.0.1`. The published CI bundle must match
+the bootstrap commit.
+
+### Automate stable promotion
+
+Publishing a stable release can signal **Promote stable GitHub workflows**.
+Before using App-based promotion, a repository administrator must configure
+automation access.
 
 - Set the repository Actions variable `RELEASE_DEVZONE_INDEX_URL` to the approved
   public HTTPS NVIDIA DevZone listing for `/skillevaluator/`.
@@ -235,14 +277,15 @@ before the `stable` tag can move.
 For a standalone promotion after the product release finishes verification,
 open **Promote stable GitHub workflows** in Actions and select **Run workflow** on `main`. Set
 `expected-release` to the reviewed `vX.Y.Z` tag shown in the release workflow
-summary. Manual promotion stops if GitHub Latest differs from that tag. The
+summary. Promotion stops if GitHub Latest differs from that tag. The
 product workflow's GitHub Actions token does not trigger the release relay.
 If a promotion ran before both indexes served the verified files, rerun it
 after package verification finishes. A retry verifies the published release
 even if `main` already has the next version's wrappers. Qualify this case with
 the release App on GitHub.
-If GitHub refuses to update `stable` to the older workflow tree, keep the exact
-release commit at the tip of a protected release branch and retry.
+For either promotion path, if GitHub refuses to update `stable` to the older
+workflow tree, keep the exact release commit at the tip of a protected release
+branch and retry.
 
 The immutable `v1.0.1` release predates the stable entry points. If it is still the
 latest release at first activation, merge its generated configurations into

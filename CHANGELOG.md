@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
+  lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,
   16,384 tokens or 32,768 for GPT-5 and GPT-6 reasoning models. Only Anthropic
   requests sent it. NVIDIA Build, OpenAI, OpenAI-compatible and Bedrock requests
@@ -15,6 +17,16 @@ All notable changes to SkillEvaluator are documented in this file.
   model they name. Claude 4.7 and later on those profiles no longer receive a
   `temperature` the provider rejects, and the Tier 3 Bedrock refusal fallback
   keeps the request's geography prefix.
+
+### Documentation
+
+- Added a guide to MCP servers and Docker Compose sidecars that explains where `localhost`,
+  service names and commands resolve in Docker and local runs, and a cookbook for evaluating
+  a CLI skill that needs a short-lived login using the configured provider's default agent.
+  The stdio example in the dataset reference now passes the script as an argument
+  instead of as part of the command.
+- The CLI reference now covers `ci init`, `ci status`, `ci demo` and `--hook-waivers`. A test
+  fails when a visible command or long option is missing from the page.
 
 ## 1.2.1 - 2026-11-24
 

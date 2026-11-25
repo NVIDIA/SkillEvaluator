@@ -2159,3 +2159,47 @@ def test_pi_ancestor_finding_stays_inside_the_default_roots(tmp_path: Path):
 
     row = _rows(skill)["pi"]
     assert row["status"] == "loads" and "PI-ANCESTOR-MANIFEST" not in {f["id"] for f in row["findings"]}
+
+
+def _case_insensitive(path: Path) -> bool:
+    """True when the volume treats two spellings of one name as one file (macOS APFS by default)."""
+    (path / "CasingProbe").mkdir()
+    return (path / "casingprobe").is_dir()
+
+
+@pytest.mark.parametrize("alias", ["middle", "root"])
+def test_pi_ancestor_manifest_survives_a_casing_alias(tmp_path: Path, alias: str):
+    """A cased alias reaches the same file, so the verdict and the manifest it names match the on-disk spelling."""
+    if not _case_insensitive(tmp_path):
+        pytest.skip("a case-sensitive volume has no alias path")
+    root = tmp_path / "proj" / ".pi" / "skills"
+    _ancestor_manifest(root / "group")
+    sky = _install(root / "group", "sky")
+    canonical = _rows(sky)["pi"]
+    selected = {
+        "middle": root / "GROUP" / "sky",
+        "root": tmp_path / "proj" / ".PI" / "skills" / "group" / "sky",
+    }[alias]
+
+    row = _rows(selected)["pi"]
+
+    assert row["status"] == canonical["status"] == "not_loaded"
+    assert {f["id"] for f in row["findings"]} == {f["id"] for f in canonical["findings"]}
+    assert "group/SKILL.md" in next(f["message"] for f in row["findings"] if f["id"] == "PI-ANCESTOR-MANIFEST")
+
+
+def test_casing_alias_without_an_ancestor_stays_loadable(tmp_path: Path):
+    """The alias changes only the spelling: with no manifest above it the skill still loads."""
+    if not _case_insensitive(tmp_path):
+        pytest.skip("a case-sensitive volume has no alias path")
+    root = tmp_path / "proj" / ".pi" / "skills"
+    _install(root / "group", "sky")
+
+    assert _rows(root / "GROUP" / "sky")["pi"]["status"] == "loads"
+
+
+def test_on_disk_spelling_keeps_missing_components(tmp_path: Path):
+    """A path that does not exist is left as typed: no alias resolution can invent a folder."""
+    missing = tmp_path / "nope" / "sky"
+
+    assert overlay._on_disk_spelling(missing) == missing.absolute()

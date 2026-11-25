@@ -963,6 +963,26 @@ def _catalog_base(skill: Path) -> Path | None:
     return parent if parent.name == "skills" else None
 
 
+def _on_disk_spelling(path: Path) -> Path:
+    """*path* re-spelled component by component as the filesystem stores the names.
+
+    On a case-insensitive volume the same file can be reached with a cased alias (macOS APFS keeps the alias
+    through resolve()), which breaks every folder comparison and catalog key. Missing components stay as typed.
+    """
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        try:
+            names = [entry.name for entry in current.iterdir()]
+        except OSError:
+            return absolute
+        spelled = part if part in names else next((n for n in names if n.casefold() == part.casefold()), None)
+        if spelled is None:
+            return absolute
+        current /= spelled
+    return current
+
+
 def _pi_skills_mode(base: Path) -> str | None:
     """How pi 1.6.0 scans *base*: "pi" roots keep loose .md files at the root, .agents/skills keeps them only nested."""
     posix = base.absolute().as_posix()
@@ -1204,11 +1224,15 @@ def facts_for(
     same-named copies (every known folder when omitted). ``manifests`` maps a skill folder
     to the manifest file an explicit check selected for it.
     """
-    explicit = {folder.resolve(): file for folder, file in (manifests or {}).items()}
+    # A path spelled with a cased alias of the on-disk name is the same skill: compare and key by the stored spelling.
+    on_disk = {skill: _on_disk_spelling(skill) for skill in skills}
+    explicit = {
+        _on_disk_spelling(folder).resolve(): _on_disk_spelling(file) for folder, file in (manifests or {}).items()
+    }
     groups: dict[Path | None, list[Path]] = {}
     for skill in skills:
-        base = _catalog_base(skill)
-        groups.setdefault(base.resolve() if base else None, []).append(skill)
+        base = _catalog_base(on_disk[skill])
+        groups.setdefault(base.resolve() if base else None, []).append(on_disk[skill])
     catalogs: dict[Path, Catalog] = {}
     for group in groups.values():
         cutoffs: list[Path] = []
@@ -1222,7 +1246,12 @@ def facts_for(
             canon = Catalog.of(_find_skills(base_) or members, base_, explicit)
             canonical.update(dict.fromkeys(members, canon))
     facts = {
-        skill: skill_facts(skill, catalogs[skill], explicit.get(skill.resolve()), canonical.get(skill))
+        skill: skill_facts(
+            on_disk[skill],
+            catalogs[on_disk[skill]],
+            explicit.get(on_disk[skill].resolve()),
+            canonical.get(on_disk[skill]),
+        )
         for skill in skills
     }
     for skill_facts_ in facts.values():

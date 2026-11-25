@@ -4,6 +4,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `quality-check` recognizes English, Russian, and Chinese vocabulary for
+  triggers, instructions, examples, error handling, expected headings, and
+  documentation for scripts, APIs, and resources. Set `--quality-config` to replace the packaged lists.
+  Chinese terms match in running text. English and Russian terms retain word
+  boundaries.
+
+## 1.2.1 - 2026-11-24
+
 ### Added
 
 - Add a locked Tier 2 CI container with credential-free build verification and
@@ -16,11 +26,15 @@ All notable changes to SkillEvaluator are documented in this file.
   starting at 2.13.5 reports that optional dependency inspection was not
   requested. Verified missing-reference caveats remain warnings. Existing
   security and completeness gates are unchanged.
-- `quality-check` recognizes English, Russian, and Chinese vocabulary for
-  triggers, instructions, examples, error handling, expected headings, and
-  documentation for scripts, APIs, and resources. Set `--quality-config` to replace the packaged lists.
-  Chinese terms match in running text. English and Russian terms retain word
-  boundaries.
+- The `skillspector_completeness` ledger in JSON reports keeps up to 500
+  exception rows per skill and scan stage (was 20), with a 128 KiB budget
+  for serialized rows. Reports keep up to 512 records (was 64), and each
+  record now states `ledger_rows_retained` and
+  `ledger_rows_total`. A 227-skill library whose scanner reported 521
+  incomplete rows previously showed 268, so fixing the visible rows did not
+  clear the gate; the omitted count was recorded but not surfaced. When the
+  cap applies, the security gate message counts the ledger rows for the
+  reported gaps, including how many exceed the per-record limit.
 - NeMo Gym now scores native multi-step tasks once using the task's `mean` or
   `final` strategy. The live case grid and finished report use the same verdict.
   A failed or ungraded step leaves the attempt unscored. With `final`, the last
@@ -298,15 +312,6 @@ notes below describe the new policy and backend configuration behavior.
   The fence length exceeds any backtick run in the rendered content. File and
   skill labels are escaped and length-limited. The judge is instructed to
   treat the fenced content and labels as skill data and follow the rubric.
-- The `skillspector_completeness` ledger in JSON reports keeps up to 500
-  exception rows per skill and scan stage (was 20), with a 128 KiB budget
-  for serialized rows. Reports keep up to 512 records (was 64), and each
-  record now states `ledger_rows_retained` and
-  `ledger_rows_total`. A 227-skill library whose scanner reported 521
-  incomplete rows previously showed 268, so fixing the visible rows did not
-  clear the gate; the omitted count was recorded but not surfaced. When the
-  cap applies, the security gate message counts the ledger rows for the
-  reported gaps, including how many exceed the per-record limit.
 - Tier 1 file walkers skip symlinks and Windows directory junctions whose
   target resolves outside the skill directory (or is missing), so the PII,
   secrets, Unicode, license and link checks no longer read or quote files from

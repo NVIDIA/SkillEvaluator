@@ -4,6 +4,21 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
+  lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
+
+### Documentation
+
+- Added a guide to MCP servers and Docker Compose sidecars that explains where `localhost`,
+  service names and commands resolve in Docker and local runs, and a cookbook for evaluating
+  a CLI skill that needs a short-lived login using the configured provider's default agent.
+  The stdio example in the dataset reference now passes the script as an argument
+  instead of as part of the command.
+- The CLI reference now covers `ci init`, `ci status`, `ci demo` and `--hook-waivers`. A test
+  fails when a visible command or long option is missing from the page.
+
 ## 1.2.1 - 2026-11-24
 
 ### Added

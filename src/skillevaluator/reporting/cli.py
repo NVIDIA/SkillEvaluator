@@ -178,9 +178,16 @@ class CLIReporter(ReporterBase):
         """Print single result directly to console."""
         self.render_result(result, self.console)
 
-    def print_all(self, results: list[ValidationResult]) -> None:
+    def print_all(self, results: list[ValidationResult], *, plugin_static: bool = False) -> None:
         """Print all results directly to console."""
         self._render_all_results(results, self.console)
+        if plugin_static:
+            from skillevaluator.reporting.plugin_static import project_plugin_static
+            from skillevaluator.reporting.plugin_static_render import _cli
+
+            if projection := project_plugin_static(results):
+                self.console.line()
+                self.console.print(_cli(projection.payload()), markup=False, highlight=False, soft_wrap=True, end="")
 
     def print_summary(self, results: list[ValidationResult]) -> None:
         """Print only the summary table (no failure details, no overall verdict).

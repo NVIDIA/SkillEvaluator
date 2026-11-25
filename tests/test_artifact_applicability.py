@@ -279,8 +279,16 @@ def test_unknown_content_with_only_a_marketplace_manifest_is_not_applicable(tmp_
     assert all(result.metadata["tier1_applicability"] == APPLICABILITY for result in results)
 
 
-@pytest.mark.parametrize("manifest", ["SKILL.md", ".claude-plugin/plugin.json"])
-def test_validate_folder_with_a_dangling_manifest_symlink_still_fails(tmp_path: Path, manifest: str) -> None:
+@pytest.mark.parametrize(
+    ("manifest", "validator"),
+    [
+        ("SKILL.md", "Schema & Repository Governance"),
+        (".claude-plugin/plugin.json", "Plugin Schema & Component Checks"),
+    ],
+)
+def test_validate_folder_with_a_dangling_manifest_symlink_still_fails(
+    tmp_path: Path, manifest: str, validator: str
+) -> None:
     folder = _broken_skill(tmp_path / "my-tool")
     _dangling_symlink(folder / manifest)
     reports = tmp_path / "reports"
@@ -293,7 +301,7 @@ def test_validate_folder_with_a_dangling_manifest_symlink_still_fails(tmp_path: 
     payload = _json_report(reports)
     assert payload["overall_status"] == "failed"
     assert "tier1_applicability" not in payload
-    schema = next(entry for entry in payload["results"] if entry["validator"] == "Schema & Repository Governance")
+    schema = next(entry for entry in payload["results"] if entry["validator"] == validator)
     assert schema["status"] == "failed"
 
 

@@ -1,0 +1,130 @@
+name: Temporary Windows process-tree stress
+
+# Temporary. An experiment for one question: when the root of a process tree is
+# a launcher that waits for its child (the venv python.exe, or a console script
+# such as harbor.exe), does `taskkill /T /F` report a failure even though the
+# whole tree is gone? It runs only on a pull request that changes this file, and
+# it is removed before that pull request is ready for review.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/tmp-windows-process-tree-stress.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  stress:
+    name: Process-tree experiment (${{ matrix.shard }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.13.8"
+      - run: uv sync --all-extras --locked
+      - name: Kill launcher-rooted and interpreter-rooted trees
+        shell: bash
+        run: |
+          set -uo pipefail
+          uv run python - <<'PY'
+          import collections
+          import concurrent.futures
+          import os
+          import subprocess
+          import sys
+          import time
+          import uuid
+
+          from skillevaluator.tier3.harbor import runner
+
+          launcher = sys.executable
+          interpreter = sys._base_executable
+          print("venv python (launcher):", launcher)
+          print("base interpreter      :", interpreter)
+          print("cpu count:", os.cpu_count(), flush=True)
+
+          def survivors(marker: str) -> int:
+              """Count, then stop, processes whose command line carries ``marker``."""
+              query = (
+                  "$found = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*" + marker + "*' "
+                  "-and $_.Name -like 'python*' }); $found.Count; "
+                  "$found | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+              )
+              done = subprocess.run(["powershell", "-NoProfile", "-Command", query], capture_output=True, text=True)
+              digits = [line.strip() for line in done.stdout.splitlines() if line.strip().isdigit()]
+              return int(digits[0]) if digits else -1
+
+          def kill_one(root: str, with_child: bool, settle: float, marker: str) -> str:
+              sleep = f"import time; time.sleep(120)  # {marker}"
+              script = sleep
+              if with_child:
+                  script = f"import subprocess, time; subprocess.Popen([{root!r}, '-c', {sleep!r}]); time.sleep(120)  # {marker}"
+              process = subprocess.Popen(
+                  [root, "-c", script],
+                  stdin=subprocess.DEVNULL,
+                  stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL,
+                  creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+              )
+              if settle:
+                  time.sleep(settle)
+              try:
+                  runner._terminate_harbor_process_tree(process)
+              except RuntimeError as error:
+                  return str(error)[:420]
+              return "ok"
+
+          def run(label: str, root: str, with_child: bool, settle: float, count: int = 80, workers: int = 4) -> None:
+              marker = "exp-" + uuid.uuid4().hex[:12]
+              started = time.monotonic()
+              with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                  results = collections.Counter(
+                      pool.map(lambda _: kill_one(root, with_child, settle, marker), range(count))
+                  )
+              time.sleep(1.5)
+              left = survivors(marker)
+              failed = count - results["ok"]
+              print(
+                  f"\n== {label}: {failed} of {count} cleanups reported a failure, "
+                  f"{left} processes still alive afterwards ({time.monotonic() - started:.0f}s)"
+              )
+              for message, times in results.most_common(6):
+                  if message != "ok":
+                      print(f"   {times:4d} x {message}")
+              sys.stdout.flush()
+
+          def batch(load: str) -> None:
+              for settle in (0.0, 0.05, 0.6):
+                  for name, root in (("launcher", launcher), ("interpreter", interpreter)):
+                      for with_child in (False, True):
+                          child = "with a child" if with_child else "no child"
+                          run(f"{load}; {name} root, {child}, killed after {settle}s", root, with_child, settle)
+
+          batch("machine idle")
+          burners = [
+              subprocess.Popen([interpreter, "-c", "while True: pass"], stdin=subprocess.DEVNULL)
+              for _ in range((os.cpu_count() or 4) * 3)
+          ]
+          try:
+              time.sleep(1)
+              batch("CPU saturated")
+          finally:
+              for burner in burners:
+                  burner.kill()
+          PY

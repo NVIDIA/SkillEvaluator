@@ -8,6 +8,7 @@ from __future__ import annotations
 import codecs
 import hashlib
 import importlib.util
+import io
 import ipaddress
 import json
 import logging
@@ -879,6 +880,8 @@ _HARBOR_RUN_REAP_SECONDS = 5.0
 # a cleanup error, so the tree kill gets its own, longer bound. A second Ctrl+C
 # (``_HarborRunCancellation.forced``) still ends the wait early.
 _HARBOR_WINDOWS_TREE_KILL_SECONDS = 30.0
+# How much of taskkill's own report a cleanup error repeats.
+_HARBOR_WINDOWS_TASKKILL_REPORT_CHARS = 400
 
 
 @dataclass(frozen=True)
@@ -3830,9 +3833,9 @@ def _wait_for_windows_taskkill(
 
     The wait is cut into short slices so a set ``end_grace`` (a second Ctrl+C) is
     noticed within ``_HARBOR_RUN_CANCEL_POLL_SECONDS`` instead of after the whole
-    budget. A ``taskkill`` that is still running when the budget runs out, or
-    when ``end_grace`` is set, raises :class:`subprocess.TimeoutExpired` so the
-    caller stops it and fails closed rather than treating the tree as stopped.
+    budget. A running ``taskkill`` raises :class:`subprocess.TimeoutExpired`
+    at its deadline or :class:`InterruptedError` on forced cancellation. The
+    caller stops it and fails closed in either case.
     """
     started = time.monotonic()
     deadline = started + timeout_seconds
@@ -3842,10 +3845,55 @@ def _wait_for_windows_taskkill(
             taskkill.wait(timeout=slice_seconds)
         except subprocess.TimeoutExpired as exc:
             now = time.monotonic()
-            if now >= deadline or (end_grace is not None and end_grace.is_set()):
+            if now >= deadline:
                 raise subprocess.TimeoutExpired(exc.cmd, now - started) from None
+            if end_grace is not None and end_grace.is_set():
+                raise InterruptedError("taskkill wait interrupted by forced cancellation") from None
             continue
         return
+
+
+def _open_windows_taskkill_report() -> Any | None:
+    """Open a scratch file for what ``taskkill`` prints, or ``None`` when one cannot be made.
+
+    A file, not a pipe: nothing reads a pipe while ``taskkill`` runs, so a tree
+    with enough processes to fill one would stall the kill. Stopping the tree
+    matters more than explaining a failure, so the kill goes ahead without one.
+    """
+    try:
+        return tempfile.TemporaryFile()
+    except OSError:
+        return None
+
+
+def _read_windows_taskkill_report(report: Any | None) -> str:
+    """Return bounded context from both ends of ``taskkill``'s report on one line."""
+    if report is None:
+        return ""
+    limit = _HARBOR_WINDOWS_TASKKILL_REPORT_CHARS
+    byte_window = 4 * limit
+    try:
+        report.seek(0)
+        data = report.read(byte_window)
+        report.seek(0, io.SEEK_END)
+        if report.tell() > byte_window:
+            report.seek(-byte_window, io.SEEK_END)
+            data += b" ... " + report.read(byte_window)
+    except (OSError, ValueError):
+        return ""
+    try:
+        text = data.decode("oem", errors="replace")
+    except LookupError:
+        # The console code page codec only exists on Windows.
+        text = data.decode("utf-8", errors="replace")
+    words = "".join(character if character.isprintable() else " " for character in text).split()
+    line = " ".join(words)
+    if len(line) <= limit:
+        return line
+    separator = " ... "
+    left = (limit - len(separator)) // 2
+    right = limit - len(separator) - left
+    return line[:left].rstrip() + separator + line[-right:].lstrip()
 
 
 def _terminate_harbor_process_tree(
@@ -3862,7 +3910,9 @@ def _terminate_harbor_process_tree(
     its task tree is always stopped with ``taskkill /T /F`` and ``grace_seconds``
     does not apply. ``taskkill`` gets up to ``_HARBOR_WINDOWS_TREE_KILL_SECONDS``;
     a set ``end_grace`` stops that wait early, kills ``taskkill`` and fails
-    closed, because the tree was then not confirmed stopped.
+    closed, because the tree was then not confirmed stopped. The error says how
+    ``taskkill`` failed: its exit code and bounded output, a missed deadline,
+    or a forced cancellation.
     """
     if os.name == "posix":
         # POSIX process groups do not own a descendant that deliberately calls
@@ -3882,26 +3932,35 @@ def _terminate_harbor_process_tree(
 
     taskkill_error: BaseException | None = None
     taskkill: subprocess.Popen[bytes] | None = None
+    report = _open_windows_taskkill_report()
     try:
-        taskkill = subprocess.Popen(
-            [str(_verified_windows_taskkill_path()), "/PID", str(process.pid), "/T", "/F"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _wait_for_windows_taskkill(taskkill, _HARBOR_WINDOWS_TREE_KILL_SECONDS, end_grace=end_grace)
-        if taskkill.returncode != 0:
-            taskkill_error = RuntimeError("Windows Harbor process-tree cleanup failed")
-    except subprocess.TimeoutExpired as exc:
-        taskkill_error = exc
-        if taskkill is not None and taskkill.poll() is None:
-            taskkill.kill()
-            try:
-                taskkill.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
-            except subprocess.TimeoutExpired as reap_error:
-                taskkill_error = reap_error
-    except OSError as exc:
-        taskkill_error = exc
+        try:
+            taskkill = subprocess.Popen(
+                [str(_verified_windows_taskkill_path()), "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=report if report is not None else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if report is not None else subprocess.DEVNULL,
+            )
+            _wait_for_windows_taskkill(taskkill, _HARBOR_WINDOWS_TREE_KILL_SECONDS, end_grace=end_grace)
+            if taskkill.returncode != 0:
+                reason = f"taskkill exited with code {taskkill.returncode}"
+                if printed := _read_windows_taskkill_report(report):
+                    reason += f": {printed}"
+                taskkill_error = RuntimeError(reason)
+        except (subprocess.TimeoutExpired, InterruptedError) as exc:
+            taskkill_error = exc
+            if taskkill is not None and taskkill.poll() is None:
+                taskkill.kill()
+                try:
+                    taskkill.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
+                except subprocess.TimeoutExpired as reap_error:
+                    taskkill_error = RuntimeError(f"{exc}; taskkill could not be reaped: {reap_error}")
+        except OSError as exc:
+            taskkill_error = exc
+    finally:
+        if report is not None:
+            with suppress(OSError):
+                report.close()
     if process.poll() is None:
         process.kill()
     try:
@@ -3909,7 +3968,7 @@ def _terminate_harbor_process_tree(
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Harbor parent process could not be reaped") from exc
     if taskkill_error is not None:
-        raise RuntimeError("Harbor process-tree cleanup could not be confirmed") from taskkill_error
+        raise RuntimeError(f"Harbor process-tree cleanup could not be confirmed: {taskkill_error}") from taskkill_error
 
 
 def _run_bounded_harbor_process(
@@ -4104,7 +4163,10 @@ def _run_bounded_harbor_process(
         if stdin_writer_started:
             stdin_writer.join(timeout=_HARBOR_RUN_REAP_SECONDS)
         if cleanup_error is not None:
-            primary_error.add_note(f"Harbor process-tree cleanup also failed: {type(cleanup_error).__name__}")
+            detail = (
+                _redact_harbor_diagnostic(cleanup_error, secret_values=secret_values) or type(cleanup_error).__name__
+            )
+            primary_error.add_note(f"Harbor process-tree cleanup also failed: {detail}")
             raise primary_error from cleanup_error
         raise
 
@@ -6870,6 +6932,14 @@ def _run_harbor_eval_impl(
             executor.shutdown(wait=False, cancel_futures=True)
             cancellation.requested.set()
             _join_interrupted_agents()
+            for future, agent in futures.items():
+                if future.cancelled():
+                    continue
+                worker_error = future.exception()
+                if isinstance(worker_error, _HarborRunCancelledError):
+                    detail = " ".join(getattr(worker_error, "__notes__", ()))
+                    if detail:
+                        reporter.emit(ProgressEvent(stage=f"agent:{agent}", state="failed", detail=detail))
             raise
 
     if unexpected_worker_error is not None:

@@ -31,6 +31,7 @@ notes:
 plugin:
   rules:
     - {id: CC-PLUGIN-EMPTY, when: "not fmt_claude and not default_dirs", effect: not_loaded, outcome: not found, message: "No .claude-plugin/plugin.json and no skills/, commands/, agents/ or hooks/ folder: Claude Code finds nothing to load.", fix: "Add .claude-plugin/plugin.json or put components in the default folders.", confidence: high}
+    - {id: CC-PLUGIN-MCP-MANIFEST, when: "mcp_claude_manifest_invalid", effect: not_loaded, outcome: rejected, message: "Claude Code rejects this plugin's mcpServers manifest declaration.", fix: "Use an inline server map or a config path starting with './', such as './servers.json'. Use an array to combine them.", confidence: high}
   components: {skills: delivered, commands: delivered, agents: delivered, hooks: runs, mcp: deferred, lsp: runs}
   # Claude Code documents a plugin .mcp.json that names its servers at the top level, without the mcpServers wrapper.
   mcp_flat: documented

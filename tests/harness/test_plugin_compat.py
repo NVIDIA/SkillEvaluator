@@ -369,17 +369,41 @@ def test_claude_mcp_manifest_merges_with_any_default_shape(tmp_path: Path, defau
     assert finding["message"].startswith(f"{expected} mcp:")
 
 
-def test_claude_mcp_manifest_can_explicitly_name_flat_default_file(tmp_path: Path):
+@pytest.mark.parametrize("filename", [".mcp.json", "servers.json"])
+def test_claude_mcp_manifest_can_explicitly_name_a_flat_config_file(tmp_path: Path, filename: str):
     manifest = {
         "name": "demo",
-        "mcpServers": ["./.mcp.json", {"search": {"url": "https://example.invalid/mcp"}}],
+        "mcpServers": [f"./{filename}", {"search": {"url": "https://example.invalid/mcp"}}],
     }
     root = _bare_manifest(tmp_path / "p", data=manifest)
-    (root / ".mcp.json").write_text(
+    (root / filename).write_text(
         json.dumps({"$schema": "https://example.invalid/schema.json", "db": {"command": "demo"}})
     )
     finding = next(f for f in _component_rows(root)["claude-code"] if f["id"] == "CC-PLUGIN-MCP")
     assert finding["message"].startswith("2 mcp:")
+
+
+@pytest.mark.parametrize("declaration", ["servers.json", ["servers.json", {}], False, [7], None])
+def test_claude_invalid_mcp_manifest_refuses_plugin_even_with_valid_mcp_files(tmp_path: Path, declaration: object):
+    root = _bare_manifest(tmp_path / "p", data={"name": "demo", "mcpServers": declaration})
+    servers = {"mcpServers": {"demo": {"command": "demo"}}}
+    for filename in (".mcp.json", "servers.json"):
+        (root / filename).write_text(json.dumps(servers))
+    rows = _status(root)
+    assert rows["claude-code"] == ("not_loaded", ["CC-PLUGIN-MCP-MANIFEST"])
+    assert rows["copilot-cli"][0] == "loads"
+
+
+@pytest.mark.parametrize("path", ["./servers.json", "./missing.json"])
+def test_claude_valid_mcp_manifest_preserves_default_and_available_config(tmp_path: Path, path: str):
+    root = _bare_manifest(tmp_path / "p", data={"name": "demo", "mcpServers": path})
+    (root / ".mcp.json").write_text(json.dumps({"default": {"command": "demo"}}))
+    (root / "servers.json").write_text(json.dumps({"ref": {"command": "demo"}}))
+    rows = _component_rows(root)
+    [finding] = rows["claude-code"]
+    count = 2 if path == "./servers.json" else 1
+    assert (finding["id"], finding["outcome"]) == ("CC-PLUGIN-MCP", "deferred")
+    assert finding["message"].startswith(f"{count} mcp:")
 
 
 def test_invalid_flat_mcp_does_not_count_a_different_formats_file(tmp_path: Path):

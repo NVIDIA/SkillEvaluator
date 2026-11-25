@@ -216,7 +216,7 @@ def collect_mcp_declarations(
     allowed_private_hosts: Iterable[str] = (),
     validate_servers: bool = True,
     profile: FormatProfile = CLAUDE_PROFILE,
-    allow_partial_flat_defaults: bool = False,
+    allow_partial_flat: bool = False,
 ) -> McpCollection:
     """Collect every MCP server a plugin declares, in Claude Code load order.
 
@@ -236,8 +236,8 @@ def collect_mcp_declarations(
     Findings cover config-source problems (escapes, absolute paths, symlinks,
     missing/oversize/invalid files, duplicate names) and, when
     ``validate_servers`` is set, the per-server static checks.
-    Compatibility counts can set ``allow_partial_flat_defaults`` to retain
-    recognizable endpoints from a flat default file that also contains metadata
+    Compatibility counts can set ``allow_partial_flat`` to retain
+    recognizable endpoints from a flat config file that also contains metadata
     or invalid entries.
     """
     collection = McpCollection()
@@ -259,7 +259,7 @@ def collect_mcp_declarations(
             profile,
             declared=declared,
             contained=contained,
-            allow_partial_flat=allow_partial_flat_defaults,
+            allow_partial_flat=allow_partial_flat,
         )
 
     # 2. Declared shapes in order.
@@ -274,7 +274,7 @@ def collect_mcp_declarations(
                 manifest_rel,
                 profile,
                 contained=contained,
-                allow_partial_flat_defaults=allow_partial_flat_defaults,
+                allow_partial_flat=allow_partial_flat,
             )
         else:
             collection.findings.append(
@@ -814,7 +814,7 @@ def _collect_path_ref(
     profile: FormatProfile = CLAUDE_PROFILE,
     *,
     contained: bool = True,
-    allow_partial_flat_defaults: bool = False,
+    allow_partial_flat: bool = False,
 ) -> None:
     """Collect one ``mcpServers`` string: a remote bundle URL, a ``.json`` config file, or a bundle file.
 
@@ -909,7 +909,7 @@ def _collect_path_ref(
         rel,
         "path_ref",
         shown,
-        allow_partial_flat=allow_partial_flat_defaults and path in profile.default_mcp_files,
+        allow_partial_flat=allow_partial_flat,
     )
 
 

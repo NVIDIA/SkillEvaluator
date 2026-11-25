@@ -60,6 +60,8 @@ METADATA_KEYS = (
 DOC_NAMES = ("readme", "license", "licence", "notice", "changelog")
 DOC_SUFFIXES = ("", ".md", ".txt", ".rst")
 HOUSEKEEPING = (".git", ".gitignore", ".gitattributes", ".DS_Store")
+# Manifest rejection checks from the MCP collector, distinct from broken config files the client can skip.
+MCP_MANIFEST_REJECTION_CHECKS = {"plugin_component_path_style", "mcp_servers_not_object", "mcp_servers_entry_invalid"}
 # What a component outcome means for the plugin's status. Outcomes come from canary probes.
 OUTCOME_EFFECT = {
     "delivered": None,
@@ -207,19 +209,30 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
     flat_count = _flat_mcp_servers(root)
     facts["mcp_flat"] = flat_count or 0
+    facts["mcp_claude_manifest_invalid"] = False
     if flat_count is not None:
         facts["mcp_claude"] = flat_count
-    if claude_manifest and claude_manifest.get("mcpServers"):
+    if claude_manifest and "mcpServers" in claude_manifest:
         # Claude Code merges declared configurations with its default .mcp.json by server name.
+        reader = PluginRootReader(root)
+        manifest_rel = MANIFESTS["claude"]
         mcp = collect_mcp_declarations(
-            PluginRootReader(root),
+            reader,
             claude_manifest,
             contained=True,
-            manifest_rel=MANIFESTS["claude"],
+            manifest_rel=manifest_rel,
             validate_servers=False,
-            allow_partial_flat_defaults=True,
+            allow_partial_flat=True,
         )
-        facts["mcp_claude"] = sum(has_mcp_endpoint(declaration.config) for declaration in mcp.effective)
+        # A missing field is optional, while the Claude manifest schema refuses an explicit null.
+        rejects_manifest = claude_manifest["mcpServers"] is None or any(
+            finding.check_name in MCP_MANIFEST_REJECTION_CHECKS and finding.file_path == reader.display(manifest_rel)
+            for finding in mcp.blocking_source_findings
+        )
+        facts["mcp_claude_manifest_invalid"] = rejects_manifest
+        facts["mcp_claude"] = (
+            0 if rejects_manifest else sum(has_mcp_endpoint(declaration.config) for declaration in mcp.effective)
+        )
     facts["other_files"] = _has_other_files(root)
     facts["max_skill_bytes"] = max(_skill_sizes(root).values(), default=0)
     return facts

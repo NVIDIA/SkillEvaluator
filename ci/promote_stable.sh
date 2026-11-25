@@ -10,8 +10,19 @@ gitlab=ci/gitlab/stable-tier1.yml
 gitlab_template=ci/templates/stable/${gitlab##*/}
 event=${GITHUB_EVENT_NAME:-}
 expected_release=${STABLE_EXPECTED_RELEASE:-}
+manual=false
+mode=""
+if (( $# )); then
+    if [[ $# != 2 || ($1 != --manual && $1 != --verify-only) ]]; then
+        echo "Usage: bash ci/promote_stable.sh {--manual|--verify-only} vX.Y.Z" >&2
+        exit 1
+    fi
+    manual=true
+    mode=$1
+    expected_release=$2
+fi
 
-if [[ $event == workflow_dispatch && ! $expected_release =~ $version_pattern ]]; then
+if [[ ($manual == true || $event == workflow_dispatch) && ! $expected_release =~ $version_pattern ]]; then
     echo "Manual promotion requires expected-release to be a canonical vX.Y.Z tag." >&2
     exit 1
 fi
@@ -34,13 +45,31 @@ if [[ ! $release =~ $version_pattern || ! $manifest_digest =~ ^sha256:[a-f0-9]{6
     echo "The latest release must be a published, immutable stable version with an artifact manifest." >&2
     exit 1
 fi
-if [[ $event == workflow_dispatch && $release != "$expected_release" ]]; then
+if [[ ($manual == true || $event == workflow_dispatch) && $release != "$expected_release" ]]; then
     echo "GitHub Latest is $release, but the expected release is $expected_release." >&2
     exit 1
 fi
 
-main=$(git rev-parse refs/remotes/origin/main)
-release_commit=$(git rev-parse "refs/tags/$release^{commit}")
+if [[ $manual == true ]]; then
+    official_url=https://github.com/NVIDIA/SkillEvaluator
+    fetch_url=$(git remote get-url --all origin)
+    push_url=$(git remote get-url --push --all origin)
+    if [[ ${fetch_url%.git} != "$official_url" || ${push_url%.git} != "$official_url" ]]; then
+        echo "Manual promotion requires the official HTTPS SkillEvaluator origin for fetch and push." >&2
+        exit 1
+    fi
+    if [[ -n $(git status --porcelain --untracked-files=all) ]]; then
+        echo "Use a clean checkout of SkillEvaluator main for manual promotion." >&2
+        exit 1
+    fi
+    git fetch --no-tags origin refs/heads/main
+    main=$(git rev-parse 'FETCH_HEAD^{commit}')
+    git fetch --no-tags origin "refs/tags/$release"
+    release_commit=$(git rev-parse 'FETCH_HEAD^{commit}')
+else
+    main=$(git rev-parse refs/remotes/origin/main)
+    release_commit=$(git rev-parse "refs/tags/$release^{commit}")
+fi
 git merge-base --is-ancestor HEAD "$main"
 git merge-base --is-ancestor "$release_commit" "$main"
 
@@ -82,9 +111,9 @@ if ! git cat-file -e "$release_commit:$scanner" 2>/dev/null ||
     else
         bootstrapping=true
         candidate=${STABLE_BOOTSTRAP_SHA:-}
-        if [[ $event != workflow_dispatch || ! $candidate =~ ^[0-9a-f]{40}$ ||
+        if [[ ($manual != true && $event != workflow_dispatch) || ! $candidate =~ ^[0-9a-f]{40}$ ||
               $(git cat-file -t "$candidate" 2>/dev/null) != commit ]]; then
-            echo "Bootstrap v1.0.1 by dispatching this workflow with a reviewed main commit as bootstrap-sha." >&2
+            echo "Bootstrap v1.0.1 with the full reviewed main SHA as STABLE_BOOTSTRAP_SHA locally or bootstrap-sha in Actions." >&2
             exit 1
         fi
     fi
@@ -136,8 +165,10 @@ if [[ $previous_release == "$release" ]]; then
         echo "The existing stable tag for $release points to a different commit." >&2
         exit 1
     fi
-    echo "Stable already serves $release."
-    exit 0
+    if [[ $mode != --verify-only ]]; then
+        echo "Stable already serves $release."
+        exit 0
+    fi
 fi
 
 # Keep the checked manifest and CI archive as the reference for both public indexes.
@@ -151,7 +182,14 @@ if [[ $(latest_release) != "$latest" ]]; then
     echo "The latest release changed during promotion. Retry from the release workflow." >&2
     exit 1
 fi
-GH_TOKEN="${STABLE_PUSH_TOKEN:?A stable channel writer token is required}" \
-    git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push \
-    --force-with-lease="$stable_ref:$previous" origin "$candidate:$stable_ref"
+push=(git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push --no-follow-tags
+    "--force-with-lease=$stable_ref:$previous" origin "$candidate:$stable_ref")
+if [[ $manual != true ]]; then
+    GH_TOKEN="${STABLE_PUSH_TOKEN:?A stable channel writer token is required}" "${push[@]}"
+elif [[ $mode == --verify-only ]]; then
+    echo "Verified $release at $candidate for stable promotion."
+    exit 0
+else
+    "${push[@]}"
+fi
 echo "Stable now serves $release from $candidate."

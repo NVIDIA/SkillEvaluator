@@ -128,6 +128,15 @@ def test_public_package_has_no_private_package_indexes() -> None:
     assert "extra-index-url" not in project.get("tool", {}).get("uv", {})
 
 
+def test_registry_driver_is_opt_in() -> None:
+    project = _project()["project"]
+    extras = project["optional-dependencies"]
+    for group in (project["dependencies"], extras["llm"], extras["tier2"], extras["all"]):
+        assert all(canonicalize_name(Requirement(value).name) != "psycopg" for value in group)
+    registry = [Requirement(value) for value in extras["registry"]]
+    assert any(requirement.name == "psycopg" and requirement.extras == {"binary"} for requirement in registry)
+
+
 def test_public_extras_use_public_dependency_sources() -> None:
     project = _project()
     extras = project["project"]["optional-dependencies"]
@@ -444,6 +453,7 @@ def test_third_party_notices_list_each_group_with_its_direct_dependencies() -> N
         "Tier 3": extras["tier3"],
         "Security": extras["security"],
         "Dashboard": extras["dashboard"],
+        "Registry overlap": extras["registry"],
     }
     notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
     rows = dict(re.findall(r"^\| ([^|]+?) \| ([^|]+?) \|$", notices, flags=re.MULTILINE))

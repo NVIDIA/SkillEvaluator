@@ -88,6 +88,11 @@ llm = [
 tier2 = [
     "skillevaluator[llm]",
 ]
+# Operator-run Tier 2 registry overlap pilot.
+registry = [
+    "psycopg[binary]>=3.3.3,<4",
+    "skillevaluator[tier2]",
+]
 # Tier 3 live agent evaluation through Harbor's native environments.
 tier3 = [
     "skillevaluator[llm]",
@@ -124,7 +129,7 @@ dashboard = [
     "streamlit>=1.61,<2",
     "urllib3>=2.8.0,<3",
 ]
-# Full public install convenience bundle.
+# Public tiers and dependency auditing. Install [registry] separately for the pilot.
 all = [
     "skillevaluator[tier2,tier3,security]",
 ]

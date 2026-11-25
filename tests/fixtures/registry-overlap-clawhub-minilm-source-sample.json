@@ -1,0 +1,47 @@
+{
+  "dataset": "OpenClaw/clawhub-security-signals-live",
+  "dataset_revision": "e59ffc97c03080af95f38e992be79dab652c8d93",
+  "dataset_license": "MIT",
+  "parquet_revision": "23a1a8aa3e3cf7359ce81c74d6280b02a3910672",
+  "shards": {
+    "0000.parquet": [
+      0,
+      25,
+      49
+    ],
+    "0001.parquet": [
+      1,
+      25,
+      49
+    ],
+    "0002.parquet": "all",
+    "0004.parquet": "all",
+    "0005.parquet": [
+      5,
+      12,
+      23
+    ]
+  },
+  "rows_before_validation": 35377,
+  "onnxruntime": "1.32.0",
+  "tokenizers": "0.23.3",
+  "numpy": "2.5.5",
+  "source_columns": [
+    "id",
+    "skill_slug",
+    "skill_version",
+    "skill_md_content"
+  ],
+  "retained_descriptions": 32209,
+  "model": "Xenova/all-MiniLM-L6-v2",
+  "model_revision": "751bff37182d3f1213fa05d7196b954e230abad9",
+  "model_license": "Apache-2.0",
+  "python": "3.12.13",
+  "pyarrow": "26.0.1",
+  "seed": 41,
+  "dimension": 2048,
+  "size": 250000,
+  "matrix_sha256": "c368bb7520ac70247a6cb1a6270ed50aec4422811c44ba78b159b051fa8e89fe",
+  "reviewed_overlap_pairs": 50,
+  "benchmark_labels_sha256": "1e8e2dd97e408d687298e532a372e20b907ceb67954b7f1f82b4e265ab7b98f8"
+}

@@ -10,7 +10,19 @@ records the exact resolved dependency set used for this release.
 | LLM | aiohttp (Apache-2.0 AND MIT), Anthropic (MIT), Boto3 (Apache-2.0), filelock (MIT), fsspec (BSD-3-Clause), LiteLLM (MIT), multidict (Apache-2.0), OpenAI (Apache-2.0), urllib3 (MIT) |
 | Tier 3 | Harbor (Apache-2.0), MCP (MIT), OAuthLib (BSD-3-Clause), PyJWT (MIT), python-dotenv (BSD-3-Clause) |
 | Security | certifi (MPL-2.0), filelock (MIT), msgpack (Apache-2.0), pip (MIT), pip-audit (Apache-2.0), urllib3 (MIT) |
+| Registry overlap | Psycopg (LGPL-3.0-only) |
 | Dashboard | Streamlit (Apache-2.0), urllib3 (MIT) |
+
+## Registry overlap driver wheels
+
+The `registry` extra installs Psycopg and the platform-specific
+`psycopg-binary` wheel. The binary wheel's Python extension is
+LGPL-3.0-only. The bundled PostgreSQL client library, `libpq`, uses the
+PostgreSQL License. The bundled OpenSSL 3 libraries, `libssl` and
+`libcrypto`, use Apache-2.0.
+[Psycopg binary installation](https://www.psycopg.org/psycopg3/docs/basic/install.html#binary-installation) ·
+[PostgreSQL License](https://www.postgresql.org/about/licence/) ·
+[OpenSSL License](https://openssl-library.org/source/license/)
 
 ## Embedded report charts
 

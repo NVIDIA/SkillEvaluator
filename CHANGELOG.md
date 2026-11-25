@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add a Tier 2 registry overlap pilot that replays verified skill revisions
+  into PostgreSQL with pgvector and returns bounded nearest-neighbor candidates
+  with provenance. The pilot includes generation rebuild and activation
+  commands, same-profile embedding reuse, and an index benchmark with pinned
+  proxy-corpus inputs. The benchmark validates mutation probes before load and
+  tracks acknowledged deletes with unavailable visibility separately.
 - The local-mode run preflight and `doctor --env-mode local` check the
   installed Claude Code and Codex CLI against the selected models and stop
   before any trial when one is too old. Use `--agent-model AGENT=MODEL` to

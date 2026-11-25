@@ -351,6 +351,42 @@ def _extract_from_file(
         secure_root=secure_root,
         relative_path=relative_path,
     )
+    return _extract_from_text(
+        full_text,
+        file_path,
+        name_field=name_field,
+        description_field=description_field,
+        content_type=content_type,
+        budget=budget,
+        relative_path=relative_path,
+        label=label,
+    )
+
+
+def parse_skill_manifest(full_text: str) -> ContentEntry | None:
+    """Parse bounded in-memory SKILL.md text with the local Tier 2 frontmatter rules."""
+    if len(full_text.encode("utf-8")) > MAX_MANIFEST_BYTES:
+        raise ValueError("Skill manifest exceeds the Tier 2 manifest limit")
+    return _extract_from_text(
+        full_text,
+        Path("SKILL.md"),
+        name_field="name",
+        description_field="description",
+        content_type=CONTENT_TYPE_SKILL,
+    )
+
+
+def _extract_from_text(
+    full_text: str,
+    file_path: Path,
+    *,
+    name_field: str,
+    description_field: str,
+    content_type: str,
+    budget: _ExtractionBudget | None = None,
+    relative_path: Path | None = None,
+    label: str | None = None,
+) -> ContentEntry | None:
     match = FRONTMATTER_PATTERN.match(full_text)
     if not match:
         if budget is not None:
@@ -370,10 +406,9 @@ def _extract_from_file(
     try:
         # Agent clients keep the last value of a repeated frontmatter key.
         data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True) if root_kind != "other" else None
-    except StructuredDataSyntaxError as exc:
+    except StructuredDataSyntaxError:
         if budget is not None:
             budget.exclude(file_path, "invalid_yaml")
-        logger.debug("Invalid YAML frontmatter in %s: %s", file_path, exc)
         return None
     except StructuredDataLimitError as exc:
         raise ValueError(f"Manifest structured-data complexity limit exceeded: {label}") from exc

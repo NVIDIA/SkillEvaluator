@@ -519,6 +519,255 @@ Catalogs stay local unless you explicitly share them. Because they contain
 embeddings and other data derived from skill content, review them before
 sharing like any other generated project artifact.
 
+## Run the registry overlap pilot
+
+Use the pilot to replay a registry's skill revisions into PostgreSQL and
+retrieve a bounded list of nearby skills. It accepts operator-supplied JSON
+batches from one source and embeds the skill name and description. Results
+provide scores, revision identity, and provenance for review. Use the
+[local JSON catalog](#use-a-local-catalog) for checkout and CI workflows.
+
+Use a UTF-8 PostgreSQL database with pgvector 0.8.2 or later and provision the
+`vector` extension before initialization. An administrator can precreate the
+dedicated `skillevaluator_overlap` schema for the operator. The operator needs
+`USAGE` and `CREATE` on that schema and `USAGE` on the extension schema.
+Install the `[registry]` extra separately from `[all]`. Run
+`uv sync --locked --extra registry` from the checkout to install the Tier 2
+embedding dependencies and PostgreSQL driver. Export
+`SKILL_EVAL_REGISTRY_DSN` through your environment's secret configuration and
+set up the [Tier 2 embedding provider](/skills/skillevaluator/configuration).
+Run these commands from a checkout that includes the pilot.
+
+```bash
+uv run --no-sync python -m skillevaluator.registry_overlap init --source example-registry
+uv run --no-sync python -m skillevaluator.registry_overlap sync --batch ./batch-1.json --sha256 "$BATCH_SHA256"
+uv run --no-sync python -m skillevaluator.registry_overlap status
+uv run --no-sync python -m skillevaluator.registry_overlap search ./candidate/SKILL.md --top-k 10
+```
+
+Obtain `BATCH_SHA256` through a separate trusted channel from the batch
+producer. Checksum validation compares the exact file bytes before parsing.
+Use `--exclude ID` when rechecking a skill that is already indexed. Other
+skills remain eligible even if their content fingerprint matches. Search
+accepts `--top-k` values from 1 through 50 and returns available candidates
+within that bound. Treat an empty result as retrieval evidence only.
+
+### Prepare and replay a batch
+
+Each batch contains 1 to 250 events and can be at most 8 MiB. The envelope
+contains `schema_version` set to `1`, the initialized `source`, a contiguous
+integer `cursor` starting at `1`, and the `events` array. Each event carries
+an `id` stable within the source, a positive integer `sequence` that increases
+for that ID, a `revision`, and a `kind` of `upsert` or `remove`. Upserts also
+carry the raw UTF-8 skill manifest in `manifest` and an `artifact` reference.
+Use an immutable HTTPS URL without credentials, a query, or a fragment, or
+use `ref:` followed by an opaque identifier. A removal needs the four common
+fields. The pilot replays only the supplied local batches and retains artifacts
+as references.
+
+```json
+{
+  "schema_version": 1,
+  "source": "example-registry",
+  "cursor": 1,
+  "events": [
+    {
+      "id": "release-summary",
+      "sequence": 1,
+      "revision": "v1",
+      "kind": "upsert",
+      "manifest": "---\nname: release-summary\ndescription: Write a changelog from merged changes.\n---\n",
+      "artifact": "https://example.com/registry/release-summary/v1"
+    }
+  ]
+}
+```
+
+Use `sync --batch FILE --sha256 SHA256 --accept-only` to validate and commit a
+batch without running embeddings. Run `sync` separately to apply up to 250
+pending event records per invocation. A byte-identical batch replay has no
+effect on accepted events. A skipped cursor, changed batch at an accepted
+cursor, or conflicting event at the same sequence rejects the entire batch
+and leaves the accepted cursor unchanged. An older sequence cannot supersede
+a newer revision or removal. Upon a provider failure, rerun `sync` to resume
+from the saved checkpoint.
+
+### Change the embedding profile
+
+Each generation pins the provider, model, endpoint fingerprint, description
+mode, vector dimension, and profile revision. The global options `--dimension`
+(default `2048`) and `--profile-revision` (default `1`) go before the
+subcommand. Set the dimension to match your provider. Increase the profile
+revision when you change the embedding pipeline for the same model.
+
+1. Configure the new profile and run `reindex`. It creates a generation from
+   the current source snapshot. The active generation continues to serve
+   queries. A rebuild with the same profile reuses available vectors whose
+   embedding input is unchanged.
+2. Run `sync --generation N` with the new profile as needed. Use `status` to
+   inspect the accepted cursor, event checkpoints, oldest pending events,
+   and index readiness.
+3. Run `activate N` when the generation has caught up. The same readiness
+   check applies when switching back to a previous generation. Keep that
+   generation caught up with its matching profile if you need rollback.
+4. Run `retire N` only after the rollback window closes. It explicitly
+   removes an inactive generation's index.
+
+Build or query a local JSON catalog with the existing commands when you need
+a portable checkout or CI workflow. Rebuild the pilot from source batches so
+that stable registry IDs and source revisions accompany its vectors.
+
+### Operate and remove the registry
+
+`search` reranks at most 200 candidates. Each database statement in the
+search transaction runs under a 250 ms timeout after embedding completes.
+The HNSW scan uses strict-order iteration with an approximate limit of
+20,000 tuple visits for the iterative portion. A statement timeout surfaces
+as a search error. Check `status` for index readiness and generation
+checkpoints. When search returns `degraded`, drain pending work with `sync`
+using the generation's matching profile.
+
+Have the database operator monitor dead tuples and index size in the
+generation tables, particularly after frequent upserts and removals. Keep
+autovacuum enabled. If search keeps timing out with a ready index, check
+database load and dead tuple counts to decide whether to schedule a vacuum
+or index maintenance.
+
+Upserts that advance a skill's sequence retain the combined name and
+description, artifact reference, and fingerprints indefinitely, including
+for superseded or removed skills. A revision first observed as stale retains
+only its ID, sequence, revision, digest, and observation time for replay
+checks.
+`retire N` drops an inactive generation's vectors and associated index and
+metadata. The shared replay history remains in the registry schema.
+
+For full database deletion, stop registry clients and have a PostgreSQL
+administrator confirm that the target database contains the dedicated
+`skillevaluator_overlap` schema and review any dependent objects.
+`DROP SCHEMA skillevaluator_overlap CASCADE` permanently deletes the pilot's
+vectors, replay history, and checkpoints along with dependent objects.
+Handle batch files and database backups separately under your retention
+policy.
+
+### Reproduce the registry-scale measurements
+
+The checkout benchmark accepts a little-endian, row-major float32 `.npy`
+matrix. To generate a proxy corpus, download `0000.parquet` through
+`0005.parquet` into `./parquet` from `default/latest` in the [pinned ClawHub Parquet conversion](https://huggingface.co/datasets/OpenClaw/clawhub-security-signals-live/tree/23a1a8aa3e3cf7359ce81c74d6280b02a3910672/default/latest).
+Download `onnx/model_int8.onnx` and `tokenizer.json` from the [pinned MiniLM model](https://huggingface.co/Xenova/all-MiniLM-L6-v2/tree/751bff37182d3f1213fa05d7196b954e230abad9)
+and put both files in `./minilm`. The generator verifies input hashes and
+writes the vector matrix and its provenance sidecar.
+
+```bash
+uv run --locked --with numpy --with pyarrow --with onnxruntime --with tokenizers \
+  python -m scripts.registry_overlap_benchmark_corpus \
+  --parquet-dir ./parquet --model-dir ./minilm --output ./corpus.npy
+```
+
+Provide the `--size` corresponding to the matrix prefix you intend to measure.
+Prepare a reusable exhaustive cosine reference for the same vectors
+and then compare the two indexes in sequence. Pass `--query-ids FILE` during
+preparation to supply specific zero-based corpus row IDs. Point the environment
+variables at disposable benchmark databases. The benchmark creates its own
+tables and collections and reports their names.
+
+```bash
+uv run --no-project --with numpy python scripts/benchmark_registry_overlap.py \
+  --prepare-only --vectors ./corpus.npy --size 100000 --dimension 2048 \
+  --queries 1000 --k 10 --write-workload ./workload.json --output ./prepared.json
+
+uv run --no-project --with numpy --with 'psycopg[binary,pool]' \
+  --with qdrant-client --with httpx python scripts/benchmark_registry_overlap.py \
+  --backend both --vectors ./corpus.npy --workload ./workload.json \
+  --size 100000 --dimension 2048 --queries 1000 --k 10 \
+  --duration 1800 --burst-duration 60 --output ./registry-benchmark.json
+```
+
+Set `SKILLEVALUATOR_BENCHMARK_POSTGRES_DSN` and
+`SKILLEVALUATOR_BENCHMARK_QDRANT_URL` for the second command. For a service
+with an exposed Qdrant gRPC port, set
+`SKILLEVALUATOR_BENCHMARK_QDRANT_GRPC_PORT`. Keep the output JSON and workload
+fingerprint with the corpus source, embedding profile, machine, service
+versions, and settings.
+
+The historical pilot used a local projection of the pinned Parquet conversion.
+The sample specification in `tests/fixtures/registry-overlap-clawhub-minilm-source-sample.json`
+records the row groups and library versions. To reconstruct the projection,
+run this from the checkout with the pinned source shards in `./parquet`.
+
+```bash
+uv run --locked --with pyarrow python - <<'PY'
+import json
+from pathlib import Path
+
+import pyarrow.parquet as pq
+
+spec = json.loads(Path("tests/fixtures/registry-overlap-clawhub-minilm-source-sample.json").read_text())
+destination = Path("sample-parquet")
+destination.mkdir()
+for name, groups in spec["shards"].items():
+    source = pq.ParquetFile(Path("parquet") / name)
+    selected = range(source.num_row_groups) if groups == "all" else groups
+    pq.write_table(source.read_row_groups(selected, columns=spec["source_columns"]), destination / name)
+PY
+```
+
+Run the corpus generator with `--parquet-dir ./sample-parquet` and
+`--allow-source-sample`. Of the 35,377 source rows, 32,209 supplied
+descriptions. Seeded cluster padding produces the 250,000-row matrix. The
+query IDs and overlap labels under `tests/fixtures/` refer to rows in that matrix.
+Pass `registry-overlap-clawhub-minilm-query-ids.json` to `--query-ids` in preparation
+and `registry-overlap-clawhub-minilm-reviewed-labels.json` to `--labels` in the comparison.
+
+The benchmark accepts `SKILLEVALUATOR_BENCHMARK_POSTGRES_EF_SEARCH` and
+`SKILLEVALUATOR_BENCHMARK_QDRANT_EF_SEARCH` (40–1,000, default 200) to tune
+HNSW search effort independently. The report records each adapter's setting.
+
+The steady phase schedules 20 searches and 5 mutations per second for
+30 minutes. The one-minute burst keeps 20 searches per second and raises
+mutations to 25 per second. Each mutation's scheduled slot fixes its operation,
+revision, and probe vector, including when an earlier slot is dropped. Before
+starting either backend, the benchmark checks the scheduled probes for
+ambiguous cosine rankings and rejects a tied mixed-load workload. This check
+runs outside the measured phases. Set both durations to zero to run recall only.
+
+Read recall@10 against the exhaustive reference,
+provider-excluded search p95 and p99 from the scheduled start, and separate
+write acknowledgement and visibility timings. Visibility is measured by
+checking the keyed live revision and issuing a top-1 query with a seeded probe
+vector. The prior revision must appear in both probes before a removal and be
+absent afterward. If a delete succeeds without a searchable prior revision,
+the report keeps its acknowledgement and counts its visibility as unavailable.
+An unavailable sample leaves the visibility gate unmet. Dropped requests
+contribute separately to the load completion gate. Mutation visibility gates
+use adapter invocation through the successful probe. The report gives
+acknowledgement-to-visibility times separately. A driver request already in
+flight may finish after the probe's deadline, in which case the sample counts
+as a failure.
+
+The technical adapter gate requires confirmed ANN use, recall@10 of at least
+0.95, search p95 of at most 100 ms and p99 of at most 250 ms, fewer than 0.5%
+failed or dropped search requests, deletes visible within 5 seconds, and upserts
+visible within 60 seconds at p95. The report also checks mutation failures,
+dropped requests, and stale replay. Full adapter qualification requires at
+least 100,000 2,048-dimensional vectors and 1,000 queries across the stated
+workload phases. Use a separate end-to-end run to qualify the pilot service.
+
+For labeled overlap evidence, pass `--labels ./labels.json` to the benchmark.
+Each key is a selected query's zero-based corpus row ID as a string, and each
+value is a list of distinct related row IDs, excluding the query itself.
+For example, `{"12":[19,42]}` labels either row 19 or row 42 as a hit for
+query row 12. Select those query rows when preparing the workload. The report
+records labeled Hit@10 separately from exact cosine recall. The labeled gate
+requires Hit@10 of at least 90% across 100 or more labeled queries with
+supplied vectors.
+
+Use short durations and a small corpus for smoke tests. With no `--vectors`
+input the benchmark generates clustered synthetic vectors for technical
+testing. Release evidence requires labels from a representative skill
+workload embedded with the intended provider. Verify provider provenance
+and measure embedding cost separately.
+
 ## Inside validate
 
 `validate` runs the intra-skill deduplication pass by default as part of a full

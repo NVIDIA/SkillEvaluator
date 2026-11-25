@@ -100,6 +100,8 @@ def test_release_bundle_contains_deterministic_pins_and_verified_evidence(qualif
     assert archive.read_bytes() == (repeated / "ci/bundles" / VERSION / archive_name).read_bytes()
     with ZipFile(archive) as released:
         assert released.namelist() == sorted(path.name for path in bundle.iterdir() if path != archive)
+        assert "comment-skill-checks.yml" in released.namelist()
+        assert "comment-skill-checks-stable.yml" not in released.namelist()
         assert all(released.read(name) == (bundle / name).read_bytes() for name in released.namelist())
     sums = (bundle / "SHA256SUMS.txt").read_text().splitlines()
     assert sums == [

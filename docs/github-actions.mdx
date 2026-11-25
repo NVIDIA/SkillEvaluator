@@ -63,9 +63,8 @@ reusable workflow and actions.
 
 <Note>
   The released template provides **checks and downloadable reports**.
-  The same release includes the [optional hosted publisher](#enable-hosted-reports).
-  [Comments without hosting](#enable-pr-comments) are available in the source
-  workflow for a future release bundle.
+  Add [PR comments](#enable-pr-comments) or [hosted reports and PR comments](#enable-hosted-reports)
+  with a second workflow. Both templates are included in the 1.2.1 bundle.
 </Note>
 
 <Accordion title="I prefer to inspect the source templates">
@@ -94,14 +93,9 @@ pinned setup, apply these edits to its current workflow files in one PR.
    Remove the job's `image` input and any explicit `artifact-name`. The channel
    supplies the image and uses `skill-evaluator-tier1`. Keep your paths, scan
    policy, and `contents: read` permission. Add `id-token: write` for PR feedback.
-2. For PR comments without Pages, copy the
-   [stable comment template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/comment-skill-checks-stable.yml)
-   into `.github/workflows/comment-skill-checks.yml` once the stable channel
-   includes `comment-skill-checks-stable.yml`. Replace `APPROVED_SCAN_FILE_BLOB`
-   with the result of `git hash-object .github/workflows/skill-checks.yml`.
-   If you renamed the scan workflow, update `workflow_run.workflows` to match.
-   Refresh the blob only when you edit your scan workflow.
-3. If you prefer hosted feedback, follow the [Pages setup](#enable-hosted-reports).
+2. Choose one feedback workflow. For comments without Pages, follow
+   [Set up stable PR comments](#set-up-stable-pr-comments).
+   For hosted feedback, follow the [Pages setup](#enable-hosted-reports).
    In `publish-skill-reports.yml`, set the publisher job's `uses` to
    `NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports-stable.yml@stable`.
    Keep the publisher template's `permissions` block.
@@ -112,6 +106,28 @@ Use the maintained tag after its first promotion. A new run picks up later
 stable releases without a caller edit. Published reports verify the scan's
 historically resolved workflow and signed receipt. The first switch adds a
 reusable job level, so check any required status-check names on a new PR.
+
+### Set up stable PR comments
+
+<Note>
+  Use this setup after the [comment workflow appears on the stable tag](https://github.com/NVIDIA/SkillEvaluator/tree/stable/.github/workflows).
+  Until then, the [versioned setup](#enable-pr-comments) supports comments
+  without hosting.
+</Note>
+
+1. Set up the stable scan above. Keep `id-token: write` on the scan job.
+2. Copy the [stable comment template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/manual/comment-skill-checks-stable.yml)
+   to `.github/workflows/comment-skill-checks.yml`. If you're switching from
+   hosted reports, remove `.github/workflows/publish-skill-reports.yml` in the
+   same setup PR. Set `workflow_run.workflows` to your scan workflow's name if
+   you changed it from **Skill checks**.
+3. Run `git hash-object .github/workflows/skill-checks.yml` and paste the
+   result into `trusted-caller-blobs` in the comment file. Refresh this value
+   when you edit the scan file. Both workflows follow future stable releases
+   automatically.
+4. Merge the setup PR and open a PR that changes a skill. The scored comment
+   appears in **Conversation**. Download the HTML report from the scan run in
+   **Actions**.
 
 ## See what happened
 
@@ -215,7 +231,7 @@ quality score and grade, and the first action for each affected skill. Full
 reports remain downloadable from the scan run. Pages settings, a history branch
 and a report URL are not required.
 
-If your checks follow `@stable`, use the [stable comment template](#follow-the-latest-stable-release).
+If your checks follow `@stable`, use the [stable comment setup](#set-up-stable-pr-comments).
 For versioned checks, follow the pinned setup below.
 
 <Note>

@@ -165,7 +165,7 @@ reports. No Pages settings, site history branch or report URL are needed.
    receipts.
 2. Add a comment template as `.github/workflows/comment-skill-checks.yml`.
    - For `skill-checks-stable.yml@stable`, use the
-     [stable comment template](templates/comment-skill-checks-stable.yml) once
+     [stable comment template](templates/manual/comment-skill-checks-stable.yml) once
      the channel includes `comment-skill-checks-stable.yml`.
    - For a versioned scan, use the
      [1.2.1 comment template](bundles/1.2.1/comment-skill-checks.yml).
@@ -180,7 +180,8 @@ reports. No Pages settings, site history branch or report URL are needed.
    The comment workflow grants only `contents: read`, `actions: read` and
    `pull-requests: write`. Organization policy must allow these permissions and
    the referenced actions. Choose this workflow or the hosted publisher for PR
-   feedback; both update the same bot comment.
+   feedback. If switching from hosted reports, remove the old
+   `.github/workflows/publish-skill-reports.yml` in the same setup PR.
 
 The second workflow runs after **Skill checks** completes, including failed
 scans. Its manual trigger requires the completed `run-id` and `run-attempt`.

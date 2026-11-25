@@ -218,6 +218,9 @@ Pick one optional feedback workflow. These run Tier 1 checks without a model
 key; [all-tier CI setup](https://docs.nvidia.com/skills/skillevaluator/advanced-ci)
 adds deduplication and live agent evaluation.
 
+For GitHub checks following `@stable`, see
+[Set up stable PR comments](https://docs.nvidia.com/skills/skillevaluator/github-actions#set-up-stable-pr-comments).
+
 Also: [template reference](ci/templates/README.md) and [report examples](ci/examples/README.md).
 
 ## Three-tier overview

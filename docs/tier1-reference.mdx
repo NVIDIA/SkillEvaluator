@@ -310,6 +310,10 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Plugin component rules cover skill namespacing, Codex's plugin-skill cap and Agent Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a harness registers but doesn't deliver.
 
+    In source checkouts with this unreleased update, the "adds nothing" note (`…-PLUGIN-NO-COMPONENTS`) applies to folders that contain only descriptive JSON manifests and optional documentation such as a README or license. Native Hermes YAML manifest contents, unrecognized files or fields, and unreadable folders leave the bundle's contents uncertain. Components supplied from outside the folder, such as by a marketplace entry, are outside the check's scope. Claude Code's row counts servers declared at the top level of `.mcp.json`, a shape it documents. Other harnesses get an untested-format note. See [installation options](/skills/skillevaluator/installation-options) for the published release.
+
+    The Claude Code row counts usable endpoints from the default `.mcp.json` and applicable manifest declarations. It reports `not_loaded` with `CC-PLUGIN-MCP-MANIFEST` when Claude Code rejects the manifest's `mcpServers` declaration.
+
     `harness-check` takes the model setup some limits depend on: `--context-tokens`, `--custom-provider`, `--explicit-invocation` and `--headless`.
 
     Each rule records a confidence level and, where behaviour changed between releases, the versions it applies to (shown with `-v`). `--harness-version codex=0.170.0` adds a note when you run a release other than the one a profile was verified on.

@@ -30,6 +30,13 @@ def _collect(root: Path, mcp_servers: Any, files: dict[str, Any] | None = None) 
 _VALID = {"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/server.js"]}
 
 
+def test_collection_remains_strict_for_flat_maps_by_default(tmp_path: Path) -> None:
+    data = {"$schema": "https://example.invalid/schema.json", "demo": {"command": "demo"}}
+    collection = _collect(tmp_path, None, {".mcp.json": data})
+    assert collection.declarations == []
+    assert [finding.check_name for finding in collection.findings] == ["mcp_config_file_invalid"]
+
+
 @pytest.mark.parametrize("later", ["oops", {"command": 5}, {"command": ""}])
 @pytest.mark.parametrize("declared", ["./extra.json", ["./extra.json"]])
 def test_invalid_later_config_file_server_does_not_replace_earlier(tmp_path: Path, later: Any, declared: Any) -> None:

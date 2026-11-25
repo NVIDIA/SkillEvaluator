@@ -42,6 +42,14 @@ All notable changes to SkillEvaluator are documented in this file.
   model they name. Claude 4.7 and later on those profiles no longer receive a
   `temperature` the provider rejects, and the Tier 3 Bedrock refusal fallback
   keeps the request's geography prefix.
+- `harness-check` shows the plugin "adds nothing" note
+  (`…-PLUGIN-NO-COMPONENTS`) only for a folder that holds nothing but a
+  descriptive manifest. A `.mcp.json` without the `mcpServers` wrapper counts
+  for Claude Code; other harnesses get the new note `…-PLUGIN-MCP-FLAT`.
+- `harness-check` reports a Claude Code plugin as `not_loaded`
+  (`CC-PLUGIN-MCP-MANIFEST`) when Claude Code rejects its `mcpServers`
+  manifest declaration. Empty lists and maps preserve default MCP discovery.
+  The default count uses usable endpoints from `.mcp.json` in either layout.
 
 ### Documentation
 

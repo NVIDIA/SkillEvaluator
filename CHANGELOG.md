@@ -114,6 +114,10 @@ All notable changes to SkillEvaluator are documented in this file.
   redacted report and Tier 3 result text, not only after a credential name such
   as `HF_TOKEN=`.
 
+- Reuse occurrence indexes while merging collection finding summaries, avoiding
+  repeated scans of every previously collected location when many skills share
+  a finding. Finding identities, severity, ordering, and counts are preserved.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

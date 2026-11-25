@@ -160,6 +160,7 @@ def test_output_checks_reject_changed_or_misleading_results(quality_report, sect
         ("1.1.0", 88.8, 72.8),
         ("1.1.1", 88.8, 72.8),
         ("1.2.0", 88.8, 72.8),
+        ("1.2.1", 88.8, 72.8),
     ],
 )
 def test_installed_starter_uses_reviewed_version_scores(monkeypatch, evaluator_version, quality_score, regressed_score):

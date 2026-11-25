@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 1.2.1 - 2026-11-24
+
 ### Added
 
 - Add a locked Tier 2 CI container with credential-free build verification and

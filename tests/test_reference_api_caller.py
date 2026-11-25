@@ -76,7 +76,7 @@ def test_openapi_path_dot_segments_report_json_errors(
         "servers": [{"url": "https://example.invalid/v1"}],
         "paths": {"/items/{id}": {"get": {"operationId": "getItem"}}},
     }
-    monkeypatch.setattr(caller, "fetch_openapi_spec", lambda _url: spec)
+    monkeypatch.setattr(caller, "fetch_openapi_spec", lambda url: (spec, url))
     monkeypatch.setattr(
         sys,
         "argv",
@@ -115,7 +115,7 @@ def test_api_caller_rejects_non_http_urls_without_opening_them() -> None:
 def test_openapi_parser_rejects_non_http_urls_without_opening_them() -> None:
     parser = _load_script("parse_openapi")
 
-    result = parser.fetch_spec("file:///etc/passwd")
+    result, _final_url = parser.fetch_spec("file:///etc/passwd")
 
     assert result == {"error": "Failed to fetch spec: Only absolute HTTP or HTTPS URLs are supported"}
 

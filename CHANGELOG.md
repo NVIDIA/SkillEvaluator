@@ -14,7 +14,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Avoid false incomplete security scans when SkillSpector 2.13.5+ reports that
   optional dependency inspection was not requested. Verified missing-reference
-  caveats remain warnings; security findings and incomplete analysis still block.
+  caveats remain warnings; existing security and completeness gates are unchanged.
 - NeMo Gym now scores native multi-step tasks once using the task's `mean` or
   `final` strategy. The live case grid and finished report use the same verdict.
   A failed or ungraded step leaves the attempt unscored. With `final`, the last

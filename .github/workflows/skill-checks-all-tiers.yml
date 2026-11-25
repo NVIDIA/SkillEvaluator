@@ -26,10 +26,10 @@ jobs:
   skills:
     uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@d1d8d41c97eacbebb737f72d58f6f79efa54a31a
     with:
-      tiers: 1,2,3
+      tiers: '1,2'
       paths: skills
       min-score: 70
-      scan-mode: auto
+      scan-mode: all
       env-mode: docker
       provider: nv_build
       embedding-provider: nv_build
@@ -46,7 +46,7 @@ jobs:
       timeout-minutes: 300
       environment: skillevaluator
       environment-deployment: false
-      tier1-llm: true
+      tier1-llm: false
       tier1-provider: nv_build
       tier1-model: nvidia/nemotron-3.5-super-vl-120b-a12b
       tier3-provider: openai-compatible

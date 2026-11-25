@@ -45,9 +45,11 @@ jobs:
           uv run python - <<'PY'
           import collections
           import concurrent.futures
+          import os
           import subprocess
           import sys
           import time
+          import uuid
 
           from skillevaluator.tier3.harbor import runner
 
@@ -55,14 +57,24 @@ jobs:
           interpreter = sys._base_executable
           print("venv python (launcher):", launcher)
           print("base interpreter      :", interpreter)
-          print("same file:", launcher.lower() == interpreter.lower(), flush=True)
+          print("cpu count:", os.cpu_count(), flush=True)
 
-          SLEEP = "import time; time.sleep(120)"
+          def survivors(marker: str) -> int:
+              """Count, then stop, processes whose command line carries ``marker``."""
+              query = (
+                  "$found = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*" + marker + "*' "
+                  "-and $_.Name -like 'python*' }); $found.Count; "
+                  "$found | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+              )
+              done = subprocess.run(["powershell", "-NoProfile", "-Command", query], capture_output=True, text=True)
+              digits = [line.strip() for line in done.stdout.splitlines() if line.strip().isdigit()]
+              return int(digits[0]) if digits else -1
 
-          def kill_one(root: str, with_child: bool) -> str:
-              script = SLEEP
+          def kill_one(root: str, with_child: bool, settle: float, marker: str) -> str:
+              sleep = f"import time; time.sleep(120)  # {marker}"
+              script = sleep
               if with_child:
-                  script = f"import subprocess, time; subprocess.Popen([{root!r}, '-c', {SLEEP!r}]); time.sleep(120)"
+                  script = f"import subprocess, time; subprocess.Popen([{root!r}, '-c', {sleep!r}]); time.sleep(120)  # {marker}"
               process = subprocess.Popen(
                   [root, "-c", script],
                   stdin=subprocess.DEVNULL,
@@ -70,27 +82,49 @@ jobs:
                   stderr=subprocess.DEVNULL,
                   creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
               )
-              time.sleep(0.6)  # let a launcher start the real interpreter, and the root start its child
+              if settle:
+                  time.sleep(settle)
               try:
                   runner._terminate_harbor_process_tree(process)
               except RuntimeError as error:
                   return str(error)[:420]
               return "ok"
 
-          def run(label: str, root: str, with_child: bool, count: int, workers: int) -> None:
+          def run(label: str, root: str, with_child: bool, settle: float, count: int = 80, workers: int = 4) -> None:
+              marker = "exp-" + uuid.uuid4().hex[:12]
               started = time.monotonic()
               with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                  results = collections.Counter(pool.map(lambda _: kill_one(root, with_child), range(count)))
+                  results = collections.Counter(
+                      pool.map(lambda _: kill_one(root, with_child, settle, marker), range(count))
+                  )
+              time.sleep(1.5)
+              left = survivors(marker)
               failed = count - results["ok"]
-              print(f"\n== {label}: {failed} of {count} cleanups reported a failure ({time.monotonic() - started:.0f}s, {workers} at a time)")
+              print(
+                  f"\n== {label}: {failed} of {count} cleanups reported a failure, "
+                  f"{left} processes still alive afterwards ({time.monotonic() - started:.0f}s)"
+              )
               for message, times in results.most_common(6):
                   if message != "ok":
                       print(f"   {times:4d} x {message}")
               sys.stdout.flush()
 
-          for workers in (1, 4):
-              run(f"launcher root, no child of its own, {workers} at a time", launcher, False, 60, workers)
-              run(f"launcher root, with a child, {workers} at a time", launcher, True, 60, workers)
-              run(f"interpreter root, no child, {workers} at a time", interpreter, False, 60, workers)
-              run(f"interpreter root, with a child, {workers} at a time", interpreter, True, 60, workers)
+          def batch(load: str) -> None:
+              for settle in (0.0, 0.05, 0.6):
+                  for name, root in (("launcher", launcher), ("interpreter", interpreter)):
+                      for with_child in (False, True):
+                          child = "with a child" if with_child else "no child"
+                          run(f"{load}; {name} root, {child}, killed after {settle}s", root, with_child, settle)
+
+          batch("machine idle")
+          burners = [
+              subprocess.Popen([interpreter, "-c", "while True: pass"], stdin=subprocess.DEVNULL)
+              for _ in range((os.cpu_count() or 4) * 3)
+          ]
+          try:
+              time.sleep(1)
+              batch("CPU saturated")
+          finally:
+              for burner in burners:
+                  burner.kill()
           PY

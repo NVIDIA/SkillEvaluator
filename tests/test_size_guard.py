@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -85,8 +86,12 @@ def test_report(repo: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pyt
     assert size_guard.main(["--repo", str(repo / "src")]) == 0
     report = capsys.readouterr().out.splitlines()
     assert [line.split(": ")[1] for line in report[2:5]] == list(sizes)
-    verdict = ": excepted: " if labels else ": over: "
-    assert {line[2:4]: line.split(verdict)[1] for line in report[-7:-2] if not line.endswith(": ok")} == over
+    verdict = "excepted: " if labels else "over: "
+    expected = dict.fromkeys(size_guard.RULES, "ok")
+    expected.update({rule: verdict + reasons for rule, reasons in over.items()})
+    if title == "Add a module":
+        expected.update(dict.fromkeys(("G1", "G2", "G5"), "n/a (fix titles only)"))
+    assert {line[2:4]: line.split(": ", 1)[1] for line in report[-7:-2]} == expected
     assert size_guard.main(["--repo", str(repo), "--enforce"]) == int(bool(over) and not labels)
     assert [size_guard.main(["--repo", str(repo), "--base", "no-ref", *flag]) for flag in ([], ["--enforce"])] == [0, 2]
 
@@ -101,6 +106,21 @@ def test_update_baseline_only_lowers(repo: Path, capsys: pytest.CaptureFixture[s
     assert (size_guard.main([*update, "--allow-raise"]), size_guard.main(update)) == (0, 0)
     recorded = {"version": 1, size_guard.RATIO: 0.5, "files": dict.fromkeys(names, 1501)}
     assert json.loads(target.read_text(encoding="utf-8")) == recorded
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not allow newlines in filenames")
+def test_size_guard_preserves_newlines_in_git_paths(repo: Path) -> None:
+    basename = "src/baseline\nnotes.txt"
+    capture = "tests/fixtures/large\ncapture.json"
+    _commit(repo, {basename: LINE * 1501})
+    assert size_guard.main(["--repo", str(repo), "--update-baseline", "--allow-raise"]) == 0
+    assert json.loads((repo / size_guard.BASELINE).read_text(encoding="utf-8"))["files"] == {basename: 1501}
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+    _commit(repo, {basename: LINE * 1502, capture: LINE * 101})
+    found = size_guard.measure(repo, "origin/main", "HEAD")
+    assert found["grown"] == {"`src/baseline\\nnotes.txt`": 1}
+    assert found["fixtures"] == {"`tests/fixtures/large\\ncapture.json`": 101}
 
 
 @pytest.mark.parametrize(

@@ -40,7 +40,8 @@ _TITLE = re.compile(r"(\w+)(\([^)]*\))?!?:")
 _NUMSTAT = re.compile(r"(\d+|-)\t(\d+|-)\t(?:\0([^\0]*)\0)?([^\0]+)\0")
 _TEST_FILE = re.compile(r"tests/(?:[^/]+/)*(?:test_[^/]*|[^/]*_test)\.py")
 _TEST_DEF = re.compile(r"^([+-])\s*(?:async\s+)?def test_", re.MULTILINE)
-_FIXTURE = re.compile(r"tests/.*(?<!\.py)")
+# Git grep terminates each path with NUL and the following line count with LF.
+_GREP_COUNT = re.compile(r"([^\0]+)\0([0-9]+)\n")
 
 
 def _git_bytes(repo: Path, *args: str) -> bytes:
@@ -154,7 +155,9 @@ def measure(repo: Path, base: str, head: str) -> dict:
         "test_defs": (defs.count("+"), defs.count("-")),
         "new_src_files": [_name(path) for path in new if path.startswith("src/")],
         "grown": grown,
-        "fixtures": {_name(path): rows[path][0] for path in new if _FIXTURE.fullmatch(path)},
+        "fixtures": {
+            _name(path): rows[path][0] for path in new if path.startswith("tests/") and not path.endswith(".py")
+        },
     }
     for root in ("src/", "tests/"):
         inside = [row for path, row in rows.items() if path.startswith(root)]
@@ -198,18 +201,26 @@ def render(found: dict, kind: str, over: dict[str, list[str]], excepted: bool) -
         f"- Baseline files that grew: {grown or 'none'}",
         f"- Added test lines against added source lines: {found['tests/'][0]} / {found['src/'][0]}",
         "",
-        *(f"- {rule} {RULES[rule]}: " + (verdict + "; ".join(why) if why else "ok") for rule, why in over.items()),
-        "",
-        'See "Keeping Changes Small" in CONTRIBUTING.md; the `size-exception` label marks an agreed exception.',
     ]
+    for rule, description in RULES.items():
+        if kind != "fix" and rule in FIX_ONLY:
+            status = "n/a (fix titles only)"
+        elif over[rule]:
+            status = verdict + "; ".join(over[rule])
+        else:
+            status = "ok"
+        lines.append(f"- {rule} {description}: {status}")
+    lines.extend(
+        ["", 'See "Keeping Changes Small" in CONTRIBUTING.md; the `size-exception` label marks an agreed exception.']
+    )
     return "\n".join(lines)
 
 
 def update_baseline(repo: Path, ref: str, allow_raise: bool) -> int:
     """Rewrite the baseline from ``ref``. Without ``allow_raise`` no number may go up and no file may be added."""
     # CHANGELOG.md is not recorded: every user-visible change has to add an entry to it.
-    records = _git(repo, "grep", "-I", "-c", "-z", "--no-color", "", ref, "--", ":!CHANGELOG.md").split("\n")[:-1]
-    counts = {path[len(ref) + 1 :]: int(count) for path, _, count in (record.partition("\0") for record in records)}
+    records = _git(repo, "grep", "-I", "-c", "-z", "--no-color", "", ref, "--", ":!CHANGELOG.md")
+    counts = {path[len(ref) + 1 :]: int(count) for path, count in _GREP_COUNT.findall(records)}
     python = {path: count for path, count in counts.items() if path.endswith(".py")}
     src, tests = (sum(n for path, n in python.items() if path.startswith(root)) for root in ("src/", "tests/"))
     files = {path: count for path, count in sorted(counts.items()) if count > BIG_FILE}

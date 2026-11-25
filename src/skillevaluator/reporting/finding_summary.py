@@ -160,6 +160,7 @@ def summarize_findings(results: list[ValidationResult]) -> dict[str, Any]:
 def merge_finding_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     """Merge per-result summaries without hashing the same findings again."""
     groups: dict[str, dict[str, Any]] = {}
+    seen_occurrences: dict[str, set[str]] = {}
     raw_by_severity = dict.fromkeys(_SEVERITY_ORDER, 0)
     reported_occurrences = 0
     for summary in summaries:
@@ -172,14 +173,16 @@ def merge_finding_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
             group = groups.get(finding_id)
             if group is None:
                 groups[finding_id] = deepcopy(incoming)
+                seen_occurrences[finding_id] = {item["occurrence_id"] for item in incoming["occurrences"]}
                 continue
             if _SEVERITY_ORDER.get(incoming["severity"], 0) > _SEVERITY_ORDER.get(group["severity"], 0):
                 group["severity"] = incoming["severity"]
             group["validators"] = sorted(set(group["validators"]) | set(incoming["validators"]))
-            existing_occurrences = {item["occurrence_id"] for item in group["occurrences"]}
-            group["occurrences"].extend(
-                deepcopy(item) for item in incoming["occurrences"] if item["occurrence_id"] not in existing_occurrences
-            )
+            existing_occurrences = seen_occurrences[finding_id]
+            for item in incoming["occurrences"]:
+                if item["occurrence_id"] not in existing_occurrences:
+                    existing_occurrences.add(item["occurrence_id"])
+                    group["occurrences"].append(deepcopy(item))
 
     return _finalize_summary(groups, raw_by_severity, reported_occurrences)
 

@@ -45,6 +45,8 @@ from skillevaluator.constants import (
     LIFT_BOOTSTRAP_CONFIDENCE,
     LIFT_BOOTSTRAP_RESAMPLES,
     LIFT_BOOTSTRAP_SEED,
+    LIFT_CI_LOW_PRECISION_WIDTH,
+    LIFT_CI_MIN_PAIRED_CASES,
     QUALITY_CHARS_PER_TOKEN,
     QUALITY_DEFAULT_MIN_SCORE,
     QUALITY_GRADE_THRESHOLDS,
@@ -53,7 +55,9 @@ from skillevaluator.constants import (
     TIER3_LIFT_PASS_THRESHOLD,
     TOKEN_EFFICIENCY_HALF_LIFE,
 )
+from skillevaluator.evaluation.tier3_report import LIFT_INTERVAL_WARNING_TITLE
 from skillevaluator.quality_config import load_quality_config, load_quality_config_with_provenance
+from skillevaluator.reporting.tier3_statistics import LIFT_TITLE, RELIABILITY_TITLE
 from skillevaluator.tier3 import dataset_sufficiency
 from skillevaluator.tier3.eval_core.llm_judge import _ACCURACY_CRITERIA
 from skillevaluator.tier3.harbor.collector import (
@@ -61,7 +65,11 @@ from skillevaluator.tier3.harbor.collector import (
     _wilson_score_interval,
 )
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, LEGACY_SCORE_POLICY
-from skillevaluator.tier3.harbor.stats import token_efficiency_score
+from skillevaluator.tier3.harbor.stats import (
+    LIFT_CI_ADEQUATE_MIN_CASES,
+    RUN_STATISTICS_FIELDS,
+    token_efficiency_score,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 DOC_PATH = REPO / "docs/metrics-reference.mdx"
@@ -312,6 +320,34 @@ def test_bootstrap_parameters_match_constants() -> None:
     assert int(seed) == LIFT_BOOTSTRAP_SEED
     assert int(resamples.replace(",", "")) == LIFT_BOOTSTRAP_RESAMPLES
     assert int(confidence) / 100 == pytest.approx(LIFT_BOOTSTRAP_CONFIDENCE)
+
+
+def test_lift_precision_thresholds_match_the_code() -> None:
+    match = _one(
+        r"`insufficient` below (\d+) paired cases, `low` below (\d+) paired cases "
+        r"or when the interval is wider than ([\d.]+), and `adequate` otherwise"
+    )
+    insufficient_below, adequate_from, widest = match.groups()
+
+    assert int(insufficient_below) == LIFT_CI_MIN_PAIRED_CASES
+    assert int(adequate_from) == LIFT_CI_ADEQUATE_MIN_CASES
+    assert float(widest) == LIFT_CI_LOW_PRECISION_WIDTH
+
+
+def test_run_statistics_are_documented_where_the_reports_show_them() -> None:
+    assert "<run>/<agent>/statistics.json" in FLAT
+    for field in RUN_STATISTICS_FIELDS:
+        assert f"`{field}" in FLAT, f"the page no longer names the {field} block"
+    # The page quotes the table titles and the warning the reports print.
+    assert f'"{LIFT_TITLE}"' in FLAT
+    assert f'"{RELIABILITY_TITLE}"' in FLAT
+    assert f'"{LIFT_INTERVAL_WARNING_TITLE}"' in FLAT
+
+    rows = _table_rows("Number")
+    shown_in = {name: cells[0] for name, cells in rows.items()}
+    for name in ("Paired-case lift interval", "pass^k"):
+        row = next(cells for label, cells in shown_in.items() if name in label)
+        assert "statistics.json" in row, name
 
 
 def test_pass_rate_difference_units_match_the_artifact() -> None:

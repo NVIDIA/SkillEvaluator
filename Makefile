@@ -9,7 +9,7 @@ test:
 	$(PYTHON) -m pytest
 
 lint:
-	$(PYTHON) -m ruff check src tests
+	$(PYTHON) -m ruff check .
 
 build:
 	$(PYTHON) -m build

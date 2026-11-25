@@ -774,6 +774,7 @@ class ValidationResult:
             self.metadata.get("skillspector_completeness"),
             other.metadata.get("skillspector_completeness"),
             prefix=prefix,
+            reuse_projected_left=True,
         )
         if completeness:
             self.metadata["skillspector_completeness"] = completeness

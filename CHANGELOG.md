@@ -4,10 +4,43 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 1.2.1 - 2026-11-24
+
+### Added
+
+- Add a locked Tier 2 CI container with credential-free build verification and
+  opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
+  Tier 2 together from the Repository Integration guide.
+
 ### Fixed
 
+- Avoid false incomplete security scans when a SkillSpector 2.x release
+  starting at 2.13.5 reports that optional dependency inspection was not
+  requested. Verified missing-reference caveats remain warnings. Existing
+  security and completeness gates are unchanged.
+- The `skillspector_completeness` ledger in JSON reports keeps up to 500
+  exception rows per skill and scan stage (was 20), with a 128 KiB budget
+  for serialized rows. Reports keep up to 512 records (was 64), and each
+  record now states `ledger_rows_retained` and
+  `ledger_rows_total`. A 227-skill library whose scanner reported 521
+  incomplete rows previously showed 268, so fixing the visible rows did not
+  clear the gate; the omitted count was recorded but not surfaced. When the
+  cap applies, the security gate message counts the ledger rows for the
+  reported gaps, including how many exceed the per-record limit.
+- NeMo Gym now scores native multi-step tasks once using the task's `mean` or
+  `final` strategy. The live case grid and finished report use the same verdict.
+  A failed or ungraded step leaves the attempt unscored. With `final`, the last
+  step determines which metrics apply, even if an earlier step scored one.
+  Each step keeps its own verifier output and trajectory after job cleanup,
+  including steps completed before a failure. Gym masks configured credential
+  values in trajectory text, verifier output, and step failure messages.
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
+- The api-caller reference skill keeps a `Content-Type` passed with `--headers`
+  when it sends a `--data` body, so a PATCH can use
+  `application/merge-patch+json` or a JSON:API request
+  `application/vnd.api+json`. It was always replaced with `application/json`,
+  whatever the header name's case.
 
 ## 1.2.0 - 2026-11-23
 

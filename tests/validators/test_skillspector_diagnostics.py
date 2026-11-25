@@ -111,11 +111,13 @@ def test_diagnostic_text_and_lists_are_bounded_redacted_and_idempotent():
                 "unexpected": "must not persist",
             }
         ]
-        * 25,
+        * 505,
         "limitations": ["password=fictional-password " + "x" * 800] * 10,
     }
     record = completeness_record(raw, "skillspector")
-    assert record["omitted_exceptions"] == 5
+    assert 0 < record["ledger_rows_retained"] <= 500
+    assert record["omitted_exceptions"] == 505 - record["ledger_rows_retained"]
+    assert record["ledger_rows_total"] == 505
     assert record["omitted_limitations"] == 2
     assert record["ledger_exceptions"][0]["omitted_analyzers"] == 4
     assert "start_line" not in record["ledger_exceptions"][0]
@@ -124,9 +126,11 @@ def test_diagnostic_text_and_lists_are_bounded_redacted_and_idempotent():
     assert "must not persist" not in encoded and "\\u001b" not in encoded and "\\n" not in encoded
     wrapped = {"records": [record], "omitted_records": 0}
     assert sanitize_completeness(wrapped) == wrapped
-    merged = merge_completeness(wrapped, {"records": [record] * 70})
-    assert len(merged["records"]) == 64
-    assert merged["omitted_records"] == 7
+    small_record = completeness_record({"ledger_exceptions": [{"path": "guide.md"}]}, "skillspector")
+    merged = merge_completeness(wrapped, {"records": [small_record] * 520})
+    assert len(merged["records"]) == 512
+    assert merged["omitted_records"] == 9
+    assert merged["records"][0]["ledger_rows_total"] == 505
     assert sanitize_completeness(merged) == merged
 
 
@@ -244,3 +248,102 @@ def test_limitation_only_partial_report_keeps_its_reason_in_the_error():
 
     assert result.status == "incomplete"
     assert any("Limitation: Binary assets were not inspected" in error for error in result.errors)
+
+
+def test_ledger_keeps_every_row_of_a_realistic_library_and_states_the_totals():
+    """A skill with dozens of incomplete files keeps every row; the record says N of N."""
+    rows = [
+        {"path": f"scripts/file_{i}.sh", "phase": "static", "reason_code": "static_parse_limit", "analyzers": ["a"]}
+        for i in range(47)
+    ]
+    record = completeness_record({"ledger_exceptions": rows, "limitations": []}, "skillspector")
+    assert len(record["ledger_exceptions"]) == 47
+    assert record["omitted_exceptions"] == 0
+    assert record["ledger_rows_retained"] == record["ledger_rows_total"] == 47
+
+    # Re-projecting a saved record that already carried omissions keeps the total honest.
+    saved = {**record, "omitted_exceptions": 3}
+    again = sanitize_completeness({"records": [saved], "omitted_records": 0})["records"][0]
+    assert again["ledger_rows_retained"] == 47
+    assert again["omitted_exceptions"] == 3
+    assert again["ledger_rows_total"] == 50
+
+
+def test_ledger_row_byte_limit_matches_escaped_json_and_preserves_totals(monkeypatch):
+    import skillevaluator.skillspector_diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "_MAX_LEDGER_ROW_BYTES", 1_024)
+    short = {"path": "scripts/one.py", "phase": "static", "reason_code": "static_parse_limit"}
+    wide = {**short, "path": f"scripts/{'é' * 130}.py"}
+    assert completeness_record({"ledger_exceptions": [wide]}, "skillspector")["ledger_exceptions"] == [wide]
+
+    record = completeness_record({"ledger_exceptions": [short, wide, short]}, "skillspector")
+
+    assert record["ledger_exceptions"] == [short]
+    assert record["ledger_rows_retained"] == 1
+    assert record["ledger_rows_total"] == 3
+    assert record["omitted_exceptions"] == 2
+    assert sanitize_completeness({"records": [record]})["records"] == [record]
+
+
+def test_gate_message_names_gap_ledger_rows_and_cap(monkeypatch):
+    import skillevaluator.skillspector_diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "_MAX_ROWS", 2)
+    payload = json.loads((Path(__file__).parents[1] / "fixtures" / "skillspector-2.13.3-safe-no-llm.json").read_text())
+    payload["risk_assessment"]["recommendation"] = "CAUTION"
+    payload["analysis_completeness"].update(
+        is_complete=False,
+        status="partial",
+        ledger_exceptions=[
+            {
+                "fatal": False,
+                "path": f"scripts/file_{i}.sh",
+                "phase": "static",
+                "reason_code": "static_parse_limit",
+                "analyzers": ["static_patterns_shell"],
+            }
+            for i in range(5)
+        ],
+    )
+    result = ValidationResult(validator_name="Security Scan")
+    assert SecurityValidator._validate_skillspector_report(payload, 0, False, "skillspector", result)
+    record = result.metadata["skillspector_completeness"]["records"][0]
+    assert record["ledger_rows_retained"] == 2 and record["ledger_rows_total"] == 5
+    assert any(
+        "The completeness ledger for these gaps has 5 rows, with 3 beyond the per-record limit" in error
+        for error in result.errors
+    )
+
+
+def test_folder_merge_projects_each_incoming_record_once(monkeypatch):
+    import skillevaluator.skillspector_diagnostics as diagnostics
+
+    projected = 0
+    original = diagnostics.completeness_record
+
+    def record(payload, stage):
+        nonlocal projected
+        projected += 1
+        return original(payload, stage)
+
+    monkeypatch.setattr(diagnostics, "completeness_record", record)
+    combined = ValidationResult(validator_name="Security Scan")
+    for index in range(20):
+        member = ValidationResult(validator_name="Security Scan")
+        member.metadata["skillspector_completeness"] = {
+            "records": [{"stage": "skillspector", "ledger_exceptions": [{"path": "guide.md"}]}]
+        }
+        combined.merge_with_prefix(member, f"skill-{index}")
+        member.metadata["skillspector_completeness"]["records"][0]["ledger_exceptions"][0]["path"] = "modified.md"
+
+    assert projected == 20
+    saved = diagnostics.sanitize_completeness(combined.metadata["skillspector_completeness"])
+    assert projected == 40
+    assert [record["skill"] for record in saved["records"]] == [f"skill-{index}" for index in range(20)]
+    assert all(item["ledger_exceptions"][0]["path"] == "guide.md" for item in saved["records"])
+
+    aggregate = combined.metadata["skillspector_completeness"]
+    standalone = merge_completeness(aggregate, None)
+    standalone["records"][0]["ledger_exceptions"][0]["path"] = "modified.md"
+    assert aggregate["records"][0]["ledger_exceptions"][0]["path"] == "guide.md"

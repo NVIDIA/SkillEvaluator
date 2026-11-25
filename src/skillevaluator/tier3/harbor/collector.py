@@ -124,6 +124,7 @@ _COLLECTOR_IDENTITY_KEYS = (
     "_trusted_case_identity_unresolved",
 )
 TRIAL_DIAGNOSTIC_ARTIFACTS = ("result.json", "config.json", "exception.txt", "trial.log")
+STEP_VERIFIER_ARTIFACTS = ("test-stdout.txt",)
 AGENT_LOG_ARTIFACTS = (
     "trajectory.json",
     "cursor-cli.txt",
@@ -890,13 +891,17 @@ def _agent_log_runtime_failure_reason(
     trial_dir: Path,
     *,
     include_text_logs: bool = True,
+    trajectory_startup_failed: bool | None = None,
 ) -> str:
     """Return the most specific agent log/runtime startup failure, if present."""
-    for trajectory_path in (trial_dir / "agent" / "trajectory.json", trial_dir / "trajectory.json"):
-        if trajectory_path.exists():
-            reason = _trajectory_agent_runtime_failure_reason(_read_json(trajectory_path))
-            if reason:
-                return reason
+    if trajectory_startup_failed is not False:
+        for trajectory_path in (trial_dir / "agent" / "trajectory.json", trial_dir / "trajectory.json"):
+            if trajectory_path.exists():
+                reason = _trajectory_agent_runtime_failure_reason(_read_json(trajectory_path))
+                if reason:
+                    return reason
+        if trajectory_startup_failed:
+            return "NeMo Gym agent failed to start"
 
     for path in (
         trial_dir / "agent" / "claude-code.txt",
@@ -930,12 +935,17 @@ def _agent_log_runtime_failure_reason(
 
 def _agent_runtime_failure_reason(trial_dir: Path) -> str:
     """Return why a trial cannot produce a valid score."""
+    result = _read_json(trial_dir / "result.json")
+    result = result if isinstance(result, dict) else {}
+    gym = result.get("nemo_gym") if result.get("execution_backend") == "nemo-gym" else None
+    startup_failed = gym.get("trajectory_startup_failed") if isinstance(gym, dict) else None
     exception_details = [
-        _trial_exception_details(trial_dir),
+        _exception_details(result.get("exception_info")),
         *_trial_step_exception_details(trial_dir),
     ]
     agent_reason = _agent_log_runtime_failure_reason(
         trial_dir,
+        trajectory_startup_failed=startup_failed if isinstance(startup_failed, bool) else None,
         include_text_logs=any(
             exception_type in _AGENT_RUNTIME_EXCEPTION_TYPES
             or exception_type in _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES
@@ -1304,6 +1314,7 @@ def _write_redacted_text_copy(
     dest: Path,
     *,
     source_root: Path | None = None,
+    secret_values: set[str] | None = None,
 ) -> tuple[bool, dict[str, Any] | None]:
     """Copy a Harbor text artifact while masking common credential shapes."""
     max_bytes = _diagnostic_artifact_max_bytes()
@@ -1351,6 +1362,10 @@ def _write_redacted_text_copy(
     except UnicodeDecodeError as e:
         logger.debug("Failed to read Harbor artifact %s: %s", src, e)
         return False, {"name": src.name, "reason": "read_failed", "size_bytes": size_bytes}
+    if secret_values:
+        from skillevaluator.tier3.harbor.stream_redaction import StreamingSecretRedactor
+
+        text = StreamingSecretRedactor(secret_values).feed(text, final=True)
     redacted = _redacted_artifact_text(src, text)
     if redacted is None:
         return False, {"name": src.name, "reason": "invalid_json", "size_bytes": size_bytes}
@@ -1415,6 +1430,44 @@ def _copy_trial_artifacts(
                     manifest["skipped"].append(record)
     if manifest["skipped"]:
         _write_artifact_manifest(trial_out, manifest)
+    return copied
+
+
+def _copy_step_artifacts(trial_dir: Path, trial_out: Path) -> list[str]:
+    """Publish each named step's redacted trajectory and verifier output under ``steps/<name>/``.
+
+    A partial episode keeps the steps that ran even when its merged trajectory is incomplete.
+    """
+    names = _expected_step_trajectory_names(trial_dir)
+    if names is None:
+        return []
+    trajectories = {path.parent.parent.name: path for path in _ordered_step_trajectory_paths(trial_dir)}
+    copied: list[str] = []
+    for name in names:
+        if _safe_trial_path_component(name) != name:
+            continue
+        step_out = trial_out / "steps" / name
+        trajectory_path = trajectories.get(name)
+        trajectory: dict[str, Any] | None = None
+        if trajectory_path is not None:
+            try:
+                trajectory, _reference_key = _materialize_trajectory_file(trajectory_path.parent, trajectory_path.name)
+            except (OSError, SecurePathError, _TrajectoryMergeError, RecursionError):
+                trajectory = None
+        safe_trajectory = _redacted_trajectory_data(trajectory) if trajectory is not None else None
+        if safe_trajectory is not None:
+            step_out.mkdir(parents=True, exist_ok=True)
+            (step_out / "trajectory.json").write_text(
+                json.dumps(safe_trajectory, separators=(",", ":"), ensure_ascii=True, allow_nan=False),
+                encoding="utf-8",
+            )
+            copied.append(f"steps/{name}/trajectory.json")
+        for artifact_name in STEP_VERIFIER_ARTIFACTS:
+            src = trial_dir / "steps" / name / "verifier" / artifact_name
+            if src.exists() or src.is_symlink():
+                ok, _record = _write_redacted_text_copy(src, step_out / artifact_name, source_root=trial_dir)
+                if ok:
+                    copied.append(f"steps/{name}/{artifact_name}")
     return copied
 
 
@@ -1616,6 +1669,7 @@ def _save_unscored_trials(
         trial_out = trials_dir / persisted_names.get(trial_src.name, "unknown")
         trial_out.mkdir(parents=True, exist_ok=True)
         copied = _copy_trial_artifacts(trial_src, trial_out, include_root_trajectory=False)
+        copied.extend(_copy_step_artifacts(trial_src, trial_out))
         materialized_trajectory, trajectory_reason = _materialized_trial_trajectory(trial_src, None)
         safe_trajectory = (
             _redacted_trajectory_data(materialized_trajectory) if materialized_trajectory is not None else None
@@ -1985,7 +2039,30 @@ def _merged_atif_schema_version(*trajectories: Mapping[str, Any]) -> str:
     return f"ATIF-v{newest[0]}.{newest[1]}"
 
 
-def _validated_trajectory_dict(data: Any) -> dict[str, Any]:
+def _mask_atif_fields(value: Any, mask: Callable[[str], str]) -> Any:
+    """Mask free text and free-form metadata while preserving ATIF's field names and literal tags."""
+    from typing import Literal, get_origin
+
+    from pydantic import BaseModel
+
+    if isinstance(value, BaseModel):
+        fields = {}
+        for name, field in type(value).model_fields.items():
+            item = getattr(value, name)
+            if item is None:
+                continue
+            masked = item if get_origin(field.annotation) is Literal else _mask_atif_fields(item, mask)
+            if name != "timestamp" or masked == item:
+                fields[name] = masked
+        return fields
+    if isinstance(value, dict):
+        return {key: _mask_atif_fields(item, mask) for key, item in value.items() if mask(key) == key}
+    if isinstance(value, list):
+        return [_mask_atif_fields(item, mask) for item in value]
+    return mask(value) if isinstance(value, str) else value
+
+
+def _validated_trajectory_dict(data: Any, *, secret_values: set[str] | None = None) -> dict[str, Any]:
     try:
         # Bound traversal before deepcopy so hostile ATIF cannot amplify work
         # before validation begins.
@@ -2085,7 +2162,20 @@ def _validated_trajectory_dict(data: Any) -> dict[str, Any]:
         )
         from harbor.models.trajectories import Trajectory
 
-        validated = Trajectory.model_validate(candidate).to_json_dict()
+        trajectory = Trajectory.model_validate(candidate)
+        if secret_values:
+            from skillevaluator.tier3.harbor.stream_redaction import collision_safe_redaction_marker
+
+            secrets = sorted(secret_values - {""}, key=len, reverse=True)
+            marker = collision_safe_redaction_marker(secrets)
+
+            def mask(text: str) -> str:
+                for secret in secrets:
+                    text = text.replace(secret, marker)
+                return text
+
+            trajectory = Trajectory.model_validate(_mask_atif_fields(trajectory, mask))
+        validated = trajectory.to_json_dict()
         _validate_generated_json_value(
             validated,
             max_depth=ATIF_JSON_MAX_DEPTH,
@@ -3477,7 +3567,7 @@ def _constituent_custom_metric_failure(result: dict[str, Any]) -> str:
 def _restore_constituent_not_applicable(
     data: dict[str, Any], result: dict[str, Any], trial_root: Path
 ) -> dict[str, Any]:
-    """Restore absent N/A metrics only when every declared step has bounded sidecar evidence.
+    """Restore absent N/A metrics from the scoring steps, after checking every sidecar.
 
     The returned validation view preserves Harbor's authoritative numeric values.
     Missing or unsafe sidecars cannot turn absent metrics into applicable scores.
@@ -3500,10 +3590,11 @@ def _restore_constituent_not_applicable(
     original = root_verifier.get("rewards") if isinstance(root_verifier, dict) else None
     if not isinstance(original, dict):
         return result
+    scoring_steps = names[-1:] if _harbor_multi_step_reward_strategy(result) == "final" else names
     restored = [
         metric
         for metric in _standard_reward_metrics(original)
-        if metric not in original and all(metric_is_not_applicable(by_name[name], metric) for name in names)
+        if metric not in original and all(metric_is_not_applicable(by_name[name], metric) for name in scoring_steps)
     ]
     if not restored:
         return result
@@ -3516,6 +3607,8 @@ def _restore_constituent_not_applicable(
             return result
         rewards = dict(rewards)
         for metric in restored:
+            if not metric_is_not_applicable(by_name[name], metric):
+                continue
             # A conflicting numeric value remains authoritative and prevents restoration.
             if metric in rewards and not metric_is_not_applicable(rewards, metric):
                 return result
@@ -3523,7 +3616,7 @@ def _restore_constituent_not_applicable(
             mark_not_applicable(rewards, metric, recorded_not_applicable_reason(by_name[name], metric))
         steps.append({**step, "verifier_result": {**verifier, "rewards": rewards}})
     for metric in restored:
-        reason = shared_not_applicable_reason([by_name[name] for name in names], metric)
+        reason = shared_not_applicable_reason([by_name[name] for name in scoring_steps], metric)
         mark_not_applicable(root_rewards, metric, reason)
         if metric not in data:
             mark_not_applicable(data, metric, reason)
@@ -5485,7 +5578,11 @@ _LLM_JUDGE_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
 
 
 def _harbor_multi_step_reward_strategy(result: dict[str, Any]) -> str | None:
-    """Read the task's strategy when its staged configuration is still available."""
+    """Read the strategy NeMo Gym reported, else the task's when its staged configuration is still available."""
+    gym = result.get("nemo_gym")
+    if result.get("execution_backend") == "nemo-gym" and isinstance(gym, dict):
+        strategy = gym.get("turn_reward_strategy")
+        return strategy if isinstance(strategy, str) and strategy in {"final", "mean"} else None
     config = result.get("config")
     task = config.get("task") if isinstance(config, dict) else None
     paths = {
@@ -6671,6 +6768,8 @@ def _save_trials(
 
         if trial_src:
             _copy_trial_artifacts(trial_src, trial_out, include_root_trajectory=False)
+            if not reward.get("_step_name"):
+                _copy_step_artifacts(trial_src, trial_out)
         if safe_materialized_traj:
             (trial_out / "trajectory.json").write_text(
                 json.dumps(

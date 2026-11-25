@@ -874,6 +874,8 @@ _HARBOR_RUN_REAP_SECONDS = 5.0
 # a cleanup error, so the tree kill gets its own, longer bound. A second Ctrl+C
 # (``_HarborRunCancellation.forced``) still ends the wait early.
 _HARBOR_WINDOWS_TREE_KILL_SECONDS = 30.0
+# How much of taskkill's own report a cleanup error repeats.
+_HARBOR_WINDOWS_TASKKILL_REPORT_CHARS = 400
 
 
 @dataclass(frozen=True)
@@ -3836,6 +3838,37 @@ def _wait_for_windows_taskkill(
         return
 
 
+def _open_windows_taskkill_report() -> Any | None:
+    """Open a scratch file for what ``taskkill`` prints, or ``None`` when one cannot be made.
+
+    A file, not a pipe: nothing reads a pipe while ``taskkill`` runs, so a tree
+    with enough processes to fill one would stall the kill. Stopping the tree
+    matters more than explaining a failure, so the kill goes ahead without one.
+    """
+    try:
+        return tempfile.TemporaryFile()
+    except OSError:
+        return None
+
+
+def _read_windows_taskkill_report(report: Any | None) -> str:
+    """Return the start of ``taskkill``'s report as one line, or ``""`` when there is none."""
+    if report is None:
+        return ""
+    try:
+        report.seek(0)
+        data = report.read(4 * _HARBOR_WINDOWS_TASKKILL_REPORT_CHARS)
+    except (OSError, ValueError):
+        return ""
+    try:
+        text = data.decode("oem", errors="replace")
+    except LookupError:
+        # The console code page codec only exists on Windows.
+        text = data.decode("utf-8", errors="replace")
+    words = "".join(character if character.isprintable() else " " for character in text).split()
+    return " ".join(words)[:_HARBOR_WINDOWS_TASKKILL_REPORT_CHARS]
+
+
 def _terminate_harbor_process_tree(
     process: subprocess.Popen[bytes],
     *,
@@ -3850,7 +3883,8 @@ def _terminate_harbor_process_tree(
     its task tree is always stopped with ``taskkill /T /F`` and ``grace_seconds``
     does not apply. ``taskkill`` gets up to ``_HARBOR_WINDOWS_TREE_KILL_SECONDS``;
     a set ``end_grace`` stops that wait early, kills ``taskkill`` and fails
-    closed, because the tree was then not confirmed stopped.
+    closed, because the tree was then not confirmed stopped. The error says how
+    ``taskkill`` failed: its exit code and the start of what it printed.
     """
     if os.name == "posix":
         # POSIX process groups do not own a descendant that deliberately calls
@@ -3870,26 +3904,35 @@ def _terminate_harbor_process_tree(
 
     taskkill_error: BaseException | None = None
     taskkill: subprocess.Popen[bytes] | None = None
+    report = _open_windows_taskkill_report()
     try:
-        taskkill = subprocess.Popen(
-            [str(_verified_windows_taskkill_path()), "/PID", str(process.pid), "/T", "/F"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _wait_for_windows_taskkill(taskkill, _HARBOR_WINDOWS_TREE_KILL_SECONDS, end_grace=end_grace)
-        if taskkill.returncode != 0:
-            taskkill_error = RuntimeError("Windows Harbor process-tree cleanup failed")
-    except subprocess.TimeoutExpired as exc:
-        taskkill_error = exc
-        if taskkill is not None and taskkill.poll() is None:
-            taskkill.kill()
-            try:
-                taskkill.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
-            except subprocess.TimeoutExpired as reap_error:
-                taskkill_error = reap_error
-    except OSError as exc:
-        taskkill_error = exc
+        try:
+            taskkill = subprocess.Popen(
+                [str(_verified_windows_taskkill_path()), "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=report if report is not None else subprocess.DEVNULL,
+                stderr=subprocess.STDOUT if report is not None else subprocess.DEVNULL,
+            )
+            _wait_for_windows_taskkill(taskkill, _HARBOR_WINDOWS_TREE_KILL_SECONDS, end_grace=end_grace)
+            if taskkill.returncode != 0:
+                reason = f"taskkill exited with code {taskkill.returncode}"
+                if printed := _read_windows_taskkill_report(report):
+                    reason += f": {printed}"
+                taskkill_error = RuntimeError(reason)
+        except subprocess.TimeoutExpired as exc:
+            taskkill_error = exc
+            if taskkill is not None and taskkill.poll() is None:
+                taskkill.kill()
+                try:
+                    taskkill.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
+                except subprocess.TimeoutExpired as reap_error:
+                    taskkill_error = reap_error
+        except OSError as exc:
+            taskkill_error = exc
+    finally:
+        if report is not None:
+            with suppress(OSError):
+                report.close()
     if process.poll() is None:
         process.kill()
     try:
@@ -3897,7 +3940,7 @@ def _terminate_harbor_process_tree(
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Harbor parent process could not be reaped") from exc
     if taskkill_error is not None:
-        raise RuntimeError("Harbor process-tree cleanup could not be confirmed") from taskkill_error
+        raise RuntimeError(f"Harbor process-tree cleanup could not be confirmed: {taskkill_error}") from taskkill_error
 
 
 def _run_bounded_harbor_process(

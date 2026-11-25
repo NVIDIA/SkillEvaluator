@@ -14,6 +14,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- On Windows, a `Harbor process-tree cleanup could not be confirmed` error now
+  says why: `taskkill`'s exit code and the start of what it printed, or that it
+  did not finish in time. Before, the error gave no reason.
 - Avoid false incomplete security scans when a SkillSpector 2.x release
   starting at 2.13.5 reports that optional dependency inspection was not
   requested. Verified missing-reference caveats remain warnings. Existing

@@ -841,6 +841,157 @@ def test_windows_tree_cleanup_fails_closed_when_taskkill_misses_an_exited_root(
     assert root_process.killed is False
 
 
+class _FinishedWindowsProcess:
+    """A Windows process that has already exited with ``returncode``."""
+
+    def __init__(self, *, pid: int, returncode: int) -> None:
+        self.pid = pid
+        self.returncode = returncode
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def kill(self) -> None:
+        raise AssertionError("a finished process must not be killed")
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        return self.returncode
+
+
+def _clean_up_windows_tree_with_taskkill_report(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    returncode: int,
+    report: bytes,
+) -> list[dict[str, object]]:
+    """Run the Windows tree cleanup against a ``taskkill`` that prints ``report`` and exits with ``returncode``."""
+
+    class WindowsOs:
+        name = "nt"
+
+    launches: list[dict[str, object]] = []
+
+    def fake_popen(_command: list[str], **kwargs: object) -> _FinishedWindowsProcess:
+        launches.append(kwargs)
+        stdout = kwargs["stdout"]
+        if stdout is not subprocess.DEVNULL:
+            stdout.write(report)  # type: ignore[attr-defined]
+            stdout.flush()  # type: ignore[attr-defined]
+        return _FinishedWindowsProcess(pid=99, returncode=returncode)
+
+    monkeypatch.setattr(runner, "os", WindowsOs())
+    monkeypatch.setattr(runner, "_verified_windows_taskkill_path", lambda: Path("/trusted/taskkill.exe"))
+    monkeypatch.setattr(runner.subprocess, "Popen", fake_popen)
+    runner._terminate_harbor_process_tree(_FinishedWindowsProcess(pid=4242, returncode=0))  # type: ignore[arg-type]
+    return launches
+
+
+def test_windows_tree_cleanup_error_says_how_taskkill_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cleanup error used to hide taskkill's exit code and message, so a failure could not be diagnosed."""
+    report = (
+        b"ERROR: The process with PID 77 (child process of PID 4242) could not be terminated.\r\n"
+        b"Reason: Access is denied.\r\n"
+    )
+
+    with pytest.raises(RuntimeError, match="process-tree cleanup could not be confirmed") as exc_info:
+        _clean_up_windows_tree_with_taskkill_report(monkeypatch, returncode=1, report=report)
+
+    message = str(exc_info.value)
+    assert "taskkill exited with code 1" in message
+    assert "(child process of PID 4242) could not be terminated. Reason: Access is denied." in message
+    # One line, so it stays readable in a progress line or a log.
+    assert "\n" not in message
+    assert "\r" not in message
+
+
+@pytest.mark.parametrize(
+    ("report", "expected_end"),
+    [
+        (b"", "taskkill exited with code 128"),
+        (b" \r\n\t ", "taskkill exited with code 128"),
+        (b"\xff\xfe not text \x00 Reason: gone", "Reason: gone"),
+    ],
+)
+def test_windows_tree_cleanup_error_survives_an_empty_or_undecodable_taskkill_report(
+    monkeypatch: pytest.MonkeyPatch,
+    report: bytes,
+    expected_end: str,
+) -> None:
+    with pytest.raises(RuntimeError, match="process-tree cleanup could not be confirmed") as exc_info:
+        _clean_up_windows_tree_with_taskkill_report(monkeypatch, returncode=128, report=report)
+
+    assert str(exc_info.value).endswith(expected_end)
+
+
+def test_windows_tree_cleanup_error_keeps_a_long_taskkill_report_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    report = b"ERROR: The process with PID 1 could not be terminated.\r\n" * 5_000
+
+    with pytest.raises(RuntimeError, match="process-tree cleanup could not be confirmed") as exc_info:
+        _clean_up_windows_tree_with_taskkill_report(monkeypatch, returncode=1, report=report)
+
+    message = str(exc_info.value)
+    assert "taskkill exited with code 1: ERROR: The process with PID 1 could not be terminated." in message
+    assert len(message) < 600
+
+
+def test_windows_tree_cleanup_ignores_the_report_of_a_taskkill_that_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launches = _clean_up_windows_tree_with_taskkill_report(
+        monkeypatch,
+        returncode=0,
+        report=b"SUCCESS: The process with PID 4242 has been terminated.\r\n",
+    )
+
+    # The report goes to a file, not a pipe: nobody reads a pipe while taskkill
+    # runs, so a tree large enough to fill one would stall the kill.
+    assert launches[0]["stdout"] is not subprocess.DEVNULL
+    assert launches[0]["stdout"] is not subprocess.PIPE
+    assert launches[0]["stderr"] is subprocess.STDOUT
+    assert launches[0]["stdin"] is subprocess.DEVNULL
+
+
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_windows_tree_cleanup_still_runs_taskkill_when_its_report_cannot_be_captured(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+) -> None:
+    """Stopping the tree matters more than explaining a failure, so no scratch file must not stop the kill."""
+
+    def no_scratch_file(*_args: object, **_kwargs: object) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(runner.tempfile, "TemporaryFile", no_scratch_file)
+
+    if returncode == 0:
+        launches = _clean_up_windows_tree_with_taskkill_report(monkeypatch, returncode=0, report=b"")
+        assert [launch["stdout"] for launch in launches] == [subprocess.DEVNULL]
+        assert launches[0]["stderr"] is subprocess.DEVNULL
+    else:
+        with pytest.raises(RuntimeError, match=r"could not be confirmed: taskkill exited with code 1$"):
+            _clean_up_windows_tree_with_taskkill_report(monkeypatch, returncode=1, report=b"unused")
+
+
+def test_windows_tree_cleanup_error_says_when_taskkill_could_not_be_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class WindowsOs:
+        name = "nt"
+
+    def unverified() -> Path:
+        raise OSError("Windows taskkill executable could not be verified")
+
+    monkeypatch.setattr(runner, "os", WindowsOs())
+    monkeypatch.setattr(runner, "_verified_windows_taskkill_path", unverified)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"could not be confirmed: Windows taskkill executable could not be verified$",
+    ):
+        runner._terminate_harbor_process_tree(_FinishedWindowsProcess(pid=4242, returncode=0))  # type: ignore[arg-type]
+
+
 class _SimulatedClock:
     """Stands in for the ``time`` module so a simulated ``taskkill`` can take "seconds" without sleeping."""
 
@@ -943,7 +1094,7 @@ def test_windows_tree_cleanup_gives_taskkill_longer_than_a_plain_reap(
         assert max(taskkill_process.wait_timeouts) <= poll_seconds
     else:
         # A taskkill that never returns is still stopped, and cleanup still fails closed.
-        with pytest.raises(RuntimeError, match="process-tree cleanup could not be confirmed"):
+        with pytest.raises(RuntimeError, match=r"process-tree cleanup could not be confirmed: .*timed out after"):
             runner._terminate_harbor_process_tree(root_process)  # type: ignore[arg-type]
 
         assert taskkill_process.killed is True

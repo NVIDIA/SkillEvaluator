@@ -6,7 +6,7 @@
 from pathlib import Path
 
 from skillevaluator.constants import CONTENT_TYPE_PLUGIN
-from skillevaluator.tier1.commands import run_validation
+from skillevaluator.tier1.commands import enabled_check_lineup, run_validation
 
 _VALID_MANIFEST = """
 name: my-bundle
@@ -23,15 +23,26 @@ def _make_plugin(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_run_validation_plugin_uses_plugin_schema_validator(tmp_path: Path):
+def test_run_validation_plugin_reports_bounded_manifest_inventory(tmp_path: Path):
     results = run_validation(_make_plugin(tmp_path), checks="schema", content_type=CONTENT_TYPE_PLUGIN)
-    names = [r.validator_name or "" for r in results]
-    assert any("Plugin Schema" in n for n in names)
+    schema = results[0]
+    assert schema.validator_name == "Plugin Schema & Component Checks"
+    assert schema.metadata["plugin"]["name"] == "my-bundle"
+    assert schema.metadata["plugin"]["component_inventory"]["components"]
     assert all(r.passed for r in results)
 
 
-def test_run_validation_plugin_skips_quality_and_lint(tmp_path: Path):
-    """quality/lint are skill-only and must be skipped for plugins."""
+def test_run_validation_reports_mandatory_schema_progress_for_narrowed_plugin_checks(tmp_path: Path):
+    checks = "unicode"
+    started = []
+    run_validation(_make_plugin(tmp_path), checks=checks, content_type=CONTENT_TYPE_PLUGIN, on_check=started.append)
+
+    assert started == ["schema", "unicode"]
+    assert enabled_check_lineup(checks, content_type=CONTENT_TYPE_PLUGIN) == started
+    assert enabled_check_lineup(checks) == ["unicode"]
+
+
+def test_run_validation_does_not_run_skill_checks_for_references(tmp_path: Path):
     results = run_validation(
         _make_plugin(tmp_path),
         checks="schema,quality,lint",
@@ -41,6 +52,26 @@ def test_run_validation_plugin_skips_quality_and_lint(tmp_path: Path):
     assert any("Plugin Schema" in n for n in names)
     assert not any("Quality" in n for n in names)
     assert not any("Lint" in n or "Script" in n for n in names)
+
+
+def test_run_validation_runs_quality_and_lint_for_bundled_skills(tmp_path: Path):
+    manifest = tmp_path / ".claude-plugin/plugin.json"
+    manifest.parent.mkdir()
+    manifest.write_text('{"name": "my-bundle"}', encoding="utf-8")
+    member = tmp_path / "skills/demo/SKILL.md"
+    member.parent.mkdir(parents=True)
+    member.write_text(
+        "---\nname: demo\ndescription: Use when checking project workflows.\n---\n"
+        "# Demo\n\n## Instructions\n\nRead the project and explain its workflow.\n",
+        encoding="utf-8",
+    )
+
+    results = run_validation(manifest, checks="quality,lint", content_type=CONTENT_TYPE_PLUGIN)
+
+    performed = {
+        result.metadata["plugin_check"] for result in results if result.metadata.get("plugin_member") == "skills/demo"
+    }
+    assert performed == {"quality", "lint"}
 
 
 def test_run_validation_plugin_does_not_require_catalog_path(tmp_path: Path):

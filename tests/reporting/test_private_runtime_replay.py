@@ -8,6 +8,7 @@ import json
 import os
 
 import pytest
+from click.testing import CliRunner
 from test_private_runtime_projection import api, sample
 
 
@@ -25,6 +26,37 @@ def test_snapshot_round_trip_is_self_contained(tmp_path):
 def test_missing_older_snapshot_has_explicit_unavailable_error(tmp_path):
     with pytest.raises(ValueError, match="unavailable"):
         io_api().load_plugin_runtime_report(tmp_path)
+
+
+def test_replay_command_writes_reports_from_snapshot_alone(tmp_path):
+    from skillevaluator.cli import cli
+
+    run_dir = tmp_path / "saved-run"
+    run_dir.mkdir()
+    report = api().project_plugin_runtime(sample(), provenance={"plugin": "fixture"})
+    io_api().save_plugin_runtime_report(report, run_dir)
+    output_dir = tmp_path / "reports"
+    result = CliRunner().invoke(
+        cli, ["tier3", "report-plugin", str(run_dir), "-r", "cli,json,benchmark", "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Plugin runtime evidence" in result.output
+    output = json.loads((output_dir / "plugin-report.json").read_text())
+    assert output["plugin_runtime"]["name"] == "fixture"
+    assert (output_dir / "BENCHMARK.md").read_text().startswith("# Plugin Benchmark: fixture")
+    assert sorted(path.name for path in run_dir.iterdir()) == ["plugin_runtime_report.json"]
+
+
+def test_replay_command_reports_missing_snapshot_without_writing_files(tmp_path):
+    from skillevaluator.cli import cli
+
+    output_dir = tmp_path / "reports"
+    result = CliRunner().invoke(cli, ["tier3", "report-plugin", str(tmp_path), "-r", "json", "-o", str(output_dir)])
+
+    assert result.exit_code == 1
+    assert "runtime report unavailable" in result.output
+    assert not output_dir.exists()
 
 
 @pytest.mark.parametrize("kind", ["root_link", "file_link", "hardlink", "directory"])

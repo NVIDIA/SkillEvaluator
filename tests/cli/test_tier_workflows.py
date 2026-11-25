@@ -290,6 +290,7 @@ def test_tier2_combines_intra_and_catalog_comparison_once(skill, tmp_path, monke
     result = CliRunner().invoke(cli, ["tier2", str(skill), "--catalog", str(catalog)])
     assert result.exit_code == 0, result.output
     assert [call[0] for call in calls] == ["intra", "inter"]
+    assert all(kwargs["content_type"] == "skill" for _, kwargs in calls)
     assert calls[1][1]["catalog"] == catalog
 
 

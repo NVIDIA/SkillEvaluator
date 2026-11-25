@@ -36,10 +36,40 @@ def run_similarity_check(
     save_cache: Path | None = None,
     max_entries: int = SIMILARITY_DEFAULT_MAX_ENTRIES,
     max_scalar_comparisons: int = SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
+    llm_verdict: bool = False,
+    llm_model: str | None = None,
 ) -> list[ValidationResult]:
+    from skillevaluator.cli_core import resolve_plugin_path
+    from skillevaluator.tier2.plugin_commands import plugin_similarity_results, plugin_target
+
     # Caller option errors have safe diagnostics and should not become provider failures.
     validate_max_entries(max_entries)
     validate_max_scalar_comparisons(max_scalar_comparisons)
+
+    if (target := plugin_target(content_path, content_type)) is not None:
+        if catalog is not None and cache is not None:
+            raise ValueError("--catalog and deprecated --cache cannot be used together")
+        if save_catalog is not None and save_cache is not None:
+            raise ValueError("--save-catalog and deprecated --save-cache cannot be used together")
+        return guarded_results(
+            "Plugin Similarity Check",
+            resolve_plugin_path(target),
+            lambda: plugin_similarity_results(
+                target,
+                threshold=threshold,
+                full_body=full_body,
+                model=model,
+                catalog=catalog or cache,
+                save_catalog=save_catalog or save_cache,
+                max_entries=max_entries,
+                max_scalar_comparisons=max_scalar_comparisons,
+                llm_verdict=llm_verdict,
+                llm_model=llm_model,
+            ),
+            check_id="similarity",
+        )
+    if llm_verdict or llm_model is not None:
+        raise ValueError("--llm and --llm-model require a plugin target")
 
     def _run() -> ValidationResult:
         validator = SimilarityValidator(
@@ -65,7 +95,30 @@ def run_context_optimization_check(
     threshold: float = 0.80,
     model: str | None = None,
     llm_model: str | None = None,
+    content_type: str = "auto",
+    catalog: Path | None = None,
+    llm_verdict: bool = False,
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> list[ValidationResult]:
+    from skillevaluator.tier2.plugin_commands import plugin_target, run_public_plugin_dedup
+
+    if (target := plugin_target(skill_path, content_type)) is not None:
+        return run_public_plugin_dedup(
+            target,
+            threshold=threshold,
+            model=model,
+            llm_model=llm_model,
+            catalog=catalog,
+            llm_verdict=llm_verdict,
+            max_chunks=max_chunks,
+            max_scalar_comparisons=max_scalar_comparisons,
+        )
+    if max_chunks is not None or max_scalar_comparisons is not None:
+        raise ValueError("Plugin context limits require a plugin target")
+    if catalog is not None or llm_verdict:
+        raise ValueError("--catalog and --llm require a plugin target")
+
     def _run() -> ValidationResult:
         validator = IntraSkillValidator(
             threshold=threshold,
@@ -83,12 +136,22 @@ def run_dedup_scan(
     threshold: float = 0.80,
     llm_model: str | None = None,
     model: str | None = None,
+    content_type: str = "auto",
+    catalog: Path | None = None,
+    llm_verdict: bool = False,
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> list[ValidationResult]:
     return run_context_optimization_check(
         skill_path,
         threshold=threshold,
         model=model,
         llm_model=llm_model,
+        content_type=content_type,
+        catalog=catalog,
+        llm_verdict=llm_verdict,
+        max_chunks=max_chunks,
+        max_scalar_comparisons=max_scalar_comparisons,
     )
 
 

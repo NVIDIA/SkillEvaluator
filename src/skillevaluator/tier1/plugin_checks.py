@@ -265,12 +265,13 @@ def run_plugin_validation(
     options: PrivatePluginChecks | None = None,
     tree_checks_factory: Callable | None = None,
     skill_checks_factory: Callable | None = None,
+    whole_tree_checks: frozenset[str] = frozenset(),
     fail_fast: bool = False,
     on_check: Callable[[str], None] | None = None,
     on_check_plan: Callable[[int], None] | None = None,
     on_check_complete: Callable[[str, ValidationResult], None] | None = None,
 ) -> list[ValidationResult]:
-    """Assemble a private run; network collectors require independent explicit options."""
+    """Assemble a plugin run with optional whole-tree scanners supplied by the caller."""
     options = options or PrivatePluginChecks()
     unknown = options.checks - (TREE_CHECKS | SKILL_CHECKS)
     if unknown:
@@ -305,7 +306,8 @@ def run_plugin_validation(
         scan_count = 0
         if inventory.tree_complete:
             unit_count = 1 + len(set(skills) - {"."})
-            scan_count = len(scan_checks - {"hygiene"}) * unit_count + int("hygiene" in scan_checks)
+            whole_tree_scan_checks = scan_checks & (whole_tree_checks | {"hygiene"})
+            scan_count = len(scan_checks - whole_tree_scan_checks) * unit_count + len(whole_tree_scan_checks)
             scan_count += len(skill_checks) * len(skills)
         on_check_plan(1 + scan_count + options.audit_dependencies + options.resolve_endpoints + options.claude_validate)
     # Composition is mandatory even for a narrowed scanner selection: a declared
@@ -364,14 +366,16 @@ def run_plugin_validation(
                                 or getattr(validator, "_validate_single", None)
                                 or validator._validate_single_asset
                             )
-                        for unit, scan_view in views.items():
+                        scan_views = {".": view} if key in whole_tree_checks else views
+                        root_scope = "whole_tree" if key in whole_tree_checks else "root_owned"
+                        for unit, scan_view in scan_views.items():
                             if on_check is not None:
                                 on_check(key)
                             result = _invoke_scan(runner, scan_view, key)
                             result.validator_name = validator.name
                             result.validator_description = validator.description
                             result.metadata["plugin_check"] = key
-                            result.metadata["plugin_scan_scope"] = "root_owned" if unit == "." else "declared_skill"
+                            result.metadata["plugin_scan_scope"] = root_scope if unit == "." else "declared_skill"
                             _attribute_scan_result(result, unit, scan_view, root)
                             results.append(result)
                             if on_check_complete is not None:

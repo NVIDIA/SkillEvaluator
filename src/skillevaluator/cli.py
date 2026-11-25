@@ -21,8 +21,10 @@ import click
 
 from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
+from skillevaluator.cli_plugin_reporting import build_report_plugin_command
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
+    CONTENT_TYPE_PLUGIN,
     QUALITY_DEFAULT_MIN_SCORE,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
@@ -414,9 +416,49 @@ def _tier2_skill_argument(func):
     return click.argument("skill_path", type=click.Path(exists=True, resolve_path=False, path_type=Path))(func)
 
 
+def _plugin_context_options(*, grouped=False):
+    from skillevaluator.deduplication.plugin.context_budget import (
+        PLUGIN_CONTEXT_CHUNK_CEILING,
+        PLUGIN_CONTEXT_SCALAR_CEILING,
+    )
+
+    attrs = {"cls": GroupedOption, "help_group": _TIER2_GROUP} if grouped else {}
+
+    def decorate(func):
+        func = click.option(
+            "--plugin-context-max-chunks",
+            "max_chunks",
+            type=click.IntRange(1, PLUGIN_CONTEXT_CHUNK_CEILING),
+            help="Maximum context chunks across bundled skills.",
+            **attrs,
+        )(func)
+        return click.option(
+            "--plugin-context-max-scalar-comparisons",
+            "max_scalar_comparisons",
+            type=click.IntRange(1, PLUGIN_CONTEXT_SCALAR_CEILING),
+            help="Maximum context comparisons multiplied by embedding dimensions across bundled skills.",
+            **attrs,
+        )(func)
+
+    return decorate
+
+
 def _reject_linked_tier2_root(path: Path) -> None:
     if is_link_or_reparse(path):
         raise click.UsageError(f"Tier 2 target root is a symlink or reparse point: {path.name or '.'}")
+
+
+def _tier2_report_target(path: Path, content_type: str) -> tuple[Path, bool]:
+    from skillevaluator.cli_core import resolve_plugin_path
+    from skillevaluator.tier2.plugin_commands import plugin_target
+
+    _reject_linked_tier2_root(path)
+    plugin = plugin_target(path, content_type)
+    if plugin is None:
+        return path, False
+    root = resolve_plugin_path(plugin)
+    _reject_linked_tier2_root(root)
+    return root, True
 
 
 def _require_hook_review_target(path: Path) -> None:
@@ -770,7 +812,7 @@ def _report_formats_explicit() -> bool:
     return False
 
 
-def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
+def _run_dedup_or_skip(target_path: Path, **options) -> list[ValidationResult]:
     """Run Tier 2 dedup when possible, else return a non-failing skipped result.
 
     Dedup is on by default for ``validate`` but needs the ``tier2`` extra and an
@@ -780,6 +822,7 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
     import importlib.util
 
     def _skip(message: str) -> list[ValidationResult]:
+        from skillevaluator.cli_core import resolve_plugin_path
         from skillevaluator.publication_identity import stamp_publication_target
 
         result = ValidationResult(
@@ -788,7 +831,8 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
         )
         result.add_warning(message)
         result.metadata["skipped"] = True
-        stamp_publication_target([result], target_path)
+        root = resolve_plugin_path(target_path) if options.get("content_type") == CONTENT_TYPE_PLUGIN else target_path
+        stamp_publication_target([result], root)
         return [result]
 
     def _available(module: str) -> bool:
@@ -811,7 +855,7 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
         resolve_embedding_provider()
     except ProviderConfigurationError as exc:
         return _skip(f"Tier 2 skipped: embedding setup is required.\n\n{exc}\n\nTo skip Tier 2, pass --no-dedup.")
-    return run_dedup_scan(target_path)
+    return run_dedup_scan(target_path, **options)
 
 
 def _partial_agent_eval_result(
@@ -2736,6 +2780,28 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help_group=_RUN_GROUP,
     help="Digest-pinned evaluator image reference recorded beside the evaluated source.",
 )
+@click.option(
+    "--repo-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Repository root for same-repository component references.",
+)
+@click.option(
+    "--resolve-endpoints",
+    is_flag=True,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Opt into bounded DNS and redirect checks on declared endpoints.",
+)
+@click.option(
+    "--claude-validate",
+    is_flag=True,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Also run the installed Claude Code manifest validator.",
+)
+@_plugin_context_options(grouped=True)
 @_report_options
 def validate(
     target_path: Path,
@@ -2797,6 +2863,11 @@ def validate(
     output_dir: Path,
     harness: str | None = None,
     harness_profiles: Path | None = None,
+    repo_root: Path | None = None,
+    resolve_endpoints: bool = False,
+    claude_validate: bool = False,
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> None:
     """Validate a skill through all three tiers, with automatic dataset preparation.
 
@@ -2809,10 +2880,7 @@ def validate(
     Rules, workflows, and plugins retain Tier 1/2 by default; their Tier 3
     evaluation requires an explicit --tier3, --autopilot, or --full request.
 
-    A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest or a
-    contained ``.claude-plugin/plugin.json`` manifest) is auto-detected and
-    validated against its public contract. Quality/lint/version checks are
-    skill-only and skipped for plugins.
+    Supported plugin manifests select component and bundled-skill checks.
     """
     _record_validate_json_report(None)
     requested_path = target_path
@@ -2825,8 +2893,6 @@ def validate(
             raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if dedup:
         _reject_linked_tier2_root(target_path)
-    if hook_waivers is not None:
-        _require_hook_review_target(target_path)
     target_path = target_path.resolve()
     from skillevaluator.publication_identity import publication_target_name
 
@@ -2840,9 +2906,8 @@ def validate(
         evaluator_container_revision,
     )
 
-    from skillevaluator.cli_core import detect_content_type
+    from skillevaluator.cli_core import detect_content_type, resolve_plugin_path
     from skillevaluator.constants import (
-        CONTENT_TYPE_PLUGIN,
         CONTENT_TYPE_RULES,
         CONTENT_TYPE_SKILL,
         CONTENT_TYPE_WORKFLOWS,
@@ -2874,7 +2939,36 @@ def validate(
             manifest_type = CONTENT_TYPE_SKILL
         elif requested_path.name == WORKFLOWS_MANIFEST_FILE:
             manifest_type = CONTENT_TYPE_WORKFLOWS
-    resolved_type = content_type if content_type != "auto" else manifest_type or detect_content_type(target_path)
+    if content_type != "auto":
+        resolved_type = content_type
+    elif manifest_type is not None:
+        resolved_type = manifest_type
+    else:
+        resolved_type = detect_content_type(requested_path.absolute())
+        if requested_path.is_symlink() and resolved_type != CONTENT_TYPE_PLUGIN:
+            resolved_type = detect_content_type(target_path)
+
+    plugin_scan = resolved_type == CONTENT_TYPE_PLUGIN
+    if hook_waivers is not None:
+        review_target = requested_path
+        if plugin_scan and not requested_path.is_dir():
+            from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+
+            try:
+                selected_manifest = locate_plugin_manifest(requested_path)
+            except PluginManifestPathError as exc:
+                raise click.UsageError(f"--hook-waivers requires a secure packaged plugin: {exc}") from exc
+            if selected_manifest is not None:
+                review_target = selected_manifest.root
+        _require_hook_review_target(review_target)
+    if not plugin_scan and (
+        repo_root is not None
+        or resolve_endpoints
+        or claude_validate
+        or max_chunks is not None
+        or max_scalar_comparisons is not None
+    ):
+        raise click.UsageError("Component and bundle context controls require a plugin target (--type plugin).")
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
     preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
@@ -2888,6 +2982,28 @@ def validate(
             _reject_linked_tier2_root(requested_path.absolute().parent)
         target_path = requested_path.absolute().parent.resolve()
         publication_name = publication_target_name(target_path) or target_path.name
+    scan_source = target_path
+    tier3_target = target_path
+    static_options = {}
+    tier2_options = {}
+    if plugin_scan:
+        scan_source = requested_path.absolute()
+        target_path = resolve_plugin_path(scan_source)
+        if dedup:
+            _reject_linked_tier2_root(target_path)
+        publication_name = publication_target_name(target_path) or target_path.name
+        static_options = {
+            "repo_root": repo_root,
+            "resolve_endpoints": resolve_endpoints,
+            "claude_validate": claude_validate,
+        }
+        tier2_options = {
+            "content_type": CONTENT_TYPE_PLUGIN,
+            "max_chunks": max_chunks,
+            "max_scalar_comparisons": max_scalar_comparisons,
+        }
+    elif content_type != "auto":
+        tier2_options = {"content_type": content_type}
 
     # Skill validation is the complete workflow. Keep the old flags as aliases,
     # while explicit disable flags and the authoritative --tiers selector still
@@ -2908,7 +3024,7 @@ def validate(
         # turns Tier 3 off even when --full/--autopilot/--tier3 turned it on.
         agent_eval = "3" in selected
     autopilot = autopilot and agent_eval
-    tier3_path = target_path.parent if preflight_tier3_source and target_path.is_file() else target_path
+    tier3_path = tier3_target.parent if preflight_tier3_source and tier3_target.is_file() else tier3_target
 
     from skillevaluator.constants import CONTENT_TYPE_UNKNOWN, SKILL_MANIFEST_VARIANTS
     from skillevaluator.utils.helpers import find_skills_in_directory
@@ -3015,7 +3131,9 @@ def validate(
                 click.echo(f"Warning: {autopilot_error}", err=True)
 
     view.tier_start(0)
-    check_lineup = enabled_check_lineup(checks)
+    check_lineup = (
+        enabled_check_lineup(checks, content_type=resolved_type) if plugin_scan else enabled_check_lineup(checks)
+    )
     checks_done: list[str] = []
 
     def _on_check(name: str) -> None:
@@ -3023,7 +3141,7 @@ def validate(
         checks_done.append(name)
 
     results = run_validation(
-        target_path,
+        scan_source,
         checks=checks,
         use_llm=llm,
         llm_verify=llm_verify,
@@ -3042,6 +3160,7 @@ def validate(
         harness=harness,
         harness_profiles=harness_profiles,
         skip=skip,
+        **static_options,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
@@ -3067,7 +3186,7 @@ def validate(
             _print_tier_banner(_TIER_BANNERS["tier2"])
         view.tier_start(tier2_index)
         view.tier_progress(tier2_index, [stage_hint_row("stages", "chunk · embed · cluster · llm-judge")])
-        tier2_results = _run_dedup_or_skip(target_path)
+        tier2_results = _run_dedup_or_skip(scan_source, **tier2_options)
         results.extend(tier2_results)
         tier2_gate_results.extend(tier2_results)
         if quiet:
@@ -3618,7 +3737,9 @@ def precommit_run(min_score: int, quality_config: Path | None, check: str, paths
 
 @cli.command("similarity-check")
 @click.argument("content_path", type=click.Path(exists=True, path_type=Path))
-@click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "rules", "workflows", "auto"]))
+@click.option(
+    "--type", "content_type", default="auto", type=click.Choice(["skill", "rules", "workflows", "plugin", "auto"])
+)
 @click.option("--threshold", type=float, default=0.75, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--full-body", is_flag=True, help="Embed full file bodies instead of descriptions.")
 @click.option("--model", default=None, help="Embedding model override.")
@@ -3640,7 +3761,7 @@ def precommit_run(min_score: int, quality_config: Path | None, check: str, paths
     "--catalog",
     type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Compare exactly one skill against a local catalog.",
+    help="Compare one target against a local catalog.",
 )
 @click.option(
     "--save-catalog",
@@ -3650,6 +3771,8 @@ def precommit_run(min_score: int, quality_config: Path | None, check: str, paths
 )
 @click.option("--cache", type=click.Path(path_type=Path), default=None, hidden=True)
 @click.option("--save-cache", type=click.Path(path_type=Path), default=None, hidden=True)
+@click.option("--llm", "llm_verdict", is_flag=True, help="Request advisory LLM verdicts for plugin catalog matches.")
+@click.option("--llm-model", default=None, help="Model override for advisory catalog verdicts.")
 @_report_options
 def similarity_check(
     content_path: Path,
@@ -3665,6 +3788,8 @@ def similarity_check(
     save_cache: Path | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    llm_verdict: bool = False,
+    llm_model: str | None = None,
 ) -> None:
     """Detect duplicate content with embedding similarity."""
     from skillevaluator.tier2.commands import run_similarity_check
@@ -3678,8 +3803,10 @@ def similarity_check(
     if resolved_catalog and resolved_save_catalog:
         raise click.UsageError("--catalog and --save-catalog cannot be used together")
 
-    _reject_linked_tier2_root(content_path)
-    output_dir = _resolve_file_report_output_location(content_path.resolve(), output_dir, report_formats)
+    report_target, plugin_scan = _tier2_report_target(content_path, content_type)
+    if (llm_verdict or llm_model is not None) and not plugin_scan:
+        raise click.UsageError("Catalog verdict controls require a plugin target (--type plugin).")
+    output_dir = _resolve_file_report_output_location(report_target.resolve(), output_dir, report_formats)
     similarity_basename = report_basename("similarity")
     _reject_catalog_report_collisions(
         resolved_catalog,
@@ -3704,24 +3831,28 @@ def similarity_check(
         max_scalar_comparisons=max_scalar_comparisons,
         catalog=resolved_catalog,
         save_catalog=resolved_save_catalog,
+        **({"llm_verdict": llm_verdict, "llm_model": llm_model} if plugin_scan else {}),
     )
-    sanitize_tier2_results(results, content_path, resolved_catalog, resolved_save_catalog)
+    sanitize_tier2_results(results, report_target, content_path, resolved_catalog, resolved_save_catalog)
 
     if not emit_reports(
         results,
         report_formats=report_formats,
         output_dir=output_dir,
         basename=similarity_basename,
-        **_report_roots(content_path),
+        **({"content_label": "Plugin"} if plugin_scan else {}),
+        **_report_roots(report_target),
     ):
         raise click.ClickException("similarity check failed")
 
 
 @cli.command("context-optimization-check")
 @_tier2_skill_argument
+@click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "plugin", "auto"]))
 @click.option("--threshold", type=float, default=0.80, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--model", default=None, help="Embedding model override.")
 @click.option("--llm-model", default=None, help="LLM model override.")
+@_plugin_context_options()
 @_report_options
 def context_optimization_check(
     skill_path: Path,
@@ -3730,30 +3861,52 @@ def context_optimization_check(
     llm_model: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    content_type: str = "auto",
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> None:
-    """Detect redundant content within one skill."""
+    """Detect redundant content within a skill or bundled skills."""
     from skillevaluator.tier2.commands import run_context_optimization_check
 
-    _reject_linked_tier2_root(skill_path)
-    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
-    results = run_context_optimization_check(skill_path, threshold=threshold, model=model, llm_model=llm_model)
-    sanitize_tier2_results(results, skill_path)
+    report_target, plugin_scan = _tier2_report_target(skill_path, content_type)
+    if not plugin_scan and (max_chunks is not None or max_scalar_comparisons is not None):
+        raise click.UsageError("Bundle context controls require a plugin target (--type plugin).")
+    output_dir = _resolve_file_report_output_location(report_target.resolve(), output_dir, report_formats)
+    results = run_context_optimization_check(
+        skill_path,
+        threshold=threshold,
+        model=model,
+        llm_model=llm_model,
+        **({"content_type": content_type} if content_type != "auto" else {}),
+        **({"max_chunks": max_chunks, "max_scalar_comparisons": max_scalar_comparisons} if plugin_scan else {}),
+    )
+    sanitize_tier2_results(results, report_target, skill_path)
     if not emit_reports(
         results,
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("context"),
-        explicit_skill_name=skill_path.resolve().name,
-        **_report_roots(skill_path),
+        explicit_skill_name=None if plugin_scan else skill_path.resolve().name,
+        **({"content_label": "Plugin"} if plugin_scan else {}),
+        **_report_roots(report_target),
     ):
         raise click.ClickException("context optimization check failed")
 
 
 @cli.command("dedup-scan")
 @_tier2_skill_argument
+@click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "plugin", "auto"]))
 @click.option("--threshold", type=float, default=0.80, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--llm-model", default=None, help="LLM model override.")
 @click.option("--model", default=None, help="Embedding model override.")
+@click.option(
+    "--catalog",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Compare bundled components against a local catalog.",
+)
+@click.option("--llm", "llm_verdict", is_flag=True, help="Request advisory LLM verdicts for plugin catalog matches.")
+@_plugin_context_options()
 @_report_options
 def dedup_scan(
     skill_path: Path,
@@ -3762,26 +3915,51 @@ def dedup_scan(
     model: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    content_type: str = "auto",
+    catalog: Path | None = None,
+    llm_verdict: bool = False,
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> None:
-    """Detect semantically redundant content within one skill."""
+    """Detect semantically redundant content within a skill or bundle."""
     from skillevaluator.tier2.commands import run_dedup_scan
 
-    _reject_linked_tier2_root(skill_path)
-    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
+    report_target, plugin_scan = _tier2_report_target(skill_path, content_type)
+    if not plugin_scan and (
+        catalog is not None or llm_verdict or max_chunks is not None or max_scalar_comparisons is not None
+    ):
+        raise click.UsageError("Bundle context and catalog controls require a plugin target (--type plugin).")
+    output_dir = _resolve_file_report_output_location(report_target.resolve(), output_dir, report_formats)
+    dedup_basename = report_basename("dedup")
+    _reject_catalog_report_collisions(
+        catalog, report_formats=report_formats, output_dir=output_dir, basename=dedup_basename
+    )
     results = run_dedup_scan(
         skill_path,
         threshold=threshold,
         llm_model=llm_model,
         model=model,
+        **({"content_type": content_type} if content_type != "auto" else {}),
+        **(
+            {
+                "catalog": catalog,
+                "llm_verdict": llm_verdict,
+                "max_chunks": max_chunks,
+                "max_scalar_comparisons": max_scalar_comparisons,
+            }
+            if plugin_scan
+            else {}
+        ),
     )
-    sanitize_tier2_results(results, skill_path)
+    sanitize_tier2_results(results, report_target, skill_path, catalog)
     if not emit_reports(
         results,
         report_formats=report_formats,
         output_dir=output_dir,
-        basename=report_basename("dedup"),
-        explicit_skill_name=skill_path.resolve().name,
-        **_report_roots(skill_path),
+        basename=dedup_basename,
+        explicit_skill_name=None if plugin_scan else skill_path.resolve().name,
+        **({"content_label": "Plugin"} if plugin_scan else {}),
+        **_report_roots(report_target),
     ):
         raise click.ClickException("dedup scan failed")
 
@@ -4949,6 +5127,14 @@ tier3.add_command(init_harbor_task, "init-harbor-task")
 tier3.add_command(compare, "compare")
 tier3.add_command(view, "view")
 tier3.add_command(tier3_doctor_command, "doctor")
+tier3.add_command(
+    build_report_plugin_command(
+        report_options=_report_options,
+        console=console,
+        command_class=tier3.command_class,
+        context_settings=CONTEXT_SETTINGS,
+    )
+)
 
 from skillevaluator.tier3.decoy_commands import select_decoys_command
 from skillevaluator.tier3.grader_validation import validate_grader

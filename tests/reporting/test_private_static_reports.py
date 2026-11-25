@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Private static views share facts without enabling public plugin workflows."""
+"""Static evidence keeps the same facts across report formats."""
 
 from __future__ import annotations
 
 import html
 import importlib
+import io
 import json
 from copy import deepcopy
 
 import pytest
+from rich.console import Console
 
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.reporting import (
@@ -270,6 +272,42 @@ def test_absent_empty_and_malformed_blocks_leave_generic_reports_unchanged():
         report_list = reporters()
         before = {reporter.name: reporter.render_all([result]) for reporter in report_list}
         assert renderers().render_plugin_static_reports([result], reporters=report_list) == before
+
+
+def test_public_static_file_report_includes_opt_in_evidence(tmp_path):
+    results = bundle()
+    reporter = JSONReporter(include_timestamp=False)
+    output_path = tmp_path / "report.json"
+    reporter.save(results, output_path)
+    assert output_path.read_text() == reporter.render_all(results)
+
+    reporter.save(results, output_path, plugin_static=True)
+    document = json.loads(output_path.read_text())
+    assert document.pop("plugin_static")["name"] == "report-demo"
+    assert document == json.loads(reporter.render_all(results))
+
+
+def test_public_static_cli_report_keeps_its_summary_and_prints_evidence():
+    output = io.StringIO()
+    reporter = CLIReporter(console=Console(file=output, width=120))
+    reporter.print_all(bundle(), plugin_static=True)
+
+    assert "Private Manifest and Component Checks" in output.getvalue()
+    assert "Plugin static evidence" in output.getvalue()
+    assert "startup-hook" in output.getvalue()
+
+
+def test_emit_reports_adds_static_evidence_only_for_plugin_scans(tmp_path):
+    from skillevaluator.tier1.commands import emit_reports
+
+    emit_reports(
+        bundle(), report_formats=("json", "html"), output_dir=tmp_path, basename="plugin", content_label="Plugin"
+    )
+    assert json.loads((tmp_path / "plugin.json").read_text())["plugin_static"]["name"] == "report-demo"
+    assert 'id="plugin-static-evidence"' in (tmp_path / "plugin.html").read_text()
+
+    emit_reports(bundle(), report_formats=("json",), output_dir=tmp_path, basename="skill")
+    assert "plugin_static" not in json.loads((tmp_path / "skill.json").read_text())
 
 
 def test_projection_reduction_happens_once_for_six_adapters(monkeypatch):

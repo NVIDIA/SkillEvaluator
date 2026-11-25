@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Run bounded Tier 1 component scans and Tier 2 overlap checks on supported
+  bundles. Reports include component inventory and scan evidence. Saved
+  runtime evidence can be rendered again without rerunning the evaluation.
 - The local-mode run preflight and `doctor --env-mode local` check the
   installed Claude Code and Codex CLI against the selected models and stop
   before any trial when one is too old. Use `--agent-model AGENT=MODEL` to

@@ -237,6 +237,21 @@ def test_validate_hook_review_rejects_linked_package_paths(tmp_path: Path, linke
     assert "--hook-waivers requires a secure packaged plugin directory" in result.output
 
 
+def test_validate_hook_review_accepts_a_contained_manifest(tmp_path: Path) -> None:
+    manifest = tmp_path / "bundle" / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "bundle"}', encoding="utf-8")
+    waiver = tmp_path / "review.yaml"
+    waiver.write_text("version: 1\nwaivers: []\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli,
+        ["validate", str(manifest), "--tiers", "1", "--checks", "schema", "--hook-waivers", str(waiver), "-r", "cli"],
+    )
+
+    assert result.exit_code == 0, result.output
+
+
 def test_claude_alias_is_canonicalized_and_deduplicated() -> None:
     assert parse_agents("claude, claude-code, opencode, claude") == ["claude-code", "opencode"]
 
@@ -2056,6 +2071,11 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
         "content_type": "the child re-detects the type of the single skill it is handed",
         "workers": "forwarding it would make each child fan out again",
         "output_dir": "each child is given its own per-skill output directory",
+        "repo_root": "component resolution applies to a bundle target",
+        "resolve_endpoints": "endpoint checks apply to a bundle target",
+        "claude_validate": "manifest parity checks apply to a bundle target",
+        "max_chunks": "bundle context limits apply to a bundle target",
+        "max_scalar_comparisons": "bundle context limits apply to a bundle target",
     }
     source = inspect.getsource(_catalog_child_argv_from_ctx)
 

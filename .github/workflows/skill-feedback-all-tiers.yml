@@ -17,7 +17,7 @@ jobs:
       tools-repository: NVIDIA/SkillEvaluator
       tools-ref: d1d8d41c97eacbebb737f72d58f6f79efa54a31a
       trusted-workflow-ref: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@d1d8d41c97eacbebb737f72d58f6f79efa54a31a
-      trusted-caller-blobs: 86da792ccac2b5d9c3b42c16929ccae12a488aed
+      trusted-caller-blobs: 88c8d8aa3f5ff3de257b924b2f82da2286a20b77
   benchmarks:
     uses: NVIDIA/SkillEvaluator/.github/workflows/publish-benchmarks.yml@d1d8d41c97eacbebb737f72d58f6f79efa54a31a
     permissions:
@@ -28,4 +28,4 @@ jobs:
       tools-repository: NVIDIA/SkillEvaluator
       tools-ref: d1d8d41c97eacbebb737f72d58f6f79efa54a31a
       trusted-workflow-ref: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@d1d8d41c97eacbebb737f72d58f6f79efa54a31a
-      trusted-caller-blobs: 86da792ccac2b5d9c3b42c16929ccae12a488aed
+      trusted-caller-blobs: 88c8d8aa3f5ff3de257b924b2f82da2286a20b77

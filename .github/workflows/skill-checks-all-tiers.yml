@@ -34,7 +34,7 @@ jobs:
       provider: nv_build
       embedding-provider: nv_build
       model: nvidia/nemotron-3.5-lightning-30b-a3b
-      embedding-model: ''
+      embedding-model: nvidia/nemotron-3.5-embed-1b
       agents: codex,claude-code
       runner: ubuntu-24.04
       tools-repository: NVIDIA/SkillEvaluator

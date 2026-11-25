@@ -41,6 +41,7 @@ def _stub_cli(monkeypatch: pytest.MonkeyPatch, command: str, stdout: str, *, ret
         ("claude-code", "2.1.279 (Claude Code)", "gpt-6.1-sol", None),
         ("codex", "codex-cli 0.159.0", "gpt-6.1-sol", "0.159.0"),
         ("codex", "codex-cli 0.159.1", "gpt-6.1-sol", None),
+        ("codex", "\n\n  codex-cli 0.159.1\n", "gpt-6.1-sol", None),
         ("codex", "codex-cli 0.159.0", "gpt-5.4", None),
         ("opencode", "0.0.1", "gpt-6.1-sol", None),
         ("opencode", "0.0.1", "claude-opus-5-5", None),
@@ -84,6 +85,16 @@ def test_unparseable_version_output_is_not_an_error(monkeypatch: pytest.MonkeyPa
     _stub_cli(monkeypatch, "/fake/claude", "claude dev build")
 
     assert ensure_local_runtimes(["claude-code"], agent_models={"claude-code": ["claude-opus-5-5"]}) == []
+
+
+def test_codex_banner_before_version_fails_preflight_for_gpt6(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_cli(monkeypatch, "/fake/codex", "\nLaunching Codex\ncodex-cli 0.159.1\n")
+
+    (error,) = ensure_local_runtimes(["codex"], agent_models={"codex": ["gpt-6.1-sol"]})
+
+    assert "did not report a recognizable version" in error
+    assert "gpt-6.1-sol needs 0.159.1 or later" in error
+    assert ensure_local_runtimes(["codex"], agent_models={"codex": ["gpt-5.4"]}) == []
 
 
 def test_a_failing_version_command_keeps_its_own_error(monkeypatch: pytest.MonkeyPatch) -> None:

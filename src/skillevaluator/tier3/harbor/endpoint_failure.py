@@ -7,9 +7,9 @@ When a proxy, firewall or DNS rule keeps the environment from reaching the
 model endpoint, every trial's first model request hangs until Harbor's agent
 timeout fires. The run then ends incomplete with one timeout per trial, and the
 usual advice for a timeout (shorten the task, raise ``--timeout-multiplier``)
-points the wrong way. Such a trial leaves a fingerprint in Harbor's own
-``result.json``: an ``AgentTimeoutError`` and not a single input or output
-token.
+points the wrong way. The diagnostic looks for ``AgentTimeoutError`` in
+Harbor's ``result.json`` and checks for evidence of input or output tokens
+in the result and the trial's trajectories.
 """
 
 from __future__ import annotations
@@ -19,24 +19,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from skillevaluator.tier3.harbor.collector import _inspect_trial_directory, _read_json, _trial_output_tokens
+from skillevaluator.tier3.harbor.collector import _inspect_trial_directory, _read_json, _trial_has_model_tokens
 
 #: Share of the run's trials that must match before the run is flagged.
 ENDPOINT_FAILURE_THRESHOLD = 0.8
 DIAGNOSTIC_KIND = "model_endpoint_unreachable"
-
-
-def selected_agent_job_dirs(
-    jobs_dir: Path,
-    skill_name: str,
-    agents: Iterable[str],
-    *,
-    skip_baseline: bool,
-    skip_with_skill: bool,
-) -> list[Path]:
-    """Return the job directories this run wrote, one per agent and arm that ran."""
-    variants = [*(() if skip_with_skill else ("with",)), *(() if skip_baseline else ("without",))]
-    return [jobs_dir / f"{skill_name}-{agent}-{variant}" for agent in agents for variant in variants]
 
 
 def _is_real_directory(path: Path) -> bool:
@@ -48,7 +35,7 @@ def _mapping(value: object) -> Mapping[str, Any]:
 
 
 def detect_model_endpoint_failure(job_dirs: Iterable[Path]) -> dict[str, Any] | None:
-    """Return a diagnostic when at least 80 percent of the trials timed out with no model tokens.
+    """Flag runs in which at least 80 percent of trials timed out with no observed model tokens.
 
     Only the direct ``<trial>/result.json`` of each real trial directory counts:
     a recursive scan could also find copies kept inside trial artifacts and
@@ -73,13 +60,7 @@ def detect_model_endpoint_failure(job_dirs: Iterable[Path]) -> dict[str, Any] | 
                 continue
             total += 1
             timed_out = _mapping(data.get("exception_info")).get("exception_type") == "AgentTimeoutError"
-            # The collector's own proof of model output also reads the trial's trajectory,
-            # so a slow run that did produce tokens is not mistaken for an unreachable endpoint.
-            if (
-                not timed_out
-                or _mapping(data.get("agent_result")).get("n_input_tokens")
-                or _trial_output_tokens(trial_dir, data) is not None
-            ):
+            if not timed_out or _trial_has_model_tokens(trial_dir, data):
                 continue
             matched += 1
             name = _mapping(data["agent_info"]).get("name")
@@ -114,7 +95,7 @@ def endpoint_failure_warning(diagnostic: Mapping[str, Any], *, env_mode: str, ho
     where = f" ({named})" if named else ""
     return (
         f"Likely model endpoint failure: {diagnostic['matched_trials']} of {diagnostic['total_trials']} trials "
-        "ended in AgentTimeoutError without a single model token (0 input, 0 output), so the agents probably "
+        "ended in AgentTimeoutError with no observed input or output tokens, so the agents probably "
         f"never got a response from the model endpoint{where}. The timeouts most likely reflect the environment "
         f"rather than the skill. Check proxy, firewall and DNS access from the {env_mode} environment to the "
         "endpoint and the agent credential, then rerun."

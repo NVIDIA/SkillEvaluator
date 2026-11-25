@@ -388,7 +388,7 @@ See [retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci
   </Accordion>
   <Accordion title="Every trial times out with no tokens">
     When at least 80 percent of a run's trials end in `AgentTimeoutError` with
-    zero input and zero output tokens, the agents most likely never got a
+    no observed input or output tokens, the agents most likely never got a
     response from the model endpoint: a proxy, firewall or DNS rule between the
     environment and the endpoint, a wrong base URL, or a credential the endpoint
     does not answer. SkillEvaluator prints a warning that names the provider

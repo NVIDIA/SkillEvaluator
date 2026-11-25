@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,7 +24,6 @@ from skillevaluator.tier3.harbor.endpoint_failure import (
     detect_model_endpoint_failure,
     endpoint_failure_warning,
     provider_hosts,
-    selected_agent_job_dirs,
 )
 
 
@@ -130,7 +130,7 @@ def test_a_trial_that_used_the_model_or_failed_otherwise_is_not_a_match(tmp_path
     assert detect_model_endpoint_failure([job]) is None
 
 
-def test_null_and_missing_token_counts_count_as_zero(tmp_path: Path) -> None:
+def test_null_and_missing_token_counts_are_unobserved(tmp_path: Path) -> None:
     missing = _trial_result("t1")
     del missing["agent_result"]
     job = _write_job(tmp_path / "job", [_trial_result("t0", n_input=None, n_output=None), missing])
@@ -148,6 +148,26 @@ def test_a_timeout_whose_trajectory_shows_model_output_is_not_a_match(tmp_path: 
     (trial / "agent" / "trajectory.json").write_text(
         json.dumps({"final_metrics": {"total_completion_tokens": 900}}), encoding="utf-8"
     )
+
+    assert detect_model_endpoint_failure([job]) is None
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "trajectory"),
+    [
+        ("trajectory.json", {"final_metrics": {"total_prompt_tokens": 24}}),
+        ("agent/trajectory.json", {"final_metrics": {"total_prompt_tokens": 24, "total_completion_tokens": 0}}),
+        ("steps/step-1/agent/trajectory.json", {"steps": [{"metrics": {"prompt_tokens": 24}}]}),
+    ],
+)
+def test_a_timeout_whose_trajectory_shows_prompt_tokens_is_not_a_match(
+    tmp_path: Path, relative_path: str, trajectory: dict[str, Any]
+) -> None:
+    job = tmp_path / "job"
+    trial = _write_trial(job, "t0", _trial_result("t0", n_input=None))
+    path = trial / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(trajectory), encoding="utf-8")
 
     assert detect_model_endpoint_failure([job]) is None
 
@@ -202,18 +222,6 @@ def test_no_trials_or_missing_directories_give_no_diagnostic(tmp_path: Path) -> 
     assert detect_model_endpoint_failure([empty, tmp_path / "missing"]) is None
 
 
-def test_selected_job_directories_follow_the_arms_that_ran(tmp_path: Path) -> None:
-    both = selected_agent_job_dirs(tmp_path, "demo", ["codex"], skip_baseline=False, skip_with_skill=False)
-    with_only = selected_agent_job_dirs(
-        tmp_path, "demo", ["codex", "opencode"], skip_baseline=True, skip_with_skill=False
-    )
-    without_only = selected_agent_job_dirs(tmp_path, "demo", ["codex"], skip_baseline=False, skip_with_skill=True)
-
-    assert both == [tmp_path / "demo-codex-with", tmp_path / "demo-codex-without"]
-    assert with_only == [tmp_path / "demo-codex-with", tmp_path / "demo-opencode-with"]
-    assert without_only == [tmp_path / "demo-codex-without"]
-
-
 def test_warning_names_only_hosts_and_the_environment() -> None:
     diagnostic = {"matched_trials": 4, "total_trials": 5}
     hosts = provider_hosts(
@@ -231,7 +239,7 @@ def test_warning_names_only_hosts_and_the_environment() -> None:
 
     assert hosts == ["integrate.api.nvidia.com", "api.openai.com"]
     assert warning.startswith("Likely model endpoint failure: 4 of 5 trials ended in AgentTimeoutError")
-    assert "without a single model token (0 input, 0 output)" in warning
+    assert "with no observed input or output tokens" in warning
     assert "model endpoint (integrate.api.nvidia.com, api.openai.com). The timeouts most likely reflect" in warning
     assert "from the docker environment" in warning
     for leaked in ("hunter2", "user:", "/v1", "key=abc", "8443"):
@@ -255,6 +263,8 @@ def _run_with_collected(
     *,
     diagnostic: dict[str, Any] | None,
     collected_warnings: list[str] | None = None,
+    skip_baseline: bool = True,
+    skip_with_skill: bool = False,
 ) -> tuple[dict[str, Any], list[Any]]:
     skill = _generated_skill(tmp_path)
     _stub_harbor_runner(monkeypatch, tmp_path, task_source="evals_json")
@@ -283,7 +293,8 @@ def _run_with_collected(
         agent_models={"codex": "gpt-4o-mini"},
         output_dir=tmp_path / "results",
         env_mode="docker",
-        skip_baseline=True,
+        skip_baseline=skip_baseline,
+        skip_with_skill=skip_with_skill,
         keep_harbor_jobs=True,
         agent_runtime_preflight=False,
     )
@@ -328,11 +339,69 @@ def test_run_result_keeps_the_warnings_the_collector_reported(monkeypatch: pytes
     assert added.startswith("Likely model endpoint failure")
 
 
-def test_run_without_a_matching_pattern_adds_nothing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    result, _seen = _run_with_collected(monkeypatch, tmp_path, diagnostic=None)
+@pytest.mark.parametrize(
+    ("skip_baseline", "skip_with_skill", "variants"),
+    [(False, False, ("with", "without")), (True, False, ("with",)), (False, True, ("without",))],
+)
+def test_run_without_a_matching_pattern_adds_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    skip_baseline: bool,
+    skip_with_skill: bool,
+    variants: tuple[str, ...],
+) -> None:
+    result, seen = _run_with_collected(
+        monkeypatch, tmp_path, diagnostic=None, skip_baseline=skip_baseline, skip_with_skill=skip_with_skill
+    )
 
+    assert [path.name for path in seen] == [f"demo-skill-codex-{variant}" for variant in variants]
     assert "model_endpoint_diagnostic" not in result
     assert not [item for item in result.get("warnings", []) if "model endpoint" in item]
+
+
+@pytest.mark.parametrize("variant", ["sumofparts", "looseparts"])
+def test_successful_comparison_arm_counts_toward_endpoint_diagnostic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variant: str
+) -> None:
+    skill = _generated_skill(tmp_path)
+    _stub_harbor_runner(monkeypatch, tmp_path, task_source="evals_json")
+    plan = SimpleNamespace(
+        configure_agent_routes=lambda _routes: None,
+        stage_additional=lambda *_args: ((variant, tmp_path / "comparison-dataset", None),),
+        bind_execution=lambda *_args, **_kwargs: None,
+        launch_errors={"codex": {}},
+        run_config=dict,
+    )
+    hooks = SimpleNamespace(
+        comparison_plan=plan,
+        with_agent_import_path=lambda _agent, path: path,
+        stage_with_arm=lambda *_args: None,
+        configure_run=lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(runner, "_private_runtime_hooks", lambda: hooks)
+
+    def run_jobs(
+        *, jobs_dir: Path, additional_arms: tuple[tuple[str, Path, str | None], ...], **_kwargs: Any
+    ) -> list[str]:
+        _write_job(jobs_dir / "demo-skill-codex-with", _timeouts(1))
+        for arm, _, _ in additional_arms:
+            _write_job(jobs_dir / f"demo-skill-codex-{arm}", [_trial_result("ok", exception_type=None, n_input=5)])
+        return []
+
+    monkeypatch.setattr(runner, "_run_agent_pair", run_jobs)
+    result = runner.run_harbor_eval(
+        skill,
+        ["codex"],
+        agent_models={"codex": "gpt-4o-mini"},
+        output_dir=tmp_path / "results",
+        env_mode="docker",
+        skip_baseline=True,
+        keep_harbor_jobs=True,
+        agent_runtime_preflight=False,
+    )
+
+    assert result["execution_status"] == "complete"
+    assert "model_endpoint_diagnostic" not in result
 
 
 def test_detector_reads_through_the_bounded_collector_reader(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

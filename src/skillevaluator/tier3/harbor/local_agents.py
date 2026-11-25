@@ -33,7 +33,7 @@ from skillevaluator.tier3.harbor import LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SE
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode as _InstalledClaudeCode
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex, SkillEvaluatorOpenCode
 from skillevaluator.tier3.harbor.local_runtime import CLI_VERSION_RE as _CLI_VERSION_RE
-from skillevaluator.tier3.harbor.local_runtime import MODEL_MIN_RUNTIME_VERSIONS
+from skillevaluator.tier3.harbor.local_runtime import MODEL_MIN_RUNTIME_VERSIONS, parse_codex_cli_version
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     MAX_REQUESTS_PER_BRIDGE,
     RunningBridge,
@@ -716,6 +716,9 @@ class SkillEvaluatorLocalCodex(SkillEvaluatorGatewayCodex):
 
     _REMOTE_CODEX_HOME = PurePosixPath(EnvironmentPaths.agent_dir / LOCAL_CODEX_HOME_DIRNAME)
     _REMOTE_CODEX_SECRETS_DIR = PurePosixPath(EnvironmentPaths.agent_dir / LOCAL_CODEX_SECRETS_DIRNAME)
+
+    def parse_version(self, stdout: str) -> str:
+        return parse_codex_cli_version(stdout)
 
     async def install(self, environment: BaseEnvironment) -> None:
         result = await self.exec_as_agent(environment, command="codex --version")

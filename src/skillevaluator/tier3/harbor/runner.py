@@ -126,7 +126,6 @@ from skillevaluator.tier3.harbor.endpoint_failure import (
     detect_model_endpoint_failure,
     endpoint_failure_warning,
     provider_hosts,
-    selected_agent_job_dirs,
 )
 from skillevaluator.tier3.harbor.gke_environment import (
     GKE_ALLOW_WORKLOAD_IDENTITY_ENV,
@@ -6593,24 +6592,24 @@ def _run_harbor_eval_impl(
     run_config["budget"] = budget.metadata()
     variants = 2 - int(skip_baseline) - int(skip_with_skill)
     matrix_trials = expected_trials * sum(variants + len(additional_arms.get(agent, ())) for agent in agents)
+    arm_jobs = {
+        agent: {
+            **({"with_skill": jobs_dir / f"{skill_path.name}-{agent}-with"} if not skip_with_skill else {}),
+            **({"without_skill": jobs_dir / f"{skill_path.name}-{agent}-without"} if not skip_baseline else {}),
+            **{
+                {"sumofparts": "sum_of_parts", "looseparts": "loose_parts"}[variant]: jobs_dir
+                / f"{skill_path.name}-{agent}-{variant}"
+                for variant, _, _ in additional_arms.get(agent, ())
+            },
+        }
+        for agent in agents
+    }
     try:
         if comparison_plan is not None:
             comparison_plan.bind_execution(
                 case_ids, n_attempts=n_attempts, stop_on_pass=bool(stop_on_pass), pass_threshold=float(pass_threshold)
             )
-            jobs = {
-                agent: {
-                    **({"with_skill": jobs_dir / f"{skill_path.name}-{agent}-with"} if not skip_with_skill else {}),
-                    **({"without_skill": jobs_dir / f"{skill_path.name}-{agent}-without"} if not skip_baseline else {}),
-                    **{
-                        {"sumofparts": "sum_of_parts", "looseparts": "loose_parts"}[variant]: jobs_dir
-                        / f"{skill_path.name}-{agent}-{variant}"
-                        for variant, _, _ in additional_arms.get(agent, ())
-                    },
-                }
-                for agent in agents
-            }
-            private_hooks.configure_run(case_id_by_task_selector=case_id_by_task_selector, arm_jobs=jobs)
+            private_hooks.configure_run(case_id_by_task_selector=case_id_by_task_selector, arm_jobs=arm_jobs)
             run_config["private_comparisons"] = comparison_plan.run_config()
     except (OSError, ValueError) as exc:
         return _persist_pre_execution_failure([str(exc)])
@@ -6897,13 +6896,7 @@ def _run_harbor_eval_impl(
         }
     )
     if endpoint_diagnostic := detect_model_endpoint_failure(
-        selected_agent_job_dirs(
-            jobs_dir,
-            skill_path.name,
-            agents,
-            skip_baseline=skip_baseline,
-            skip_with_skill=skip_with_skill,
-        )
+        job_dir for agent_jobs in arm_jobs.values() for job_dir in agent_jobs.values()
     ):
         results["model_endpoint_diagnostic"] = endpoint_diagnostic
         results.setdefault("warnings", []).append(

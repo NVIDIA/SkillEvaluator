@@ -703,31 +703,42 @@ def required_runtime_version(agent: str, model: str) -> tuple[int, int, int] | N
     return None
 
 
+def parse_codex_cli_version(stdout: str) -> str:
+    """Read the first nonblank version line, matching Harbor's Codex parser."""
+    for line in stdout.splitlines():
+        if line := line.strip():
+            return line.removeprefix("codex-cli").strip()
+    return ""
+
+
 def _runtime_version_error(
     agent: str,
     command: str,
     version_output: str,
     models: Sequence[str] | None,
 ) -> str | None:
-    """Return an error when the local CLI is older than a selected model needs.
+    """Check the parsed local version against the selected model's requirement.
 
     With the selected models unknown there is nothing to compare: an old CLI
-    still runs older models chosen with ``--agent-model``. Output without a
-    version number is not an error; the per-trial check in ``local_agents`` is
-    the backstop.
+    still runs older models chosen with ``--agent-model``. GPT-6 requires a
+    recognizable version on the first nonblank line of Codex output.
     """
+    if agent == "codex":
+        version_output = parse_codex_cli_version(version_output)
     found = CLI_VERSION_RE.search(version_output)
-    if found is None:
+    if found is None and agent != "codex":
         return None
-    version = tuple(int(part) for part in found.groups())
+    version = tuple(int(part) for part in found.groups()) if found is not None else None
     for model in models or ():
         minimum = required_runtime_version(agent, model)
-        if minimum is not None and version < minimum:
-            return (
-                f"Local mode agent '{agent}' at {command} is version {found.group(0)}, but {model} needs "
-                f"{'.'.join(map(str, minimum))} or later. Update that CLI, use --env-mode docker, or choose an "
-                f"older model with --agent-model {agent}=<model>."
-            )
+        if minimum is None or (version is not None and version >= minimum):
+            continue
+        observed = f"is version {found.group(0)}" if found is not None else "did not report a recognizable version"
+        return (
+            f"Local mode agent '{agent}' at {command} {observed}, but {model} needs "
+            f"{'.'.join(map(str, minimum))} or later. Update that CLI, use --env-mode docker, or choose an "
+            f"older model with --agent-model {agent}=<model>."
+        )
     return None
 
 

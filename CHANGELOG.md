@@ -14,8 +14,8 @@ All notable changes to SkillEvaluator are documented in this file.
   before any trial when one is too old. Use `--agent-model AGENT=MODEL` to
   choose an older model.
 - Tier 3 results flag a run in which at least 80 percent of trials timed out
-  with no model tokens. The console shows a warning, and `result.json` records
-  `model_endpoint_diagnostic`.
+  with no observed model tokens. The console shows a warning, and
+  `result.json` records `model_endpoint_diagnostic`.
 
 ### Changed
 

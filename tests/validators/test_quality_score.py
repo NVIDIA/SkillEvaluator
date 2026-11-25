@@ -1689,11 +1689,11 @@ class TestReliabilityErrorHandlingConfig:
         assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is False
 
     def test_packaged_single_word_terms_behave_as_before(self):
-        from skillevaluator.validators.quality_score import _contains_any_word
+        from skillevaluator.validators.quality_score import _contains_any_term
 
-        assert _contains_any_word("An Error occurred.", ["error"])
-        assert not _contains_any_word("This is errorless.", ["error"])
-        assert not _contains_any_word("nothing here", ["error", "failure"])
+        assert _contains_any_term("An Error occurred.", ["error"])
+        assert not _contains_any_term("This is errorless.", ["error"])
+        assert not _contains_any_term("nothing here", ["error", "failure"])
 
 
 def _write_sized_skill(tmp_path: Path, characters: int) -> Path:

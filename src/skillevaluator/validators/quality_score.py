@@ -38,7 +38,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
-from skillevaluator.quality_config import CodeErrorHandlingRule, load_quality_config_with_provenance
+from skillevaluator.quality_config import CodeErrorHandlingRule, TermsRule, load_quality_config_with_provenance
 from skillevaluator.utils.structured_data import (
     StructuredDataError,
     StructuredDataLimitError,
@@ -50,7 +50,12 @@ from skillevaluator.validators.markdown import markdown_link_targets
 
 logger = get_logger(__name__)
 
-_WORD_CHAR = r"A-Za-z0-9_"
+# Scripts written without spaces between words: CJK ideographs (with their extensions and
+# compatibility forms), kana, and the CJK radicals. A term that starts or ends with one of
+# these characters has no word boundary to check on that side, so it matches as a substring.
+_UNSPACED_SCRIPT_RE = re.compile(
+    "[\u2e80-\u2fdf\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003ffff]"
+)
 # Role and control tags that stay reportable in ``argument-hint`` even when they
 # look like a CLI placeholder, including nested forms (``<system<payload>>``) and a
 # role word with a message-part suffix (``<system_prompt>``, ``<toolCall>``,
@@ -171,26 +176,33 @@ def _mask_argument_hint(hint: str) -> str:
     return masked
 
 
+def _term_pattern(term: str) -> str:
+    """Regex for one word or phrase that does not match inside another word.
+
+    Whitespace inside a multi-word term matches any run of whitespace, so wrapped text
+    still matches. Word boundaries are Unicode-aware: ``for`` does not match inside
+    ``forêt`` or ``платформа``. A side of the term that starts or ends in a script without
+    spaces between words, such as Chinese, has no boundary check, so ``错误`` matches
+    inside ``报告错误信息`` while ``error`` still does not match inside ``处理error时``.
+    """
+    words = term.split()
+    body = r"\s+".join(map(re.escape, words))
+    left = "" if _UNSPACED_SCRIPT_RE.match(words[0][0]) else r"(?<!\w)"
+    right = "" if _UNSPACED_SCRIPT_RE.match(words[-1][-1]) else r"(?!\w)"
+    return f"{left}{body}{right}"
+
+
 def _contains_term(text: str, term: str) -> bool:
-    """Match a word or phrase without accepting it inside another word."""
-    normalized = term.strip()
-    return bool(
-        re.search(
-            rf"(?<![{_WORD_CHAR}]){re.escape(normalized)}(?![{_WORD_CHAR}])",
-            text,
-            re.IGNORECASE,
-        )
-    )
+    """Return whether the text contains the word or phrase (any case), not inside another word."""
+    return bool(term.strip()) and re.search(_term_pattern(term), text, re.IGNORECASE) is not None
 
 
 def _contains_any_term(text: str, terms: Iterable[str]) -> bool:
-    return any(_contains_term(text, term) for term in terms)
-
-
-def _contains_any_word(text: str, words: Iterable[str]) -> bool:
-    # Whitespace inside a multi-word term matches any run of whitespace, so wrapped text still matches.
-    pattern = "|".join(r"\s+".join(map(re.escape, word.split())) for word in words)
-    return bool(re.search(rf"(?<!\w)(?:{pattern})(?!\w)", text, re.IGNORECASE))
+    """Return whether the text contains any of the terms (whole word or phrase, any case)."""
+    patterns = [_term_pattern(term) for term in terms if term.strip()]
+    if not patterns:
+        return False
+    return re.search("|".join(patterns), text, re.IGNORECASE) is not None
 
 
 def _has_api_documentation(content: str) -> bool:
@@ -690,24 +702,19 @@ class QualityScoreValidator(ValidatorBase):
 
             present_res = [d for d in QUALITY_RESOURCE_DIRS if (skill_path / d).exists()]
             if present_res:
-                res_kw = ["template", "asset", "design", "style", "css", "html", "resource"]
-                if not _contains_any_term(content, res_kw):
+                rule = self.quality_config["correctness"]["lib_resource_docs"]
+                if rule["points"] and not _contains_any_term(content, rule["terms"]):
                     dim.deduct(
-                        5,
+                        rule["points"],
                         "info",
-                        f"Lib-based skill has resource directories ({', '.join(present_res)}) "
-                        "but SKILL.md lacks resource documentation",
+                        f"{rule['message']}: {', '.join(present_res)}",
+                        rule["suggestion"],
                     )
 
         elif skill_type == "resource-based":
-            res_kw = ["template", "asset", "design", "style", "css", "html", "resource"]
-            if not _contains_any_term(content, res_kw):
-                dim.deduct(
-                    10,
-                    "warning",
-                    "Resource-based skill lacks documentation of available resources",
-                    "Document available templates, assets, and design resources in SKILL.md",
-                )
+            rule = self.quality_config["correctness"]["resource_docs"]
+            if rule["points"] and not _contains_any_term(content, rule["terms"]):
+                dim.deduct(rule["points"], "warning", rule["message"], rule["suggestion"])
 
         elif skill_type == "guide-only":
             body_lines = len([ln for ln in content.split("\n") if ln.strip()])
@@ -754,46 +761,24 @@ class QualityScoreValidator(ValidatorBase):
                     too_long["suggestion"],
                 )
 
-            trigger_words = ["use", "when", "for", "helps", "allows"]
-            if not _contains_any_term(desc, trigger_words):
-                dim.deduct(
-                    10,
-                    "info",
-                    "Description doesn't mention WHEN to use this skill",
-                    "Add trigger context: 'Use for...', 'When you need to...'",
-                )
-
-            vague_words = ["something", "things", "stuff", "various", "general"]
-            if _contains_any_term(desc, vague_words):
-                dim.deduct(
-                    15,
-                    "warning",
-                    "Description contains vague words",
-                    "Be specific about what this skill does",
-                )
-
-            person_phrases = ["i can", "i will", "you can", "you should", "your", "my", "we can"]
-            if _contains_any_term(desc, person_phrases):
-                dim.deduct(
-                    15,
-                    "warning",
-                    "Description uses first/second person",
-                    "Use third person: 'Processes files' not 'I can process'",
-                )
+            rules = self.quality_config["discoverability"]
+            self._deduct_unless_any_term(dim, desc, rules["trigger_words"], "info")
+            self._deduct_if_any_term(dim, desc, rules["vague_words"], "warning")
+            self._deduct_if_any_term(dim, desc, rules["person_phrases"], "warning")
 
             # Broad description without negative triggers (M1)
-            generic = ["data", "files", "documents", "project", "manage", "handle", "process"]
-            negatives = ["not for", "do not use", "instead use", "except when", "not when"]
-            if len(desc) > 100 and _contains_any_term(desc, generic) and not _contains_any_term(desc, negatives):
-                dim.deduct(
-                    5,
-                    "info",
-                    "Broad description without negative triggers may cause over-triggering",
-                    "Add boundary phrases like 'Do NOT use for...'",
-                )
+            broad = rules["broad_description"]
+            if (
+                broad["points"]
+                and len(desc) > broad["longer_than"]
+                and _contains_any_term(desc, broad["terms"])
+                and not _contains_any_term(desc, broad["negatives"])
+            ):
+                dim.deduct(broad["points"], "info", broad["message"], broad["suggestion"])
 
-        if "## Purpose" not in content:
-            dim.deduct(5, "info", "No '## Purpose' section", "Add purpose section to clarify use cases")
+        purpose = self.quality_config["discoverability"]["purpose_heading"]
+        if purpose["points"] and not any(heading in content for heading in purpose["headings"]):
+            dim.deduct(purpose["points"], "info", purpose["message"], purpose["suggestion"])
 
         sn = qs.skill_name
         if len(sn) < 5:
@@ -825,7 +810,7 @@ class QualityScoreValidator(ValidatorBase):
         error_handling = self.quality_config["error_handling"]
 
         mentioned = error_handling["mentioned"]
-        qs.has_error_handling = _contains_any_word(content, mentioned["terms"])
+        qs.has_error_handling = _contains_any_term(content, mentioned["terms"])
         if not qs.has_error_handling and mentioned["points"]:
             dim.deduct(mentioned["points"], "info", mentioned["message"], mentioned["suggestion"])
 
@@ -843,6 +828,18 @@ class QualityScoreValidator(ValidatorBase):
             accepted_headings = [expected["heading"], *expected["alternatives"]]
             if not any(heading in content for heading in accepted_headings):
                 dim.deduct(expected["points"], "info", expected["message"], expected["suggestion"])
+
+    @staticmethod
+    def _deduct_if_any_term(dim, text: str, rule: TermsRule, severity: str) -> None:
+        """Deduct when the text contains one of the rule's terms; points 0 turns the rule off."""
+        if rule["points"] and _contains_any_term(text, rule["terms"]):
+            dim.deduct(rule["points"], severity, rule["message"], rule["suggestion"])
+
+    @staticmethod
+    def _deduct_unless_any_term(dim, text: str, rule: TermsRule, severity: str) -> None:
+        """Deduct when the text contains none of the rule's terms; points 0 turns the rule off."""
+        if rule["points"] and not _contains_any_term(text, rule["terms"]):
+            dim.deduct(rule["points"], severity, rule["message"], rule["suggestion"])
 
     @staticmethod
     def _check_code_error_handling(dim, files: list[Path], rule: CodeErrorHandlingRule) -> None:
@@ -916,14 +913,7 @@ class QualityScoreValidator(ValidatorBase):
         else:
             section = ""
         if section:
-            action_words = ["use", "call", "run", "execute", "pass", "set", "add", "mark", "update", "keep"]
-            if not _contains_any_term(section, action_words):
-                dim.deduct(
-                    15,
-                    "warning",
-                    "Instructions lack clear action verbs",
-                    "Use imperative: 'Use run_script with...', 'Call activate_skill...'",
-                )
+            self._deduct_unless_any_term(dim, section, self.quality_config["efficiency"]["action_verbs"], "warning")
             if not ("- " in section or "1." in section or "* " in section):
                 dim.deduct(
                     5,
@@ -933,14 +923,7 @@ class QualityScoreValidator(ValidatorBase):
                 )
 
         # Corporate buzzwords
-        complex_words = ["utilize", "facilitate", "leverage", "paradigm", "synergy"]
-        if _contains_any_term(content, complex_words):
-            dim.deduct(
-                5,
-                "info",
-                "Uses complex/corporate language",
-                "Use simple, direct language: 'use' not 'utilize'",
-            )
+        self._deduct_if_any_term(dim, content, self.quality_config["efficiency"]["buzzwords"], "info")
 
         # Reference file naming
         refs_dir = skill_path / "references"

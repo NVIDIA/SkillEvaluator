@@ -19,21 +19,34 @@ def test_packaged_default_quality_config_is_available() -> None:
     assert config["expected_headers"] == [
         {
             "heading": "## Prerequisites",
-            "alternatives": ["## Requirements"],
+            "alternatives": [
+                "## Requirements",
+                "## Предварительные условия",
+                "## Требования",
+                "## 前提条件",
+                "## 先决条件",
+            ],
             "points": 5,
             "message": "No prerequisites/requirements documented",
             "suggestion": "Document dependencies, API keys, or setup needed",
         },
         {
             "heading": "## Limitations",
-            "alternatives": [],
+            "alternatives": ["## Ограничения", "## 限制"],
             "points": 5,
             "message": "No limitations documented",
             "suggestion": "Add '## Limitations' section with known issues/constraints",
         },
         {
             "heading": "## Troubleshooting",
-            "alternatives": ["## Common Issues", "## FAQ"],
+            "alternatives": [
+                "## Common Issues",
+                "## FAQ",
+                "## Устранение неполадок",
+                "## Решение проблем",
+                "## 故障排除",
+                "## 疑难解答",
+            ],
             "points": 5,
             "message": "No troubleshooting section documented",
             "suggestion": "Add '## Troubleshooting' with Error/Cause/Solution patterns",
@@ -138,9 +151,7 @@ def test_quality_config_generates_message_and_suggestion_when_omitted(tmp_path: 
         ),
     ],
 )
-def test_quality_config_rejects_unknown_keys_and_duplicate_headings(
-    tmp_path: Path, config: str, match: str
-) -> None:
+def test_quality_config_rejects_unknown_keys_and_duplicate_headings(tmp_path: Path, config: str, match: str) -> None:
     config_path = tmp_path / "quality.yaml"
     config_path.write_text(config, encoding="utf-8")
 
@@ -207,9 +218,7 @@ def test_quality_config_rejects_non_utf8_file(tmp_path: Path) -> None:
         "bad-explicit-tag",
     ],
 )
-def test_quality_config_rejects_duplicate_keys_and_pathological_values(
-    tmp_path: Path, config: str, match: str
-) -> None:
+def test_quality_config_rejects_duplicate_keys_and_pathological_values(tmp_path: Path, config: str, match: str) -> None:
     config_path = tmp_path / "quality.yaml"
     config_path.write_text(config, encoding="utf-8")
 
@@ -247,7 +256,6 @@ def test_quality_config_provenance_names_custom_file_without_its_directory(tmp_p
     assert load_quality_config_with_provenance(None)[1]["file"] is None
 
 
-
 PACKAGED_ERROR_HANDLING = {
     "mentioned": {
         "points": 10,
@@ -271,6 +279,25 @@ PACKAGED_ERROR_HANDLING = {
             "validating",
             "validation",
             "validations",
+            "ошибка",
+            "ошибки",
+            "ошибок",
+            "ошибочно",
+            "исключение",
+            "невалидный",
+            "сбой",
+            "сбои",
+            "не удалось",
+            "валидация",
+            "валидирует",
+            "не найден",
+            "недоступен",
+            "错误",
+            "异常",
+            "失败",
+            "无效",
+            "验证",
+            "校验",
         ],
     },
     "scripts": {
@@ -309,7 +336,9 @@ def test_custom_file_without_error_handling_keeps_packaged_rules(tmp_path: Path)
 
 
 def test_custom_error_handling_overlays_packaged_rules_key_by_key(tmp_path: Path) -> None:
-    config_path = _write_config(tmp_path, "error_handling:\n  scripts:\n    points: 2\n  mentioned:\n    terms: [oops]\n")
+    config_path = _write_config(
+        tmp_path, "error_handling:\n  scripts:\n    points: 2\n  mentioned:\n    terms: [oops]\n"
+    )
 
     error_handling = load_quality_config(config_path)["error_handling"]
 
@@ -334,12 +363,30 @@ def test_custom_error_handling_overlays_packaged_rules_key_by_key(tmp_path: Path
         ('error_handling:\n  scripts:\n    points: "5"\n', r"error_handling\.scripts\.points must be a non-negative"),
         ('error_handling:\n  lib:\n    message: " "\n', r"error_handling\.lib\.message must be a non-empty string"),
         ("error_handling:\n  lib:\n    suggestion: 3\n", r"error_handling\.lib\.suggestion must be a non-empty string"),
-        ("error_handling:\n  scripts:\n    markers: []\n", r"error_handling\.scripts\.markers must be a non-empty list"),
-        ("error_handling:\n  scripts:\n    markers: raise\n", r"error_handling\.scripts\.markers must be a non-empty list"),
-        ('error_handling:\n  scripts:\n    markers: [""]\n', r"error_handling\.scripts\.markers\[0\] must be a non-blank"),
-        ("error_handling:\n  lib:\n    markers: [raise, 3]\n", r"error_handling\.lib\.markers\[1\] must be a non-blank"),
-        ("error_handling:\n  scripts:\n    markers: [raise, raise]\n", r"duplicate entry 'raise' in error_handling\.scripts\.markers"),
-        ("error_handling:\n  mentioned:\n    terms: [Error, error]\n", r"duplicate entry 'error' in error_handling\.mentioned\.terms"),
+        (
+            "error_handling:\n  scripts:\n    markers: []\n",
+            r"error_handling\.scripts\.markers must be a non-empty list",
+        ),
+        (
+            "error_handling:\n  scripts:\n    markers: raise\n",
+            r"error_handling\.scripts\.markers must be a non-empty list",
+        ),
+        (
+            'error_handling:\n  scripts:\n    markers: [""]\n',
+            r"error_handling\.scripts\.markers\[0\] must be a non-blank",
+        ),
+        (
+            "error_handling:\n  lib:\n    markers: [raise, 3]\n",
+            r"error_handling\.lib\.markers\[1\] must be a non-blank",
+        ),
+        (
+            "error_handling:\n  scripts:\n    markers: [raise, raise]\n",
+            r"duplicate entry 'raise' in error_handling\.scripts\.markers",
+        ),
+        (
+            "error_handling:\n  mentioned:\n    terms: [Error, error]\n",
+            r"duplicate entry 'error' in error_handling\.mentioned\.terms",
+        ),
     ],
 )
 def test_quality_config_rejects_invalid_error_handling(tmp_path: Path, body: str, match: str) -> None:
@@ -395,7 +442,9 @@ def test_custom_digest_covers_only_the_rules_the_file_sets(tmp_path: Path) -> No
     )
 
 
-def test_custom_digest_ignores_packaged_defaults_the_file_omits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_digest_ignores_packaged_defaults_the_file_omits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from skillevaluator import quality_config
 
     custom = _write_config(tmp_path, "error_handling: {scripts: {points: 2}}\n")
@@ -527,17 +576,35 @@ def test_custom_file_without_efficiency_keeps_the_packaged_token_budget(tmp_path
             r"unknown key\(s\) in efficiency\.token_budget: max_token "
             r"\(allowed: max_tokens, message, points, suggestion\)",
         ),
-        ("efficiency:\n  token_budget:\n    max_tokens: 0\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
-        ("efficiency:\n  token_budget:\n    max_tokens: -1\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
-        ("efficiency:\n  token_budget:\n    max_tokens: 5000.0\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
-        ("efficiency:\n  token_budget:\n    max_tokens: true\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
-        ('efficiency:\n  token_budget:\n    max_tokens: "8000"\n', r"efficiency\.token_budget\.max_tokens must be a positive"),
+        (
+            "efficiency:\n  token_budget:\n    max_tokens: 0\n",
+            r"efficiency\.token_budget\.max_tokens must be a positive",
+        ),
+        (
+            "efficiency:\n  token_budget:\n    max_tokens: -1\n",
+            r"efficiency\.token_budget\.max_tokens must be a positive",
+        ),
+        (
+            "efficiency:\n  token_budget:\n    max_tokens: 5000.0\n",
+            r"efficiency\.token_budget\.max_tokens must be a positive",
+        ),
+        (
+            "efficiency:\n  token_budget:\n    max_tokens: true\n",
+            r"efficiency\.token_budget\.max_tokens must be a positive",
+        ),
+        (
+            'efficiency:\n  token_budget:\n    max_tokens: "8000"\n',
+            r"efficiency\.token_budget\.max_tokens must be a positive",
+        ),
         ("efficiency:\n  token_budget:\n    max_tokens:\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
         (
             "efficiency:\n  token_budget:\n    max_tokens: 1000000001\n",
             r"\.max_tokens must be a positive integer no greater than 1000000000",
         ),
-        (f"efficiency:\n  token_budget:\n    max_tokens: {_HUGE_HEX}\n", r"invalid YAML: .*integer size exceeds 14000 bits"),
+        (
+            f"efficiency:\n  token_budget:\n    max_tokens: {_HUGE_HEX}\n",
+            r"invalid YAML: .*integer size exceeds 14000 bits",
+        ),
         ("efficiency:\n  token_budget:\n    points: -1\n", r"efficiency\.token_budget\.points must be a non-negative"),
         ('efficiency:\n  token_budget:\n    message: ""\n', r"efficiency\.token_budget\.message must be a non-empty"),
     ],
@@ -622,6 +689,7 @@ def test_custom_file_with_only_a_description_maximum_keeps_every_other_packaged_
     config = load_quality_config(config_path)
 
     assert config["discoverability"] == {
+        **packaged["discoverability"],
         "description_too_short": PACKAGED_DESCRIPTION_TOO_SHORT,
         "description_too_long": {**PACKAGED_DESCRIPTION_TOO_LONG, "max_chars": 300},
     }
@@ -638,6 +706,7 @@ def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_
     config = load_quality_config(config_path)
 
     assert config["discoverability"] == {
+        **packaged["discoverability"],
         "description_too_short": {**PACKAGED_DESCRIPTION_TOO_SHORT, "min_chars": 40},
         "description_too_long": PACKAGED_DESCRIPTION_TOO_LONG,
     }
@@ -650,7 +719,7 @@ def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_
     ("body", "match"),
     [
         ("discoverability: []\n", r"discoverability must be a mapping"),
-        ("discoverability:\n  vague_words: {}\n", r"unknown key\(s\) in discoverability: vague_words"),
+        ("discoverability:\n  vague_terms: {}\n", r"unknown key\(s\) in discoverability: vague_terms"),
         ("discoverability:\n  description_too_long: 200\n", r"discoverability\.description_too_long must be a mapping"),
         (
             "discoverability:\n  description_too_long:\n    max_char: 300\n",
@@ -658,22 +727,34 @@ def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_
             r"\(allowed: max_chars, message, points, suggestion\)",
         ),
         ("discoverability:\n  description_too_long:\n    max_chars: 0\n", r"\.max_chars must be a positive integer"),
-        ("discoverability:\n  description_too_long:\n    max_chars: 200.5\n", r"\.max_chars must be a positive integer"),
+        (
+            "discoverability:\n  description_too_long:\n    max_chars: 200.5\n",
+            r"\.max_chars must be a positive integer",
+        ),
         ("discoverability:\n  description_too_long:\n    max_chars: true\n", r"\.max_chars must be a positive integer"),
         (
             f"discoverability:\n  description_too_long:\n    max_chars: {_HUGE_HEX}\n",
             r"invalid YAML: .*integer size exceeds 14000 bits",
         ),
         ("discoverability:\n  description_too_long:\n    points: -5\n", r"\.points must be a non-negative"),
-        ("discoverability:\n  description_too_short: 20\n", r"discoverability\.description_too_short must be a mapping"),
+        (
+            "discoverability:\n  description_too_short: 20\n",
+            r"discoverability\.description_too_short must be a mapping",
+        ),
         (
             "discoverability:\n  description_too_short:\n    min_char: 30\n",
             r"unknown key\(s\) in discoverability\.description_too_short: min_char "
             r"\(allowed: message, min_chars, points, suggestion\)",
         ),
         ("discoverability:\n  description_too_short:\n    min_chars: 0\n", r"\.min_chars must be a positive integer"),
-        ("discoverability:\n  description_too_short:\n    min_chars: 20.5\n", r"\.min_chars must be a positive integer"),
-        ("discoverability:\n  description_too_short:\n    min_chars: true\n", r"\.min_chars must be a positive integer"),
+        (
+            "discoverability:\n  description_too_short:\n    min_chars: 20.5\n",
+            r"\.min_chars must be a positive integer",
+        ),
+        (
+            "discoverability:\n  description_too_short:\n    min_chars: true\n",
+            r"\.min_chars must be a positive integer",
+        ),
         (
             f"discoverability:\n  description_too_short:\n    min_chars: {_HUGE_HEX}\n",
             r"invalid YAML: .*integer size exceeds 14000 bits",
@@ -750,14 +831,26 @@ def test_reserved_terms_are_stored_without_surrounding_whitespace(tmp_path: Path
             "correctness:\n  reserved_name:\n    words: [acme]\n",
             r"unknown key\(s\) in correctness\.reserved_name: words \(allowed: message, points, suggestion, terms\)",
         ),
-        ("correctness:\n  reserved_name:\n    terms: []\n", r"correctness\.reserved_name\.terms must be a non-empty list"),
-        ("correctness:\n  reserved_name:\n    terms: acme\n", r"correctness\.reserved_name\.terms must be a non-empty list"),
-        ('correctness:\n  reserved_name:\n    terms: [" "]\n', r"correctness\.reserved_name\.terms\[0\] must be a non-blank"),
+        (
+            "correctness:\n  reserved_name:\n    terms: []\n",
+            r"correctness\.reserved_name\.terms must be a non-empty list",
+        ),
+        (
+            "correctness:\n  reserved_name:\n    terms: acme\n",
+            r"correctness\.reserved_name\.terms must be a non-empty list",
+        ),
+        (
+            'correctness:\n  reserved_name:\n    terms: [" "]\n',
+            r"correctness\.reserved_name\.terms\[0\] must be a non-blank",
+        ),
         (
             "correctness:\n  reserved_name:\n    terms: [Acme, acme]\n",
             r"duplicate entry 'acme' in correctness\.reserved_name\.terms",
         ),
-        ("correctness:\n  reserved_name:\n    points: -1\n", r"correctness\.reserved_name\.points must be a non-negative"),
+        (
+            "correctness:\n  reserved_name:\n    points: -1\n",
+            r"correctness\.reserved_name\.points must be a non-negative",
+        ),
         (
             'correctness:\n  reserved_name:\n    terms: [claude, "claude "]\n',
             r"duplicate entry 'claude' in correctness\.reserved_name\.terms",
@@ -790,3 +883,153 @@ def test_custom_digest_declares_only_the_correctness_keys_the_file_sets(tmp_path
     config_path.write_text("correctness: {reserved_name: {terms: [acme]}}\n", encoding="utf-8")
 
     assert _digest(config_path) == quality_config_digest({"correctness": {"reserved_name": {"terms": ["acme"]}}})
+
+
+# ---------------------------------------------------------------------------
+# Word-list rules that were hard-coded English before (issue #865)
+# ---------------------------------------------------------------------------
+
+FORMER_HARD_CODED_WORD_LISTS = {
+    ("discoverability", "trigger_words"): (10, ["use", "when", "for", "helps", "allows"]),
+    ("discoverability", "vague_words"): (15, ["something", "things", "stuff", "various", "general"]),
+    ("discoverability", "person_phrases"): (15, ["i can", "i will", "you can", "you should", "your", "my", "we can"]),
+    ("discoverability", "broad_description"): (
+        5,
+        ["data", "files", "documents", "project", "manage", "handle", "process"],
+    ),
+    ("efficiency", "action_verbs"): (
+        15,
+        ["use", "call", "run", "execute", "pass", "set", "add", "mark", "update", "keep"],
+    ),
+    ("efficiency", "buzzwords"): (5, ["utilize", "facilitate", "leverage", "paradigm", "synergy"]),
+    ("correctness", "resource_docs"): (10, ["template", "asset", "design", "style", "css", "html", "resource"]),
+    ("correctness", "lib_resource_docs"): (5, ["template", "asset", "design", "style", "css", "html", "resource"]),
+}
+
+
+@pytest.mark.parametrize(("section", "rule"), sorted(FORMER_HARD_CODED_WORD_LISTS))
+def test_packaged_word_lists_start_with_the_former_hard_coded_english_terms(section: str, rule: str) -> None:
+    points, english_terms = FORMER_HARD_CODED_WORD_LISTS[(section, rule)]
+    packaged = load_quality_config()[section][rule]  # type: ignore[literal-required]
+
+    assert packaged["points"] == points
+    assert type(packaged["points"]) is int
+    assert packaged["terms"][: len(english_terms)] == english_terms
+
+
+def test_packaged_broad_description_and_purpose_heading_match_former_hard_coded_values() -> None:
+    discoverability = load_quality_config()["discoverability"]
+
+    assert discoverability["broad_description"]["negatives"] == [
+        "not for",
+        "do not use",
+        "instead use",
+        "except when",
+        "not when",
+    ]
+    assert discoverability["broad_description"]["longer_than"] == 100
+    assert discoverability["purpose_heading"]["points"] == 5
+    assert discoverability["purpose_heading"]["message"] == "No '## Purpose' section"
+    assert discoverability["purpose_heading"]["headings"][0] == "## Purpose"
+
+
+def test_packaged_lists_also_cover_russian_and_chinese() -> None:
+    config = load_quality_config()
+
+    trigger_terms = config["discoverability"]["trigger_words"]["terms"]
+    error_terms = config["error_handling"]["mentioned"]["terms"]
+    vague_terms = config["discoverability"]["vague_words"]["terms"]
+    assert {"используй", "когда", "для", "помогает", "使用", "用于", "当", "帮助"} <= set(trigger_terms)
+    assert {"ошибка", "не удалось", "сбой", "错误", "异常", "失败", "验证"} <= set(error_terms)
+    assert {"что-то", "разное", "一些", "东西"} <= set(vague_terms)
+    accepted = {heading for rule in config["expected_headers"] for heading in (rule["heading"], *rule["alternatives"])}
+    assert {
+        "## Требования",
+        "## 前提条件",
+        "## Ограничения",
+        "## 限制",
+        "## Устранение неполадок",
+        "## 故障排除",
+    } <= accepted
+    assert {"## Назначение", "## 目的"} <= set(config["discoverability"]["purpose_heading"]["headings"])
+
+
+def test_packaged_config_round_trips_through_the_loader_with_every_rule_key(tmp_path: Path) -> None:
+    """Dumping the loaded packaged config and loading it as a custom file gives the same rules."""
+    import yaml
+
+    packaged = load_quality_config()
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text(yaml.safe_dump(dict(packaged), allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    assert load_quality_config(config_path) == packaged
+    assert _digest(config_path) == quality_config_digest(packaged)
+    assert set(packaged["discoverability"]) == {
+        "description_too_short",
+        "description_too_long",
+        "trigger_words",
+        "vague_words",
+        "person_phrases",
+        "broad_description",
+        "purpose_heading",
+    }
+    assert set(packaged["efficiency"]) == {"token_budget", "action_verbs", "buzzwords"}
+    assert set(packaged["correctness"]) == {"reserved_name", "resource_docs", "lib_resource_docs"}
+
+
+def test_custom_file_replaces_one_word_list_and_keeps_every_other_packaged_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("discoverability:\n  trigger_words:\n    terms: [whenever, sobald]\n", encoding="utf-8")
+    packaged = load_quality_config()
+
+    config = load_quality_config(config_path)
+
+    assert config["discoverability"]["trigger_words"] == {
+        **packaged["discoverability"]["trigger_words"],
+        "terms": ["whenever", "sobald"],
+    }
+    assert {key: value for key, value in config["discoverability"].items() if key != "trigger_words"} == {
+        key: value for key, value in packaged["discoverability"].items() if key != "trigger_words"
+    }
+    assert {key: value for key, value in config.items() if key != "discoverability"} == {
+        key: value for key, value in packaged.items() if key != "discoverability"
+    }
+    assert _digest(config_path) == quality_config_digest(
+        {"discoverability": {"trigger_words": {"terms": ["whenever", "sobald"]}}}
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("discoverability:\n  trigger_words:\n    terms: []\n", r"trigger_words\.terms must be a non-empty list"),
+        (
+            "discoverability:\n  vague_words:\n    terms: [Stuff, stuff]\n",
+            r"duplicate entry 'stuff' in discoverability\.vague_words\.terms",
+        ),
+        (
+            "discoverability:\n  broad_description:\n    longer_than: 0\n",
+            r"broad_description\.longer_than must be a positive integer",
+        ),
+        (
+            "discoverability:\n  broad_description:\n    generic: [data]\n",
+            r"unknown key\(s\) in discoverability\.broad_description: generic "
+            r"\(allowed: longer_than, message, negatives, points, suggestion, terms\)",
+        ),
+        (
+            "discoverability:\n  purpose_heading:\n    headings: [Purpose]\n",
+            r"purpose_heading\.headings\[0\] must be a single ATX Markdown heading",
+        ),
+        (
+            'discoverability:\n  purpose_heading:\n    headings: ["## Purpose", "## Purpose  "]\n',
+            r"duplicate entry '## Purpose' in discoverability\.purpose_heading\.headings",
+        ),
+        ("efficiency:\n  action_verbs:\n    words: [run]\n", r"unknown key\(s\) in efficiency\.action_verbs: words"),
+        ('correctness:\n  resource_docs:\n    terms: [""]\n', r"resource_docs\.terms\[0\] must be a non-blank string"),
+    ],
+)
+def test_quality_config_rejects_invalid_word_list_rules(tmp_path: Path, body: str, match: str) -> None:
+    config_path = _write_config(tmp_path, body)
+
+    with pytest.raises(QualityConfigError, match=rf"^{tmp_path}.*{match}"):
+        load_quality_config(config_path)

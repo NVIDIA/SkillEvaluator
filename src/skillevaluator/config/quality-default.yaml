@@ -2,14 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Default deterministic quality-check configuration.
+#
+# The word lists below are the union of English, Russian and Chinese terms, so a
+# well-formed skill written in one of those languages is not penalised for lacking
+# English wording. No language detection takes place: every list applies to every
+# skill. A custom --quality-config file may replace any list, for example to add
+# another language or to keep only one.
 expected_headers:
   - heading: "## Prerequisites"
     alternatives:
       - "## Requirements"
+      - "## Предварительные условия"
+      - "## Требования"
+      - "## 前提条件"
+      - "## 先决条件"
     points: 5
     message: "No prerequisites/requirements documented"
     suggestion: "Document dependencies, API keys, or setup needed"
   - heading: "## Limitations"
+    alternatives:
+      - "## Ограничения"
+      - "## 限制"
     points: 5
     message: "No limitations documented"
     suggestion: "Add '## Limitations' section with known issues/constraints"
@@ -17,6 +30,10 @@ expected_headers:
     alternatives:
       - "## Common Issues"
       - "## FAQ"
+      - "## Устранение неполадок"
+      - "## Решение проблем"
+      - "## 故障排除"
+      - "## 疑难解答"
     points: 5
     message: "No troubleshooting section documented"
     suggestion: "Add '## Troubleshooting' with Error/Cause/Solution patterns"
@@ -24,13 +41,17 @@ expected_headers:
 # Reliability error-handling rules. A custom file may set any subset of these;
 # omitted blocks and keys keep the values below. Set points to 0 to turn a rule off.
 error_handling:
-  # SKILL.md mentions none of the terms (whole word, any case).
+  # SKILL.md mentions none of the terms (whole word, any case). A term written in a script
+  # without spaces between words, such as Chinese, matches anywhere in the text.
   mentioned:
     points: 10
     message: "No mention of error handling or validation"
     suggestion: "Document expected errors and how to handle them"
     terms: [error, errors, exception, exceptions, invalid, fail, fails, failed, failure, failures, failing,
-            validate, validates, validated, validating, validation, validations]
+            validate, validates, validated, validating, validation, validations,
+            ошибка, ошибки, ошибок, ошибочно, исключение, невалидный, сбой, сбои, не удалось,
+            валидация, валидирует, не найден, недоступен,
+            错误, 异常, 失败, 无效, 验证, 校验]
   # A script has neither try/except nor any marker (case-sensitive substring).
   scripts:
     points: 5
@@ -55,6 +76,22 @@ efficiency:
     message: "Large skill"
     suggestion: "Per agentskills.io, SKILL.md should be concise (~500 lines) — large skill bodies increase token cost after invocation; long or unfocused top-level descriptions can degrade agent routing accuracy. Keep required sections concise; move detailed examples, reference material, and supporting docs to the references/ directory"
     max_tokens: 5000
+  # The "## Instructions" or "## Usage" section contains none of the terms (whole word, any case).
+  # A skill without either section is not checked.
+  action_verbs:
+    points: 15
+    message: "Instructions lack clear action verbs"
+    suggestion: "Use imperative: 'Use run_script with...', 'Call activate_skill...'"
+    terms: [use, call, run, execute, pass, set, add, mark, update, keep,
+            используй, используйте, вызови, вызовите, запусти, запустите, выполни, выполните,
+            передай, передайте, установи, установите, добавь, добавьте, обнови, обновите,
+            使用, 调用, 运行, 执行, 传入, 设置, 添加, 标记, 更新, 保留]
+  # SKILL.md contains one of the terms (whole word, any case).
+  buzzwords:
+    points: 5
+    message: "Uses complex/corporate language"
+    suggestion: "Use simple, direct language: 'use' not 'utilize'"
+    terms: [utilize, facilitate, leverage, paradigm, synergy]
 
 # Discoverability rules. They overlay the same way as error_handling and efficiency.
 discoverability:
@@ -74,6 +111,44 @@ discoverability:
     message: "Description very long (recommend 50-150 chars)"
     suggestion: "Keep descriptions concise for progressive disclosure"
     max_chars: 200
+  # The description contains none of the terms (whole word, any case), so it does not say
+  # when to use the skill.
+  trigger_words:
+    points: 10
+    message: "Description doesn't mention WHEN to use this skill"
+    suggestion: "Add trigger context: 'Use for...', 'When you need to...'"
+    terms: [use, when, for, helps, allows,
+            используй, используется, применяй, когда, для, помогает, позволяет, служит,
+            使用, 用于, 当, 适用于, 帮助, 允许]
+  # The description contains one of the terms (whole word, any case).
+  vague_words:
+    points: 15
+    message: "Description contains vague words"
+    suggestion: "Be specific about what this skill does"
+    terms: [something, things, stuff, various, general,
+            что-то, разное, всякое, общее,
+            一些, 各种, 东西]
+  # The description contains one of the terms (whole word or phrase, any case).
+  person_phrases:
+    points: 15
+    message: "Description uses first/second person"
+    suggestion: "Use third person: 'Processes files' not 'I can process'"
+    terms: ["i can", "i will", "you can", "you should", your, my, "we can"]
+  # A description of more than longer_than characters contains one of the terms and none of
+  # the negatives (whole word or phrase, any case).
+  broad_description:
+    points: 5
+    message: "Broad description without negative triggers may cause over-triggering"
+    suggestion: "Add boundary phrases like 'Do NOT use for...'"
+    terms: [data, files, documents, project, manage, handle, process]
+    negatives: ["not for", "do not use", "instead use", "except when", "not when"]
+    longer_than: 100
+  # SKILL.md contains none of the headings (exact text, anywhere in the file).
+  purpose_heading:
+    points: 5
+    message: "No '## Purpose' section"
+    suggestion: "Add purpose section to clarify use cases"
+    headings: ["## Purpose", "## Назначение", "## Цель", "## 目的", "## 用途"]
 
 # Correctness rules. They overlay the same way as the sections above.
 correctness:
@@ -87,3 +162,20 @@ correctness:
     message: "Name contains reserved word"
     suggestion: "Remove reserved words from skill name"
     terms: [anthropic, claude]
+  # A resource-based skill's SKILL.md contains none of the terms (whole word, any case).
+  resource_docs:
+    points: 10
+    message: "Resource-based skill lacks documentation of available resources"
+    suggestion: "Document available templates, assets, and design resources in SKILL.md"
+    terms: [template, asset, design, style, css, html, resource,
+            шаблон, шаблоны, ресурс, ресурсы, стиль, стили, дизайн,
+            模板, 资源, 样式, 设计]
+  # A lib-based skill has resource directories but SKILL.md contains none of the terms
+  # (whole word, any case). The finding appends the directory names to the message.
+  lib_resource_docs:
+    points: 5
+    message: "Lib-based skill has resource directories but SKILL.md lacks resource documentation"
+    suggestion: "Document the bundled templates, assets, or design resources in SKILL.md"
+    terms: [template, asset, design, style, css, html, resource,
+            шаблон, шаблоны, ресурс, ресурсы, стиль, стили, дизайн,
+            模板, 资源, 样式, 设计]

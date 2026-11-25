@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Configuration for deterministic quality scoring."""
+
 from __future__ import annotations
 
 import hashlib
@@ -76,10 +77,41 @@ class TokenBudgetRule(TypedDict):
     max_tokens: int
 
 
+class TermsRule(TypedDict):
+    """Deduction decided by whether the text contains any of the terms (whole word or phrase, any case)."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    terms: list[str]
+
+
+class HeadingsRule(TypedDict):
+    """Deduction when SKILL.md contains none of the headings (exact text)."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    headings: list[str]
+
+
+class BroadDescriptionRule(TypedDict):
+    """Deduction when a description longer than longer_than chars has a term but no negative phrase."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    terms: list[str]
+    negatives: list[str]
+    longer_than: int
+
+
 class EfficiencyConfig(TypedDict):
     """Efficiency rules; a rule with points 0 is skipped."""
 
     token_budget: TokenBudgetRule
+    action_verbs: TermsRule
+    buzzwords: TermsRule
 
 
 class DescriptionTooShortRule(TypedDict):
@@ -105,6 +137,11 @@ class DiscoverabilityConfig(TypedDict):
 
     description_too_short: DescriptionTooShortRule
     description_too_long: DescriptionTooLongRule
+    trigger_words: TermsRule
+    vague_words: TermsRule
+    person_phrases: TermsRule
+    broad_description: BroadDescriptionRule
+    purpose_heading: HeadingsRule
 
 
 class ReservedNameRule(TypedDict):
@@ -120,6 +157,8 @@ class CorrectnessConfig(TypedDict):
     """Correctness rules; a rule with points 0 is skipped."""
 
     reserved_name: ReservedNameRule
+    resource_docs: TermsRule
+    lib_resource_docs: TermsRule
 
 
 class QualityConfig(TypedDict):
@@ -188,6 +227,19 @@ def _validate_entries(value: object, source: str, location: str, *, ignore_case:
     return list(value)
 
 
+def _validate_headings(value: object, source: str, location: str) -> list[str]:
+    """Validate a list of ATX headings, each normalized like an expected heading."""
+    if not isinstance(value, list) or not value:
+        raise QualityConfigError(f"{source}: {location} must be a non-empty list")
+    headings: list[str] = []
+    for index, entry in enumerate(value):
+        heading = _normalize_heading(entry, source, f"{location}[{index}]")
+        if heading in headings:
+            raise QualityConfigError(f"{source}: duplicate entry '{heading}' in {location}")
+        headings.append(heading)
+    return headings
+
+
 # A reserved word is matched against a skill name, which allows only letters, digits and hyphens.
 _RESERVED_TERM_RE = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")
 
@@ -229,24 +281,39 @@ def _validate_positive_int(value: object, source: str, location: str) -> int:
     return value
 
 
-# Sections made of named rules. Every rule takes points, message and suggestion, plus the one
-# rule-specific key listed here with the function that validates it.
-_RuleSetting = tuple[str, Callable[[object, str, str], object]]
-_RULE_SECTIONS: dict[str, dict[str, _RuleSetting]] = {
+# Sections made of named rules. Every rule takes points, message and suggestion, plus the
+# rule-specific keys listed here, each with the function that validates it.
+_RuleSettings = dict[str, Callable[[object, str, str], object]]
+_TERMS: _RuleSettings = {"terms": partial(_validate_entries, ignore_case=True)}
+_MARKERS: _RuleSettings = {"markers": partial(_validate_entries, ignore_case=False)}
+_RULE_SECTIONS: dict[str, dict[str, _RuleSettings]] = {
     "error_handling": {
-        "mentioned": ("terms", partial(_validate_entries, ignore_case=True)),
-        "scripts": ("markers", partial(_validate_entries, ignore_case=False)),
-        "lib": ("markers", partial(_validate_entries, ignore_case=False)),
+        "mentioned": _TERMS,
+        "scripts": _MARKERS,
+        "lib": _MARKERS,
     },
     "efficiency": {
-        "token_budget": ("max_tokens", _validate_positive_int),
+        "token_budget": {"max_tokens": _validate_positive_int},
+        "action_verbs": _TERMS,
+        "buzzwords": _TERMS,
     },
     "discoverability": {
-        "description_too_short": ("min_chars", _validate_positive_int),
-        "description_too_long": ("max_chars", _validate_positive_int),
+        "description_too_short": {"min_chars": _validate_positive_int},
+        "description_too_long": {"max_chars": _validate_positive_int},
+        "trigger_words": _TERMS,
+        "vague_words": _TERMS,
+        "person_phrases": _TERMS,
+        "broad_description": {
+            "terms": partial(_validate_entries, ignore_case=True),
+            "negatives": partial(_validate_entries, ignore_case=True),
+            "longer_than": _validate_positive_int,
+        },
+        "purpose_heading": {"headings": _validate_headings},
     },
     "correctness": {
-        "reserved_name": ("terms", _validate_reserved_terms),
+        "reserved_name": {"terms": _validate_reserved_terms},
+        "resource_docs": _TERMS,
+        "lib_resource_docs": _TERMS,
     },
 }
 _TOP_LEVEL_KEYS = frozenset({"expected_headers", *_RULE_SECTIONS})
@@ -259,12 +326,12 @@ def _parse_rule_section(section: str, raw: object, source: str, base: dict | Non
         raise QualityConfigError(f"{source}: {section} must be a mapping")
     _reject_unknown_keys(raw, frozenset(rules), source, section)
     parsed = {}
-    for name, (setting, validate_setting) in rules.items():
+    for name, settings in rules.items():
         location = f"{section}.{name}"
         block = raw.get(name) if base is None else raw.get(name, {})
         if not isinstance(block, dict):
             raise QualityConfigError(f"{source}: {location} must be a mapping")
-        allowed = frozenset({"points", "message", "suggestion", setting})
+        allowed = frozenset({"points", "message", "suggestion", *settings})
         _reject_unknown_keys(block, allowed, source, location)
         if base is None:
             missing = sorted(allowed - block.keys())
@@ -275,7 +342,10 @@ def _parse_rule_section(section: str, raw: object, source: str, base: dict | Non
             "points": _validate_points(merged["points"], source, location),
             "message": _validate_text(merged["message"], source, f"{location}.message"),
             "suggestion": _validate_text(merged["suggestion"], source, f"{location}.suggestion"),
-            setting: validate_setting(merged[setting], source, f"{location}.{setting}"),
+            **{
+                setting: validate_setting(merged[setting], source, f"{location}.{setting}")
+                for setting, validate_setting in settings.items()
+            },
         }
     return parsed
 
@@ -331,7 +401,6 @@ def load_quality_config_with_provenance(path: Path | None = None) -> tuple[Quali
         "digest": quality_config_digest(declared),
     }
     return config, provenance
-
 
 
 def _load(path: Path | None) -> tuple[QualityConfig, dict]:
@@ -391,7 +460,9 @@ def _load(path: Path | None) -> tuple[QualityConfig, dict]:
         message = rule.get("message", f"Missing expected heading: {accepted_display}")
         suggestion = rule.get(
             "suggestion",
-            f"Add a {accepted_display} section" if not alternatives else f"Add one of these sections: {accepted_display}",
+            f"Add a {accepted_display} section"
+            if not alternatives
+            else f"Add one of these sections: {accepted_display}",
         )
         for field, value in (("message", message), ("suggestion", suggestion)):
             _validate_text(value, source, f"{location}.{field}")
@@ -438,4 +509,3 @@ def quality_config_digest(config: QualityConfig | dict) -> str:
     """Return a stable digest of the normalized rules, independent of file formatting."""
     canonical = json.dumps(config, sort_keys=True, separators=(",", ":")).encode()
     return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
-

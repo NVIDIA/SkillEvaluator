@@ -14,6 +14,12 @@ caller uses its existing pins until you update them. [Installation](/skills/skil
   Anthropic chat defaults to OpenAI embeddings and needs that key too. See
   [providers and credentials](/skills/skillevaluator/configuration) and
   [deduplication](/skills/skillevaluator/tier2-deduplication).
+
+  For NVIDIA Build embeddings, set `embedding-model` on GitHub or
+  `SKILL_EVAL_EMBEDDING_MODEL` on GitLab to `nvidia/nemotron-3.5-embed-1b`.
+  This setting applies to both native and prebuilt Tier 2 runtimes. NVIDIA Build
+  retired the hosted endpoint for `nvidia/nemotron-3-embed-1b`.
+  [NVIDIA API reference](https://build.nvidia.com/nvidia/nemotron-3_5-embed-1b/apireference)
 - **Tier 3:** configure a supported provider, agent and Docker or native local
   runtime, and commit native datasets under each skill's `evals/` directory.
   CI consumes those cases with paired positive and negative coverage; it does

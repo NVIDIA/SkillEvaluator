@@ -120,6 +120,11 @@ All notable changes to SkillEvaluator are documented in this file.
   checks, avoiding quadratic name searches in large collection reports while
   preserving existing names and collisions with explicitly numbered checks.
 
+- Keep deeply nested retained JSON from aborting run discovery and Tier 3
+  history. Undecodable runs are excluded from the latest-run fallback; history
+  also isolates recursive retained metadata during JSON export, while keeping
+  healthy runs readable.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

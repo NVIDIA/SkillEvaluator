@@ -536,10 +536,105 @@ def test_index_verification_checks_both_listings_and_downloads(release, monkeypa
         assert len(downloads_served) == len(set(downloads_served)) == 4
     elif match is None:
         product_release.verify_indexes(VERSION, assets)
+        assert set(downloads_served) == {
+            *(f"https://files.pythonhosted.org/packages/test/{name}" for name in downloads),
+            *(f"{DEVZONE_URL}{name}" for name in downloads),
+        }
     else:
         with pytest.raises(ValueError, match=match):
             wait = 20 if failure == "yanked-after-lag" else 0
             product_release.verify_indexes(VERSION, assets, wait_seconds=wait)
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (None, None),
+        ("propagating", None),
+        ("wrong-bytes", "different bytes"),
+        ("wrong-hash", "wrong hash"),
+        ("wrong-host", "Unexpected public download URL"),
+        ("yanked", "yanked artifact"),
+        ("missing", "not visible yet"),
+    ],
+)
+def test_testpypi_cli_saves_only_verified_public_downloads(release, monkeypatch, capsys, tmp_path, failure, message):
+    from ci import product_release
+
+    repo, source, dist, assets, _candidate = release
+    result = release_command(repo, source, "assemble", "--dist", dist, "--output", assets)
+    assert result.returncode == 0, result.stderr
+    downloads = {name: (assets / name).read_bytes() for name in (WHEEL, SDIST)}
+    output = tmp_path / "verified-downloads"
+    testpypi_url = f"https://test.pypi.org/pypi/skillevaluator/{VERSION}/json"
+    file_base = "https://test-files.pythonhosted.org/packages/test/"
+    steps = []
+    listing = []
+    for name, data in downloads.items():
+        if name == SDIST and failure == "missing":
+            continue
+        listing.append(
+            {
+                "filename": name,
+                "size": len(data),
+                "url": f"{file_base}{name}" if failure != "wrong-host" else f"https://files.pythonhosted.org/{name}",
+                "digests": {"sha256": digest(data) if failure != "wrong-hash" else "0" * 64},
+                "yanked": failure == "yanked",
+            }
+        )
+
+    def urlopen(request, *, timeout):
+        assert timeout > 0
+        assert not output.exists()
+        url = request.full_url
+        steps.append(url)
+        if url == testpypi_url:
+            return Response(url, json.dumps({"info": {"version": VERSION}, "urls": listing}).encode())
+        assert url in {f"{file_base}{name}" for name in downloads}
+        name = url.rsplit("/", 1)[-1]
+        data = downloads[name]
+        if name == SDIST and failure == "wrong-bytes":
+            data = bytes([data[0] ^ 1]) + data[1:]
+        if name == SDIST and failure == "propagating" and steps.count(url) == 1:
+            raise HTTPError(url, 404, "missing", {}, None)
+        return Response(url, data)
+
+    clock = 0
+
+    def advance_clock(delay):
+        nonlocal clock
+        clock += delay
+
+    monkeypatch.delenv("RELEASE_DEVZONE_INDEX_URL")
+    monkeypatch.setattr(product_release.INDEX_OPENER, "open", urlopen)
+    monkeypatch.setattr(product_release, "time", SimpleNamespace(monotonic=lambda: clock, sleep=advance_clock))
+    wait = "20" if failure == "propagating" else "0"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "product_release.py",
+            "verify-testpypi",
+            "--version",
+            VERSION,
+            "--assets",
+            str(assets),
+            "--wait-seconds",
+            wait,
+            "--output",
+            str(output),
+        ],
+    )
+    if message is None:
+        product_release.main()
+        assert {path.name: path.read_bytes() for path in output.iterdir()} == downloads
+        assert steps == [testpypi_url, f"{file_base}{WHEEL}", f"{file_base}{SDIST}"] * (2 if failure else 1)
+    else:
+        with pytest.raises(SystemExit) as raised:
+            product_release.main()
+        assert raised.value.code == 1
+        assert message in capsys.readouterr().err
+        assert not output.exists()
 
 
 def test_pre_upload_inspection_checks_partial_index_bytes(monkeypatch):

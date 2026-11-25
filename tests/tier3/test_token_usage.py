@@ -170,6 +170,7 @@ def test_sums_each_case_each_agent_and_all_agents() -> None:
         "uncached_prompt_tokens": 210,
         "completion_tokens": 50,
         "total_tokens": 350,
+        "efficiency_tokens": 260,
     }
     cases = {row["entry_id"]: row for row in codex["cases"]}
     assert cases["case-1"]["with_skill"]["totals"]["total_tokens"] == 120
@@ -388,9 +389,15 @@ def test_percentage_change_is_given_at_every_scope(with_total: int, percent: flo
 
     assert usage is not None
     for scope in _scopes(usage):
+        # The trials have no cached or completion tokens, so every measure but the cache moves with the prompt.
         assert scope["delta"] == {
             "status": "available",
+            "prompt_tokens": with_total - 1000,
+            "cached_tokens": 0,
+            "uncached_prompt_tokens": with_total - 1000,
+            "completion_tokens": 0,
             "total_tokens": with_total - 1000,
+            "efficiency_tokens": with_total - 1000,
             "total_tokens_change_percent": percent,
             "reason_codes": [],
             "reason": None,
@@ -407,6 +414,118 @@ def test_a_zero_token_baseline_keeps_the_difference_without_a_percentage() -> No
         None,
         ["zero_baseline"],
     )
+
+
+# -- efficiency tokens, the change per measure and the accounting source ---------------------------
+
+
+def _two_agent_usage() -> dict[str, Any]:
+    usage = build_token_usage(
+        {
+            "codex": _agent(
+                [_trial("case-1", 100, 20, 40), _trial("case-2", 200, 30, 50)],
+                [_trial("case-1", 150, 25, 30), _trial("case-2", 250, 35, 40)],
+            ),
+            "opencode": _agent([_trial("case-1", 80, 10, 20)], [_trial("case-1", 90, 15, 10)]),
+        }
+    )
+    assert usage is not None
+    return usage
+
+
+def test_efficiency_tokens_are_uncached_prompt_plus_completion_at_every_scope() -> None:
+    usage = _two_agent_usage()
+
+    codex = usage["agents"]["codex"]
+    cases = {row["entry_id"]: row for row in codex["cases"]}
+    expected = {
+        ("dataset", "with_skill"): 330,
+        ("dataset", "baseline"): 485,
+        ("codex", "with_skill"): 260,
+        ("codex", "baseline"): 390,
+        ("case-1", "with_skill"): 80,
+        ("case-1", "baseline"): 145,
+        ("case-2", "with_skill"): 180,
+        ("case-2", "baseline"): 245,
+    }
+    scopes = {"dataset": usage["dataset"], "codex": codex, **cases}
+    for (name, arm), efficiency in expected.items():
+        assert scopes[name][arm]["totals"]["efficiency_tokens"] == efficiency, (name, arm)
+    for scope in (*scopes.values(), usage["agents"]["opencode"]):
+        for arm in ("with_skill", "baseline"):
+            totals = scope[arm]["totals"]
+            assert totals["efficiency_tokens"] == totals["uncached_prompt_tokens"] + totals["completion_tokens"]
+            # Cached tokens stay inside the prompt: efficiency never exceeds the total.
+            assert totals["efficiency_tokens"] <= totals["total_tokens"]
+
+
+def test_an_incomplete_attempt_adds_nothing_to_efficiency_tokens() -> None:
+    missing = {"entry_id": "case-2", "trial_id": "case-2__a"}
+    invalid = {"entry_id": "case-3", "trial_id": "case-3__a", "tokens": {"prompt": -5, "completion": 9}}
+    usage = build_token_usage(
+        {
+            "codex": _agent(
+                [_trial("case-1", 100, 20, 40), missing, invalid],
+                [_trial("case-1", 90, 10), _trial("case-2", 90, 10), _trial("case-3", 90, 10)],
+            )
+        }
+    )
+
+    assert usage is not None
+    with_skill = usage["agents"]["codex"]["with_skill"]
+    assert with_skill["coverage"]["status"] == "partial"
+    assert with_skill["totals"]["efficiency_tokens"] == 60 + 20
+    assert usage["dataset"]["with_skill"]["totals"]["efficiency_tokens"] == 60 + 20
+
+
+def test_the_change_covers_every_measure_with_a_percentage_of_the_baseline_total() -> None:
+    usage = _two_agent_usage()
+
+    codex_delta = usage["agents"]["codex"]["delta"]
+    assert codex_delta == {
+        "status": "available",
+        "prompt_tokens": -100,
+        "cached_tokens": 20,
+        "uncached_prompt_tokens": -120,
+        "completion_tokens": -10,
+        "total_tokens": -110,
+        "efficiency_tokens": -130,
+        "total_tokens_change_percent": -23.91,
+        "reason_codes": [],
+        "reason": None,
+    }
+    dataset_delta = usage["dataset"]["delta"]
+    assert (dataset_delta["efficiency_tokens"], dataset_delta["total_tokens"]) == (330 - 485, 440 - 565)
+    case_delta = {row["entry_id"]: row["delta"] for row in usage["agents"]["codex"]["cases"]}["case-1"]
+    assert (case_delta["prompt_tokens"], case_delta["cached_tokens"], case_delta["efficiency_tokens"]) == (-50, 10, -65)
+
+
+def test_an_unavailable_change_has_no_measure_values() -> None:
+    usage = build_token_usage(
+        {"codex": _agent([_trial("case-1", 100, 20)], [_trial("case-1", 90, 10)], baseline_status="failed")}
+    )
+
+    assert usage is not None
+    for scope in _scopes(usage):
+        assert set(scope["delta"]) == {
+            "status",
+            "total_tokens",
+            "total_tokens_change_percent",
+            "reason_codes",
+            "reason",
+        }
+        assert scope["delta"]["status"] == "unavailable"
+        assert scope["delta"]["total_tokens"] is None
+        assert scope["delta"]["total_tokens_change_percent"] is None
+
+
+def test_the_payload_names_its_accounting_source_and_efficiency_formula() -> None:
+    usage = _two_agent_usage()
+
+    assert usage["source"] == "atif_final_metrics"
+    # The additions are backward compatible, so the schema version does not change.
+    assert usage["schema_version"] == "1"
+    assert usage["accounting"]["efficiency_tokens"] == "uncached_prompt_tokens + completion_tokens"
 
 
 def test_a_reused_baseline_is_labelled_and_otherwise_unchanged() -> None:

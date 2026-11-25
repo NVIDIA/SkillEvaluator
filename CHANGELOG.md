@@ -4,10 +4,167 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- The local-mode run preflight and `doctor --env-mode local` check the
+  installed Claude Code and Codex CLI against the selected models and stop
+  before any trial when one is too old. Use `--agent-model AGENT=MODEL` to
+  choose an older model.
+- Tier 3 results flag a run in which at least 80 percent of trials timed out
+  with no observed model tokens. The console shows a warning, and
+  `result.json` records `model_endpoint_diagnostic`.
+
+### Changed
+
+- Local OpenCode trials carry on after a denied permission request instead of
+  ending the agent's turn: local mode runs OpenCode without
+  `--dangerously-skip-permissions`, so such requests are always rejected.
+
 ### Fixed
 
+- `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
+  lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
+- Tier 2 deduplication verdict requests carry the documented output ceiling,
+  16,384 tokens or 32,768 for GPT-5 and GPT-6 reasoning models. Only Anthropic
+  requests sent it. NVIDIA Build, OpenAI, OpenAI-compatible and Bedrock requests
+  sent none, so the provider default set the limit. `doctor --tier 2
+  --verify-models` sends the same ceiling.
+- Bedrock `apac.` and `us-gov.` inference-profile IDs are recognized as the
+  model they name. Claude 4.7 and later on those profiles no longer receive a
+  `temperature` the provider rejects, and the Tier 3 Bedrock refusal fallback
+  keeps the request's geography prefix.
+
+### Documentation
+
+- Added a guide to MCP servers and Docker Compose sidecars that explains where `localhost`,
+  service names and commands resolve in Docker and local runs, and a cookbook for evaluating
+  a CLI skill that needs a short-lived login using the configured provider's default agent.
+  The stdio example in the dataset reference now passes the script as an argument
+  instead of as part of the command.
+- The CLI reference now covers `ci init`, `ci status`, `ci demo` and `--hook-waivers`. A test
+  fails when a visible command or long option is missing from the page.
+
+## 1.2.1 - 2026-11-24
+
+### Added
+
+- Add a locked Tier 2 CI container with credential-free build verification and
+  opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
+  Tier 2 together from the Repository Integration guide.
+- Tier 3 skill runs report an advisory paired-case lift estimate with a 95%
+  bootstrap interval, a precision label and a warning when the interval
+  includes zero. They also show pass^k beside pass@k when a run makes
+  more than one attempt per case. The statistics are written to
+  `<agent>/statistics.json`, added to the report JSON, and shown in the Markdown
+  and HTML reports and the full terminal report of `validate` and
+  `tier3 evaluate --verbose`.
+  The interval is left out when an arm's cases made different numbers of
+  attempts, as after `--stop-on-pass`.
+
+### Fixed
+
+- Avoid false incomplete security scans when a SkillSpector 2.x release
+  starting at 2.13.5 reports that optional dependency inspection was not
+  requested. Verified missing-reference caveats remain warnings. Existing
+  security and completeness gates are unchanged.
+- The `skillspector_completeness` ledger in JSON reports keeps up to 500
+  exception rows per skill and scan stage (was 20), with a 128 KiB budget
+  for serialized rows. Reports keep up to 512 records (was 64), and each
+  record now states `ledger_rows_retained` and
+  `ledger_rows_total`. A 227-skill library whose scanner reported 521
+  incomplete rows previously showed 268, so fixing the visible rows did not
+  clear the gate; the omitted count was recorded but not surfaced. When the
+  cap applies, the security gate message counts the ledger rows for the
+  reported gaps, including how many exceed the per-record limit.
+- NeMo Gym now scores native multi-step tasks once using the task's `mean` or
+  `final` strategy. The live case grid and finished report use the same verdict.
+  A failed or ungraded step leaves the attempt unscored. With `final`, the last
+  step determines which metrics apply, even if an earlier step scored one.
+  Each step keeps its own verifier output and trajectory after job cleanup,
+  including steps completed before a failure. Gym masks configured credential
+  values in trajectory text, verifier output, and step failure messages.
+- The bundled create-custom-grader skill now tells agents to run
+  `skillevaluator tier3 validate --harbor-contract`, the only command with that
+  flag, and to write datasets with a top-level `skill_name` and per-case `prompt`.
+  It named `skillevaluator validate --harbor-contract`, which rejects the option,
+  and legacy `question` fields that the agentskills dataset shape rejects.
+- The recorded token usage table in the HTML report now fills the Efficiency
+  Tokens column and the per-measure Change cells and names its accounting source.
+  `token_usage` totals add `efficiency_tokens`, deltas cover every total and the
+  payload carries `source`.
+- `tier3 validate`, the Tier 3 step of `validate` and CI's strict dataset
+  preflight now report an `expected_skill` that is not a string or `null`, a
+  whitespace-only `expected_skill`, and `assertions` or `expected_behavior` that
+  is not a list of strings. A dataset that used `false`, `0` or `[]` for a
+  negative case must now use `null`. Before, `validate` accepted them: a number
+  or list in `expected_skill` failed late with a `TypeError` while tasks were
+  generated, a whitespace-only name was scored as a positive case that never
+  matches, and a string in `assertions` was judged one character at a time
+  unless the run started with `tier3 PATH`.
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
+- The api-caller reference skill keeps a `Content-Type` passed with `--headers`
+  when it sends a `--data` body, so a PATCH can use
+  `application/merge-patch+json` or a JSON:API request
+  `application/vnd.api+json`. It was always replaced with `application/json`,
+  whatever the header name's case.
+- Bare Hugging Face (`hf_`), npm (`npm_`) and PyPI (`pypi-`) tokens are masked in
+  redacted report and Tier 3 result text, not only after a credential name such
+  as `HF_TOKEN=`.
+
+- Reuse occurrence indexes while merging collection finding summaries, avoiding
+  repeated scans of every previously collected location when many skills share
+  a finding. Finding identities, severity, ordering, and counts are preserved.
+
+- JUnit report generation remembers the next case-name suffix for repeated
+  checks, avoiding quadratic name searches in large collection reports while
+  preserving existing names and collisions with explicitly numbered checks.
+
+- Keep deeply nested retained JSON from aborting run discovery and Tier 3
+  history. Undecodable runs are excluded from the latest-run fallback; history
+  also isolates recursive retained metadata during JSON export, while keeping
+  healthy runs readable.
+
+- Report source links encode reserved characters, UTF-8 names, and retained
+  filename/ref bytes so refs and skill paths link to the intended GitHub and
+  GitLab locations. HTML labels remain readable while link targets stay encoded.
+
+- Invalid YAML scalar values and Unicode escapes retain their actual source
+  location in diagnostics. Frontmatter keeps the existing bounded-loader
+  complexity checks, and duplicate-key inspection handles scanner range errors.
+  Unconstructible scalars still fail manifest scoping closed, keep evals config
+  and dataset values out of error messages, and do not make valid block-scalar
+  tabs invalid. Dataset scalar errors retain their line and column without
+  revealing the value.
+
+- Tier 3 budget accounting keeps incomplete token, cost, and judge-call evidence
+  unmeasured instead of accepting partial subtotals or malformed judge logs as
+  zero calls, stopping further admissions under the affected configured limit.
+  Only retained ATIF trajectory and verifier artifact locations contribute;
+  copied skill examples named trajectory.json or judge_attempts.json do not
+  consume or invalidate the attempt budget.
+
+- Pre-commit skill mapping stays inside its repository root. A changed directory
+  link checks the skill containing the link instead of the linked target, and
+  paths outside the checkout no longer select unrelated skills.
+
+- Keep generated plugin evaluation case IDs within Harbor's portable path contract, including length limits, Windows device names, and case-insensitive collisions.
+
+- Preserve warnings from passing rules, workflows, and workflow references when
+  validating collections, including each member's context and warning counts.
+  Single-workflow JSON reports include reference warning messages. Markdown
+  reports count these warnings in the summary.
+
+- Python content chunks preserve complete multiline function and class headers
+  without inline implementation bodies, including continued bodies and decorated
+  members. More definitions can clear the 80-character minimum, increasing
+  embedding work and reaching the 1,024-chunk limit sooner in Python-heavy skills.
+
+- LLM finding verification requires non-negative JSON integer identities and
+  withholds repeated identities, including malformed conflicting rows, so ambiguous
+  replies cannot select a finding or replace its verdict. An overflowing identity
+  such as `"index": 1e400` no longer raises `OverflowError` and discards the
+  entire verdict reply; independent valid verdicts are retained.
 
 - Tier 3 token reports reuse per-agent case-name and attempt indexes, avoiding
   repeated whole-dataset scans for truncated Harbor names and per-case totals

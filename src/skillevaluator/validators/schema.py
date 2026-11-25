@@ -201,7 +201,7 @@ def _duplicate_frontmatter_keys(frontmatter_yaml: str) -> list[tuple[str, int]]:
     """Return ``(dotted_key, line)`` for every repeated mapping key (PyYAML keeps the last silently)."""
     try:
         root = yaml.compose(frontmatter_yaml, Loader=yaml.SafeLoader)
-    except (yaml.YAMLError, RecursionError, ValueError):
+    except (yaml.YAMLError, RecursionError, ValueError, OverflowError):
         # ``compose`` recurses once per nesting level, and the scanner raises a plain ValueError
         # for an over-long ``%YAML`` number or an out-of-range ``\U`` escape. The caller that
         # parses the same text reports those; this helper only looks for repeated keys.

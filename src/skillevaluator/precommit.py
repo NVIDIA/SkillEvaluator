@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from skillevaluator.constants import QUALITY_DEFAULT_MIN_SCORE, SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_VARIANTS
 from skillevaluator.tier1.commands import run_lint_scripts, run_quality_check
+from skillevaluator.utils.tier2_paths import is_link_or_reparse
 from skillevaluator.validators.policy import resolve_policy
 from skillevaluator.validators.schema import SchemaValidator
 
@@ -74,11 +75,12 @@ def skill_root_for(
 ) -> Path | None:
     """Return the nearest ancestor of *path* that contains ``SKILL.md`` or ``skill.md``.
 
-    Deleted skills and paths that never sit under a skill are ignored. Search
+    Deleted skills and paths outside *cwd* or never under a skill are ignored. Search
     stops at *cwd* (the repository root pre-commit runs from) so a stray
     manifest above the project is not treated as a skill root. A manifest in
     a ``SCAN_EXCLUDED_DIRS`` folder (``evals/``, ``.versions/``, ...) is not
-    a skill root either; the walk continues up to the real skill.
+    a skill root either; the walk continues up to the real skill. A changed
+    directory link belongs to the skill containing the link, not its target.
 
     ``_cache`` and ``_manifest_cache`` let ``collect_skill_roots`` share
     lookups across paths so each directory is listed once per invocation.
@@ -87,7 +89,7 @@ def skill_root_for(
     candidate = parse_hook_path(path)
     if not candidate.is_absolute():
         candidate = cwd / candidate
-    if candidate.name in SKILL_MANIFEST_VARIANTS:
+    if candidate.name in SKILL_MANIFEST_VARIANTS or is_link_or_reparse(candidate):
         start = candidate.parent
     elif candidate.exists() and candidate.is_dir():
         start = candidate
@@ -99,23 +101,31 @@ def skill_root_for(
 
     try:
         limit = cwd.resolve()
-    except OSError:
-        limit = cwd
+        resolved_start = start.resolve()
+        if not resolved_start.is_relative_to(limit):
+            # macOS may preserve a case-only spelling even after resolve().
+            # Re-anchor only after filesystem identity proves containment, so
+            # exclusions and the ancestor stop use the repository's spelling.
+            for ancestor in (resolved_start, *resolved_start.parents):
+                try:
+                    same_root = ancestor.samefile(limit)
+                except FileNotFoundError:
+                    continue  # deleted descendants can still belong to a skill
+                if same_root:
+                    resolved_start = limit / resolved_start.relative_to(ancestor)
+                    break
+            else:
+                return None
+    except (OSError, RuntimeError):
+        return None
 
     root: Path | None = None
-    for ancestor in [start, *start.parents]:
+    for ancestor in [resolved_start, *resolved_start.parents]:
         if not _in_excluded_dir(ancestor, limit) and _has_skill_manifest(ancestor, _manifest_cache):
-            try:
-                root = ancestor.resolve()
-            except OSError:
-                root = ancestor
+            root = ancestor
             break
-        try:
-            if ancestor.resolve() == limit:
-                break
-        except OSError:
-            if ancestor == cwd:
-                break
+        if ancestor == limit:
+            break
     if _cache is not None:
         _cache[start] = root
     return root

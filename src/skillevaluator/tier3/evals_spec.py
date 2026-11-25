@@ -1044,13 +1044,51 @@ def _skill_identity_names(skill_path: Path) -> tuple[str, ...]:
     return tuple(names)
 
 
+def _dataset_field_type_errors(entry: Mapping[str, Any]) -> list[str]:
+    """Report invalid authored field types before runtime normalization.
+
+    ``expected_skill`` decides whether a case is positive, so a number, list or
+    whitespace-only value would be scored as a case it was never meant to be.
+    ``expected_behavior`` and ``assertions`` are judged item by item, so a
+    string would be judged character by character. An omitted field, ``null``,
+    an empty ``expected_skill`` (a negative case) and an empty list (a case
+    graded by ``checks`` alone) stay valid. Messages name types, never values.
+    """
+    errors: list[str] = []
+    expected_skill = entry.get("expected_skill")
+    if expected_skill is not None and not isinstance(expected_skill, str):
+        errors.append(
+            f"expected_skill must be a skill name string or null, got {type(expected_skill).__name__}. "
+            "Use null for a case that expects no skill."
+        )
+    elif expected_skill and not expected_skill.strip():
+        errors.append("expected_skill contains only whitespace. Name the skill, or use null for a negative case.")
+
+    for field_name in ("assertions", "expected_behavior"):
+        value = entry.get(field_name)
+        if value is None:
+            continue
+        if not isinstance(value, list):
+            errors.append(f"{field_name} must be a list of strings, got {type(value).__name__}.")
+            continue
+        item_types = sorted({type(item).__name__ for item in value if not isinstance(item, str)})
+        if item_types:
+            errors.append(f"{field_name} must contain only strings; found {', '.join(item_types)}.")
+    return errors
+
+
 def _validate_dataset_contents(path: Path, results: list[CheckResult], *, skill_path: Path | None = None) -> None:
     """Validate the contents of a dataset file."""
     from .dataset_utils import load_dataset_entries_with_format
     from .eval_core.declarative_checks import validate_declarative_checks
 
+    authored_type_errors: list[list[str]] = []
+
+    def inspect_authored_entry(entry: dict[str, Any]) -> None:
+        authored_type_errors.append(_dataset_field_type_errors(entry))
+
     try:
-        entries, dataset_format = load_dataset_entries_with_format(path)
+        entries, dataset_format = load_dataset_entries_with_format(path, inspect_authored_entry=inspect_authored_entry)
     except Exception as e:
         results.append(CheckResult(str(path), "error", f"Cannot parse dataset: {e}"))
         return
@@ -1118,6 +1156,8 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult], *, skill_
                     f"Missing recommended fields: {', '.join(sorted(missing_recommended))}",
                 )
             )
+        for error in authored_type_errors[i]:
+            results.append(CheckResult(f"entry {entry_id}", "error", error))
         for warning in _baseline_fairness_warnings(entry, skill_scripts=skill_scripts, skill_names=skill_names):
             results.append(CheckResult(f"entry {entry_id}", "warning", warning))
         if dataset_format == "legacy" and "expected_script" not in entry and skill_has_scripts:

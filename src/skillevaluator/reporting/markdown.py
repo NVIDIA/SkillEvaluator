@@ -444,8 +444,16 @@ class MarkdownReporter(ReporterBase):
                     )
                 lines.append("")
 
+            from skillevaluator.reporting.tier3_statistics import statistics_markdown_lines
             from skillevaluator.reporting.tier3_token_usage import token_usage_markdown_lines
 
+            lines.extend(
+                statistics_markdown_lines(
+                    ae.get("agents"),
+                    heading="### Run Statistics (advisory)",
+                    agent_label=_markdown_untrusted_table_cell,
+                )
+            )
             lines.extend(
                 token_usage_markdown_lines(
                     ae.get("token_usage"),

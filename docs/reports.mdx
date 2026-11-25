@@ -778,6 +778,7 @@ completed run directly:
       - codex/
         - lift.json
         - pass_at_k_lift.json
+        - statistics.json
         - with-skill/
           - summary.json
           - trials/
@@ -824,6 +825,8 @@ completed run directly:
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
   deltas between the two arms; written only when both arms produced scores
   (a `--skip-baseline` or `--skip-with-skill` run has neither).
+- **`<agent>/statistics.json`** — advisory paired-case lift estimate and
+  interval, plus pass^k, when available.
 - **`<agent>/findings.json`** — bounded per-metric findings and improvement
   suggestions; written by `tier3 evaluate` only when the detailed view is
   shown (`--verbose` or when no per-case summary is shown), never by
@@ -1408,8 +1411,10 @@ or gate.
 
 - Tokens are prompt plus completion (`total_tokens`). Prompt counts include
   cached tokens, so cached tokens are never added again;
-  `uncached_prompt_tokens` is prompt minus cached. A missing cache counter
-  counts as 0.
+  `uncached_prompt_tokens` is prompt minus cached, and `efficiency_tokens` is
+  uncached prompt plus completion. A missing cache counter counts as 0.
+- `source` names where the counters come from: `atif_final_metrics`, the
+  `final_metrics` that each attempt's trajectory records.
 - Attempts that failed before scoring, such as an attempt that hit the agent
   timeout, still used tokens and are counted. So are the scored attempts of an
   arm that failed. `coverage.unscored_attempts` counts the attempts without a
@@ -1436,8 +1441,10 @@ or gate.
   `invalid_token_counters`, and `missing_attempts`. A case expects the
   attempts its pass@k record planned: attempts skipped after a pass and
   attempts a run budget did not admit are not expected.
-- `delta.total_tokens` is with skill minus baseline, and
-  `delta.total_tokens_change_percent` divides it by the baseline. A change needs
+- `delta` is with skill minus baseline for every total (`prompt_tokens`,
+  `cached_tokens`, `uncached_prompt_tokens`, `completion_tokens`, `total_tokens`
+  and `efficiency_tokens`), and `delta.total_tokens_change_percent` divides the
+  `total_tokens` change by the baseline. A change needs
   complete counts in both arms for the same cases and attempts, and both arms
   must have succeeded, because the report withholds the scores of any other arm.
   Otherwise `delta.status` is `unavailable` and `delta.reason_codes` and
@@ -1738,6 +1745,17 @@ These uncertainty fields describe the cases in one configured run. They do not
 make heterogeneous cases independent, correct dataset leakage, or promote a
 small p-value into proof that a skill generalizes. Keep the dataset, attempt
 policy, agent, model, and environment fixed when interpreting them.
+
+An ordinary skill run can report a paired-case lift estimate with a bootstrap
+interval and, with repeated attempts, pass^k beside pass@k. The paired-case
+estimate can differ from the scored Skill Lift when different cases contribute
+to different metrics. The Markdown (`-r markdown`) and HTML
+reports, the full terminal report (`validate --verbose` or `-r cli`) and
+`tier3 evaluate --verbose` show them in the **Lift Uncertainty (advisory)** and
+**Reliability (advisory)** tables. `tier3-benchmark.md` and `BENCHMARK.md` carry
+scored evidence only. See the definitions of the
+[paired-case lift interval](/skills/skillevaluator/metrics-reference#skill-lift)
+and [pass^k](/skills/skillevaluator/metrics-reference#reliability-across-attempts).
 
 ### Completed agents in an incomplete run
 

@@ -4,30 +4,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-### Added
-
-- Add a locked Tier 2 CI container with credential-free build verification and
-  opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
-  Tier 2 together from the Repository Integration guide.
-
 ### Fixed
 
-- NeMo Gym now scores native multi-step tasks once using the task's `mean` or
-  `final` strategy. The live case grid and finished report use the same verdict.
-  A failed or ungraded step leaves the attempt unscored. With `final`, the last
-  step determines which metrics apply, even if an earlier step scored one.
-  Each step keeps its own verifier output and trajectory after job cleanup,
-  including steps completed before a failure. Gym masks configured credential
-  values in trajectory text, verifier output, and step failure messages.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
-- Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
-  supply-chain scans when work counters disagree with the ledger.
-- The api-caller reference skill keeps a `Content-Type` passed with `--headers`
-  when it sends a `--data` body, so a PATCH can use
-  `application/merge-patch+json` or a JSON:API request
-  `application/vnd.api+json`. It was always replaced with `application/json`,
-  whatever the header name's case.
 
 ### Documentation
 
@@ -38,6 +18,74 @@ All notable changes to SkillEvaluator are documented in this file.
   instead of as part of the command.
 - The CLI reference now covers `ci init`, `ci status`, `ci demo` and `--hook-waivers`. A test
   fails when a visible command or long option is missing from the page.
+
+## 1.2.1 - 2026-11-24
+
+### Added
+
+- Add a locked Tier 2 CI container with credential-free build verification and
+  opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
+  Tier 2 together from the Repository Integration guide.
+- Tier 3 skill runs report an advisory paired-case lift estimate with a 95%
+  bootstrap interval, a precision label and a warning when the interval
+  includes zero. They also show pass^k beside pass@k when a run makes
+  more than one attempt per case. The statistics are written to
+  `<agent>/statistics.json`, added to the report JSON, and shown in the Markdown
+  and HTML reports and the full terminal report of `validate` and
+  `tier3 evaluate --verbose`.
+  The interval is left out when an arm's cases made different numbers of
+  attempts, as after `--stop-on-pass`.
+
+### Fixed
+
+- Avoid false incomplete security scans when a SkillSpector 2.x release
+  starting at 2.13.5 reports that optional dependency inspection was not
+  requested. Verified missing-reference caveats remain warnings. Existing
+  security and completeness gates are unchanged.
+- The `skillspector_completeness` ledger in JSON reports keeps up to 500
+  exception rows per skill and scan stage (was 20), with a 128 KiB budget
+  for serialized rows. Reports keep up to 512 records (was 64), and each
+  record now states `ledger_rows_retained` and
+  `ledger_rows_total`. A 227-skill library whose scanner reported 521
+  incomplete rows previously showed 268, so fixing the visible rows did not
+  clear the gate; the omitted count was recorded but not surfaced. When the
+  cap applies, the security gate message counts the ledger rows for the
+  reported gaps, including how many exceed the per-record limit.
+- NeMo Gym now scores native multi-step tasks once using the task's `mean` or
+  `final` strategy. The live case grid and finished report use the same verdict.
+  A failed or ungraded step leaves the attempt unscored. With `final`, the last
+  step determines which metrics apply, even if an earlier step scored one.
+  Each step keeps its own verifier output and trajectory after job cleanup,
+  including steps completed before a failure. Gym masks configured credential
+  values in trajectory text, verifier output, and step failure messages.
+- The bundled create-custom-grader skill now tells agents to run
+  `skillevaluator tier3 validate --harbor-contract`, the only command with that
+  flag, and to write datasets with a top-level `skill_name` and per-case `prompt`.
+  It named `skillevaluator validate --harbor-contract`, which rejects the option,
+  and legacy `question` fields that the agentskills dataset shape rejects.
+- The recorded token usage table in the HTML report now fills the Efficiency
+  Tokens column and the per-measure Change cells and names its accounting source.
+  `token_usage` totals add `efficiency_tokens`, deltas cover every total and the
+  payload carries `source`.
+- `tier3 validate`, the Tier 3 step of `validate` and CI's strict dataset
+  preflight now report an `expected_skill` that is not a string or `null`, a
+  whitespace-only `expected_skill`, and `assertions` or `expected_behavior` that
+  is not a list of strings. A dataset that used `false`, `0` or `[]` for a
+  negative case must now use `null`. Before, `validate` accepted them: a number
+  or list in `expected_skill` failed late with a `TypeError` while tasks were
+  generated, a whitespace-only name was scored as a positive case that never
+  matches, and a string in `assertions` was judged one character at a time
+  unless the run started with `tier3 PATH`.
+- Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
+  supply-chain scans when work counters disagree with the ledger.
+- The api-caller reference skill keeps a `Content-Type` passed with `--headers`
+  when it sends a `--data` body, so a PATCH can use
+  `application/merge-patch+json` or a JSON:API request
+  `application/vnd.api+json`. It was always replaced with `application/json`,
+  whatever the header name's case.
+- Bare Hugging Face (`hf_`), npm (`npm_`) and PyPI (`pypi-`) tokens are masked in
+  redacted report and Tier 3 result text, not only after a credential name such
+  as `HF_TOKEN=`.
 
 ## 1.2.0 - 2026-11-23
 
@@ -301,15 +349,6 @@ notes below describe the new policy and backend configuration behavior.
   The fence length exceeds any backtick run in the rendered content. File and
   skill labels are escaped and length-limited. The judge is instructed to
   treat the fenced content and labels as skill data and follow the rubric.
-- The `skillspector_completeness` ledger in JSON reports keeps up to 500
-  exception rows per skill and scan stage (was 20), with a 128 KiB budget
-  for serialized rows. Reports keep up to 512 records (was 64), and each
-  record now states `ledger_rows_retained` and
-  `ledger_rows_total`. A 227-skill library whose scanner reported 521
-  incomplete rows previously showed 268, so fixing the visible rows did not
-  clear the gate; the omitted count was recorded but not surfaced. When the
-  cap applies, the security gate message counts the ledger rows for the
-  reported gaps, including how many exceed the per-record limit.
 - Tier 1 file walkers skip symlinks and Windows directory junctions whose
   target resolves outside the skill directory (or is missing), so the PII,
   secrets, Unicode, license and link checks no longer read or quote files from

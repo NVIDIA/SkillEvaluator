@@ -54,6 +54,26 @@ user-visible behavior and verification performed. By submitting a contribution,
 you confirm that you have the right to contribute it under the
 [Apache License 2.0](LICENSE).
 
+## Keeping Changes Small
+
+The **Size report** CI job reports these numbers on each pull request that is not
+docs-only. Not enforced yet; the `size-exception` label marks an agreed exception.
+
+- A `fix:` adds at most 150 net lines under `src/` and 400 under `tests/`, no
+  new file under `src/`, and at most 3 new test functions.
+- Extend an existing test module or `pytest.mark.parametrize` table instead of
+  adding a test file.
+- Big files only shrink: a file listed in `config/size_baseline.json` does not grow.
+- Past 100 net new test lines, a change adds at most 3 per added source line.
+- No whole captured reports as fixtures: keep one base file and build variants
+  in the test. A new non-Python file under `tests/` has at most 100 lines.
+- Say it once: a comment says what the code does now, and the story of the bug
+  goes in the pull request.
+
+Run it locally with `python scripts/ci/size_guard.py --title "fix: your title"`.
+It compares `HEAD` with `origin/main`; pass `--base <ref>` if that is not this
+repository's current `main`.
+
 ## Signing Your Work
 
 The contribution requirement is the Developer Certificate of Origin (DCO)

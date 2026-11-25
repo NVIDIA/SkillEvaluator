@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Report the size of a pull request against the line budgets in CONTRIBUTING.md.
+
+Prints a Markdown report and exits 0. Only ``--enforce`` changes that: 1 when a rule
+is over its limit, 2 when git could not compare the refs. CI does not pass it yet.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+BASELINE = "config/size_baseline.json"
+RATIO = "python_tests_to_source_ratio"
+BIG_FILE = 1500  # A tracked file with more lines is recorded in the baseline.
+FIX_SRC, FIX_TESTS, FIX_TEST_FUNCTIONS = 150, 400, 3  # G1 and G2: net lines and test functions a fix may add.
+TEST_RATIO, TEST_FLOOR = 3, 100  # G3: net test lines per added source line, once past the floor.
+FIXTURE_LINES = 100  # G4
+RULES = {
+    "G1": "fix line budget",
+    "G2": "fix extends existing tests",
+    "G3": "big files and test ratio",
+    "G4": "no large fixtures",
+    "G5": "fix adds no source file",
+}
+FIX_ONLY = {"G1", "G2", "G5"}
+# The conventional type of a title: ``fix(scope)!: x`` is ``fix``. A title without a prefix is ``other``.
+_TITLE = re.compile(r"(\w+)(\([^)]*\))?!?:")
+# One ``--numstat -z`` record. A rename has an empty path, then the old and the new path.
+_NUMSTAT = re.compile(r"(\d+|-)\t(\d+|-)\t(?:\0([^\0]*)\0)?([^\0]+)\0")
+_TEST_FILE = re.compile(r"tests/(.*/)?test_[^/]*\.py")
+_TEST_DEF = re.compile(r"^([+-])\s*(?:async\s+)?def test_", re.MULTILINE)
+_FIXTURE = re.compile(r"tests/.*(?<!\.py)")
+
+
+def _git(repo: Path, *args: str) -> str:
+    # stderr is not captured, so a failing git command explains itself in the CI log.
+    command = ["git", "-C", str(repo), *args]
+    return subprocess.run(command, check=True, stdout=subprocess.PIPE, encoding="utf-8", errors="replace").stdout
+
+
+def _baseline(repo: Path) -> dict:
+    path = repo / BASELINE
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def _name(path: str) -> str:
+    """A path as inert Markdown on one line: file names come from the pull request and may hold anything."""
+    return "`" + json.dumps(path)[1:-1].replace("`", "\\u0060") + "`"
+
+
+def measure(repo: Path, base: str, head: str) -> dict:
+    """Everything the report shows, read from the diff between the merge base of ``base`` and ``head``."""
+    span = f"{base}...{head}"
+    rows, moved, new = {}, {}, []  # Lines per path, path at the base to path at the head, created paths.
+    # Renames are paired inside one part only, so a file moved into src/ or tests/ counts as new there.
+    for part in (["src/"], ["tests/"], [":!src/", ":!tests/"]):
+        numstat = _git(repo, "diff", "--numstat", "-z", "-M", span, "--", *part)
+        for added, removed, old, path in _NUMSTAT.findall(numstat):
+            rows[path] = (0, 0) if added == "-" else (int(added), int(removed))  # A binary file counts as 0.
+            moved[old or path] = path
+        new += _git(repo, "diff", "--name-only", "-z", "-M", "--diff-filter=A", span, "--", *part).split("\0")[:-1]
+    net = {path: added - removed for path, (added, removed) in rows.items()}
+    big = [moved.get(path, path) for path in _baseline(repo).get("files", {})]
+    defs = _TEST_DEF.findall(_git(repo, "diff", "-U0", "-M", "--no-color", "--no-ext-diff", span, "--", "tests/*.py"))
+    found: dict = {
+        "new_test_files": [_name(path) for path in new if _TEST_FILE.fullmatch(path)],
+        "test_defs": (defs.count("+"), defs.count("-")),
+        "new_src_files": [_name(path) for path in new if path.startswith("src/")],
+        "grown": {_name(path): net[path] for path in big if net.get(path, 0) > 0},
+        "fixtures": {_name(path): rows[path][0] for path in new if _FIXTURE.fullmatch(path)},
+    }
+    for root in ("src/", "tests/"):
+        inside = [row for path, row in rows.items() if path.startswith(root)]
+        found[root] = (sum(row[0] for row in inside), sum(row[1] for row in inside))
+    return found
+
+
+def judge(found: dict, fix: bool) -> dict[str, list[str]]:
+    """What is over its limit, per rule. The ``FIX_ONLY`` rules apply to ``fix`` titles only."""
+    (src_added, src_removed), (tests_added, tests_removed) = found["src/"], found["tests/"]
+    growth, (defs_added, defs_removed) = tests_added - tests_removed, found["test_defs"]
+    checks = [  # rule, what the number counts, number, limit
+        ("G1", "net lines under src/", src_added - src_removed, FIX_SRC),
+        ("G1", "net lines under tests/", growth, FIX_TESTS),
+        ("G2", "new test files", len(found["new_test_files"]), 0),
+        ("G2", "new test functions", defs_added - defs_removed, FIX_TEST_FUNCTIONS),
+        ("G3", "baseline files that grew", len(found["grown"]), 0),
+        ("G3", f"net test lines for {src_added} added source lines", growth, max(TEST_FLOOR, TEST_RATIO * src_added)),
+        *(("G4", f"lines in new {path}", lines, FIXTURE_LINES) for path, lines in found["fixtures"].items()),
+        ("G5", "new files under src/", len(found["new_src_files"]), 0),
+    ]
+    over: dict[str, list[str]] = {rule: [] for rule in RULES}
+    for rule, what, number, limit in checks:
+        if number > limit and (fix or rule not in FIX_ONLY):
+            over[rule].append(f"{what}: {number} (limit {limit})")
+    return over
+
+
+def render(found: dict, kind: str, over: dict[str, list[str]], excepted: bool) -> str:
+    """The Markdown report: the measurements, then one line per rule."""
+    sizes = {"`src/`": found["src/"], "`tests/`": found["tests/"], "`def test_` lines": found["test_defs"]}
+    grown = ", ".join(f"{path} +{net}" for path, net in found["grown"].items())
+    verdict = "excepted: " if excepted else "over: "
+    lines = [
+        f"### Pull request size (report-only), `{kind}` title",
+        "",
+        *(f"- {what}: +{added} -{removed}, net {added - removed:+}" for what, (added, removed) in sizes.items()),
+        f"- New test files: {', '.join(found['new_test_files']) or 'none'}",
+        f"- New files under `src/`: {', '.join(found['new_src_files']) or 'none'}",
+        f"- Baseline files that grew: {grown or 'none'}",
+        f"- Added test lines against added source lines: {found['tests/'][0]} / {found['src/'][0]}",
+        "",
+        *(f"- {rule} {RULES[rule]}: " + (verdict + "; ".join(why) if why else "ok") for rule, why in over.items()),
+        "",
+        'See "Keeping Changes Small" in CONTRIBUTING.md; the `size-exception` label marks an agreed exception.',
+    ]
+    return "\n".join(lines)
+
+
+def update_baseline(repo: Path, ref: str, allow_raise: bool) -> int:
+    """Rewrite the baseline from ``ref``. Without ``allow_raise`` no number may go up and no file may be added."""
+    # CHANGELOG.md is not recorded: every user-visible change has to add an entry to it.
+    records = _git(repo, "grep", "-I", "-c", "-z", "--no-color", "", ref, "--", ":!CHANGELOG.md").split("\n")[:-1]
+    counts = {path[len(ref) + 1 :]: int(count) for path, _, count in (record.partition("\0") for record in records)}
+    python = {path: count for path, count in counts.items() if path.endswith(".py")}
+    src, tests = (sum(n for path, n in python.items() if path.startswith(root)) for root in ("src/", "tests/"))
+    files = {path: count for path, count in sorted(counts.items()) if count > BIG_FILE}
+    new = {"version": 1, RATIO: round(tests / max(src, 1), 2), "files": files}
+    old = _baseline(repo)
+    before = {RATIO: old.get(RATIO, new[RATIO]), **old.get("files", {})}
+    raised = [key for key, value in {RATIO: new[RATIO], **files}.items() if value > before.get(key, 0)]
+    if raised and not allow_raise:
+        print(f"refusing to raise or add (pass --allow-raise to accept): {', '.join(raised)}", file=sys.stderr)
+        return 1
+    (repo / BASELINE).write_text(json.dumps(new, indent=2) + "\n", encoding="utf-8")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=Path, default=Path.cwd(), help="any directory inside the Git repository")
+    parser.add_argument("--base", default="origin/main", help="base ref; the diff starts at its merge base with --head")
+    parser.add_argument("--head", default="HEAD", help="head ref")
+    parser.add_argument("--title", default=os.environ.get("PR_TITLE"), help="default: $PR_TITLE, else the head subject")
+    parser.add_argument("--labels", default=os.environ.get("PR_LABELS", ""), help="comma-separated; default $PR_LABELS")
+    parser.add_argument("--enforce", action="store_true", help="exit 1 when a rule is over its limit")
+    parser.add_argument("--update-baseline", action="store_true", help=f"rewrite {BASELINE} from --head")
+    parser.add_argument("--allow-raise", action="store_true", help="let --update-baseline raise a number or add a file")
+    args = parser.parse_args(argv)
+    try:
+        repo = Path(_git(args.repo, "rev-parse", "--show-toplevel").strip())
+        if args.update_baseline:
+            return update_baseline(repo, args.head, args.allow_raise)
+        title = _TITLE.match((args.title or _git(repo, "log", "-1", "--format=%s", args.head)).strip())
+        found = measure(repo, args.base, args.head)
+    except subprocess.CalledProcessError as error:  # git has printed the reason to stderr.
+        print(f"Pull request size not measured: `git {error.cmd[3]}` failed. Fetch the full history or pass `--base`.")
+        return 2 * args.enforce
+    kind = title.group(1).lower() if title else "other"
+    excepted = "size-exception" in {label.strip() for label in args.labels.split(",")}
+    over = judge(found, kind == "fix")
+    print(render(found, kind, over, excepted))
+    return int(args.enforce and not excepted and any(over.values()))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -413,6 +413,8 @@ def test_relative_sarif_location_resolves_under_skill_path(tmp_path):
 
 def test_skill_relative_path_starting_with_skill_name_stays_relative_to_skill(tmp_path):
     reports, output, _ = _sarif_evidence(tmp_path, 1)
+    # Relative redacted SARIF paths are skill-relative. Unlike annotations, don't
+    # treat a matching prefix as a repo path: it could name a nested skill file.
     finding = Finding(
         category="SCHEMA", severity=Severity.LOW, check_name="fixture",
         message="Example finding", file_path="skills/1/README.md",
@@ -494,6 +496,8 @@ def test_external_sarif_location_cannot_be_attributed_to_the_workspace(tmp_path)
         [{"physicalLocation": {"artifactLocation": "not-an-object"}}],
         [{"physicalLocation": {"artifactLocation": {"uri": 42}}}],
         {"not": "a-list"},
+        {},
+        "",
     ],
 )
 def test_malformed_sarif_locations_fail_with_clear_error(tmp_path, locations):

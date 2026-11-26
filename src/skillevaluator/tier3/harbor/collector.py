@@ -5280,6 +5280,11 @@ def _pass_summary(
 
     published_case_ids = set(case_order[:PUBLISHED_CASE_DETAILS_MAX])
     published_attempt_details = 0
+    recovered_by_case: dict[str, list[dict[str, Any]]] = {}
+    for item in recovered_attempts or []:
+        recovered_case = item["case_id"]
+        if isinstance(recovered_case, str):
+            recovered_by_case.setdefault(recovered_case, []).append(item)
 
     for entry_id in case_order:
         attempts = grouped.get(entry_id, [])
@@ -5344,7 +5349,8 @@ def _pass_summary(
             security_failed_cases += int(security_failed)
         if is_expected_case:
             attempts_used += len(attempts)
-        recovered_count = sum(item["case_id"] == entry_id for item in (recovered_attempts or []))
+        case_recovered = recovered_by_case.get(entry_id, [])
+        recovered_count = len(case_recovered)
         expected_attempt_count = (
             expected_attempts_by_case.get(entry_id, n_attempts) if expected_attempts_by_case is not None else n_attempts
         )
@@ -5358,11 +5364,7 @@ def _pass_summary(
                 _unscored_attempts_before_first_pass(
                     first_pass_attempt,
                     scored_ordinals,
-                    {
-                        item["attempt"]
-                        for item in recovered_attempts or []
-                        if item["case_id"] == entry_id and type(item["attempt"]) is int
-                    },
+                    {item["attempt"] for item in case_recovered if type(item["attempt"]) is int},
                     (expected_attempt_ordinals_by_case or {}).get(entry_id),
                 ),
             )

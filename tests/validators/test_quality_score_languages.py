@@ -279,6 +279,21 @@ def test_instruction_rules_use_real_markdown_sections_and_keep_legacy_example_cr
     assert "No examples provided" not in [finding.message for finding in result.findings]
 
 
+@pytest.mark.parametrize("heading", ["Instructions", "Инструкции", "使用说明"])
+def test_action_verb_heading_override_keeps_list_format_check(tmp_path, heading):
+    skill = _write_localized_skill(
+        tmp_path,
+        name="independent-instruction-checks",
+        description="Use when checking build reports.",
+        body=f"## {heading}\n\nAn overview appears here.\n\n## Steps\n\n- Run the report.\n",
+    )
+    result = _validate_with(skill, tmp_path, 'efficiency: {action_verbs: {headings: ["## Steps"]}}\n')
+    messages = {finding.message for finding in result.findings}
+
+    assert "Instructions not in list format" in messages
+    assert "Instructions lack clear action verbs" not in messages
+
+
 def test_empty_final_instructions_section_has_no_efficiency_deduction(tmp_path):
     skill = _write_localized_skill(
         tmp_path,

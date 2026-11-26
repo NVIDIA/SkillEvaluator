@@ -38,7 +38,12 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
-from skillevaluator.quality_config import CodeErrorHandlingRule, TermsRule, load_quality_config_with_provenance
+from skillevaluator.quality_config import (
+    CodeErrorHandlingRule,
+    TermsRule,
+    load_quality_config,
+    load_quality_config_with_provenance,
+)
 from skillevaluator.utils.structured_data import (
     StructuredDataError,
     StructuredDataLimitError,
@@ -260,6 +265,8 @@ class QualityScoreValidator(ValidatorBase):
     def __init__(self, min_score: int = QUALITY_DEFAULT_MIN_SCORE, quality_config: Path | None = None) -> None:
         self.min_score = min_score
         self.quality_config, self.quality_config_provenance = load_quality_config_with_provenance(quality_config)
+        packaged_config = load_quality_config() if quality_config is not None else self.quality_config
+        self._list_format_headings = packaged_config["efficiency"]["action_verbs"]["headings"]
 
     @property
     def name(self) -> str:
@@ -448,12 +455,17 @@ class QualityScoreValidator(ValidatorBase):
 
         instruction_headings = self.quality_config["efficiency"]["action_verbs"]["headings"]
         example_headings = self.quality_config["correctness"]["examples"]["headings"]
-        sections = markdown_atx_sections(content, (*instruction_headings, *example_headings))
+        sections = markdown_atx_sections(
+            content, (*instruction_headings, *self._list_format_headings, *example_headings)
+        )
         instructions = next((sections[heading] for heading in instruction_headings if heading in sections), None)
+        list_instructions = next(
+            (sections[heading] for heading in self._list_format_headings if heading in sections), None
+        )
         self._check_correctness(qs, content, skill_path, frontmatter_data, instructions, sections)
         self._check_discoverability(qs, content, frontmatter_data)
         self._check_reliability(qs, content, skill_path)
-        self._check_efficiency(qs, content, lines, skill_path, frontmatter_data, instructions)
+        self._check_efficiency(qs, content, lines, skill_path, frontmatter_data, instructions, list_instructions)
         self._check_spec_fields(qs, frontmatter_data)
 
         # Convert quality issues into SkillEvaluator Findings
@@ -526,7 +538,7 @@ class QualityScoreValidator(ValidatorBase):
             self._check_frontmatter_correctness(dim, qs, frontmatter)
 
         # Instructions — presence is enforced by SchemaValidator; quality only
-        # tracks the flag for downstream heuristics (action verbs, list format).
+        # records whether the configured instruction heading was found.
         qs.has_instructions = instructions is not None
 
         # Type-specific checks
@@ -864,6 +876,7 @@ class QualityScoreValidator(ValidatorBase):
         skill_path: Path,
         _frontmatter: dict | None,
         instructions: str | None,
+        list_instructions: str | None,
     ) -> None:
         dim = qs.efficiency
 
@@ -903,13 +916,18 @@ class QualityScoreValidator(ValidatorBase):
         action_verbs = self.quality_config["efficiency"]["action_verbs"]
         if instructions and instructions.strip():
             self._deduct_unless_any_term(dim, instructions, action_verbs, "warning")
-            if not ("- " in instructions or "1." in instructions or "* " in instructions):
-                dim.deduct(
-                    5,
-                    "info",
-                    "Instructions not in list format",
-                    "Use bullet points or numbered steps for clarity",
-                )
+        # The fixed list-format check uses the packaged headings independently of action verbs.
+        if (
+            list_instructions
+            and list_instructions.strip()
+            and not any(marker in list_instructions for marker in ("- ", "1.", "* "))
+        ):
+            dim.deduct(
+                5,
+                "info",
+                "Instructions not in list format",
+                "Use bullet points or numbered steps for clarity",
+            )
 
         # Corporate buzzwords
         self._deduct_if_any_term(dim, content, self.quality_config["efficiency"]["buzzwords"], "info")

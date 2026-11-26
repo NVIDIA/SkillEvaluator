@@ -231,7 +231,7 @@ class ExternalTool:
             return True
         detail = (
             f"Automatically discovered SkillSpector {version or '(version could not be verified)'} "
-            f"at {self._path}; expected a stable release >= {SKILLSPECTOR_VERSION}."
+            f"at {self._path}; expected a plain X.Y.Z release >= {SKILLSPECTOR_VERSION}."
         )
         self._path = None
         self._version = None

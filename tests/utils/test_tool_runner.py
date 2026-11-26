@@ -536,6 +536,7 @@ class TestAutomaticSkillSpectorVersion:
         assert tool.resolution_source == "uv tool run"
         assert str(scanner) in caplog.text
         assert "2.13.7" in caplog.text
+        assert "plain X.Y.Z release" in caplog.text
 
     def test_constructor_refresh_and_path_lookup_do_not_launch_scanner(self, scanner_bin):
         scanner = self._scanner(scanner_bin, "SkillSpector v2.13.7")
@@ -660,6 +661,7 @@ class TestAutomaticSkillSpectorVersion:
         assert str(scanner) in tool.configuration_error
         assert "2.11.2" in tool.configuration_error
         assert "2.13.7" in tool.configuration_error
+        assert "plain X.Y.Z release" in tool.configuration_error
         assert "uv" in tool.get_install_hint()
         assert "SKILLEVALUATOR_SKILLSPECTOR_PATH" in tool.get_install_hint()
 

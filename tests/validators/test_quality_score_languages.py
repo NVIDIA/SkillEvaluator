@@ -476,3 +476,53 @@ def test_plain_prose_examples_count_under_recognized_headings(tmp_path, examples
 
     assert result.metadata["quality_scores"]["metrics"]["has_examples"] is True
     assert "No examples provided" not in [finding.message for finding in result.findings]
+
+
+@pytest.mark.parametrize(("document_form", "config_form"), [("NFC", "NFD"), ("NFD", "NFC")])
+def test_localized_heading_rules_match_canonical_forms(tmp_path: Path, document_form: str, config_form: str):
+    body = normalize(
+        document_form,
+        "## Présentation\n\nThis skill compares build outputs.\n\n"
+        "## Étapes\n\n- Use run_script for the report.\n\n"
+        "## Démonstrations\n\nA sample report compares build times.\n\n"
+        "## Réglages\n\nRecord any error.\n\n"
+        "## Références\n\nThe run script writes a report.\n",
+    )
+    configuration = normalize(
+        config_form,
+        "expected_headers:\n"
+        '  - heading: "## Préconditions"\n'
+        '    alternatives: ["## Réglages"]\n'
+        "    message: Missing localized prerequisites\n"
+        'discoverability: {purpose_heading: {headings: ["## Présentation"]}}\n'
+        'efficiency: {action_verbs: {headings: ["## Étapes"]}}\n'
+        "correctness:\n"
+        '  examples: {headings: ["## Démonstrations"]}\n'
+        '  script_docs: {headings: ["## Références"]}\n',
+    )
+    skill = _write_localized_skill(
+        tmp_path, name="build-report", description="Use when comparing build reports across versions.", body=body
+    )
+    scripts = skill / "scripts"
+    scripts.mkdir()
+    (scripts / "run.py").write_text("raise ValueError('no report')\n", encoding="utf-8")
+
+    result = _validate_with(skill, tmp_path, configuration)
+
+    metrics = result.metadata["quality_scores"]["metrics"]
+    assert metrics["has_instructions"] and metrics["has_examples"] and metrics["has_scripts"]
+    assert result.findings == []
+
+
+def test_raw_heading_prefix_keeps_credit_next_to_a_combining_mark(tmp_path: Path):
+    skill = _write_localized_skill(
+        tmp_path,
+        name="build-report",
+        description="Use when comparing build reports across versions.",
+        body="## Purpose\u0301\n\nBuild report.\n\n## Prerequisites\u0301\n\nProject files.\n",
+    )
+
+    messages = [finding.message for finding in _validate_with(skill, tmp_path).findings]
+
+    assert "No '## Purpose' section" not in messages
+    assert "No prerequisites/requirements documented" not in messages

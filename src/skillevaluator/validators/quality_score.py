@@ -216,6 +216,14 @@ def _contains_any_term(text: str, terms: Iterable[str], *, flexible_spacing: boo
     return re.search("|".join(patterns), normalize("NFC", text), re.IGNORECASE) is not None
 
 
+def _contains_canonical_heading(content: str, headings: list[str]) -> bool:
+    """Keep literal substring credit and recognize canonically equivalent headings."""
+    if any(heading in content for heading in headings):
+        return True
+    canonical_content = normalize("NFC", content)
+    return any(normalize("NFC", heading) in canonical_content for heading in headings)
+
+
 def _has_api_documentation(content: str, terms: Iterable[str]) -> bool:
     import_pattern = r"\b(?:import\s+[A-Za-z_][A-Za-z0-9_.]*|from\s+[A-Za-z_][A-Za-z0-9_.]*\s+import\b)"
     return re.search(import_pattern, content, re.IGNORECASE) is not None or _contains_any_term(content, terms)
@@ -696,7 +704,10 @@ class QualityScoreValidator(ValidatorBase):
                 )
 
             docs = self.quality_config["correctness"]["script_docs"]
-            if docs["points"] and not any(marker in content for marker in (*docs["headings"], *docs["markers"])):
+            if docs["points"] and not (
+                any(marker in content for marker in docs["markers"])
+                or _contains_canonical_heading(content, docs["headings"])
+            ):
                 dim.deduct(docs["points"], "warning", docs["message"], docs["suggestion"])
             if "run_script" not in content and not self._runs_only_node_scripts(script_files):
                 dim.deduct(
@@ -805,7 +816,7 @@ class QualityScoreValidator(ValidatorBase):
                 dim.deduct(broad["points"], "info", broad["message"], broad["suggestion"])
 
         purpose = self.quality_config["discoverability"]["purpose_heading"]
-        if purpose["points"] and not any(heading in content for heading in purpose["headings"]):
+        if purpose["points"] and not _contains_canonical_heading(content, purpose["headings"]):
             dim.deduct(purpose["points"], "info", purpose["message"], purpose["suggestion"])
 
         sn = qs.skill_name
@@ -854,7 +865,7 @@ class QualityScoreValidator(ValidatorBase):
 
         for expected in self.quality_config["expected_headers"]:
             accepted_headings = [expected["heading"], *expected["alternatives"]]
-            if not any(heading in content for heading in accepted_headings):
+            if not _contains_canonical_heading(content, accepted_headings):
                 dim.deduct(expected["points"], "info", expected["message"], expected["suggestion"])
 
     @staticmethod

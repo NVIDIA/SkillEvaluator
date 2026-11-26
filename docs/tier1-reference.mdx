@@ -517,6 +517,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points, and accepts the Russian and Chinese headings for each (`## Требования`, `## 前提条件`, `## Ограничения`, `## 限制`, `## Устранение неполадок`, `## 故障排除` and others; see the packaged file for the full list). Omit `expected_headers` to keep that list. A list you set replaces it, so copy any default entries you want to keep. Set `expected_headers: []` to turn heading checks off.
 
+    Quality heading rules compare canonically equivalent Unicode text equally. For example, `## Étapes` matches with either a composed accent or a combining accent. The configuration digest includes the heading text as supplied.
+
     ```yaml title="quality.yaml"
     expected_headers:
       - heading: "## Prerequisites"

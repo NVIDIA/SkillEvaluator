@@ -43,7 +43,8 @@ All notable changes to SkillEvaluator are documented in this file.
   and example detection uses Markdown sections and can change the
   `has_instructions` and `has_examples` metrics. Chinese terms match in running
   text, and a script boundary lets terms such as `error` match next to Chinese
-  characters. The packaged `quality_config` digest changes. Set
+  characters. Configured headings recognize canonically equivalent Unicode
+  spellings. The packaged `quality_config` digest changes. Set
   `--quality-config` to replace packaged lists, including the new vocabulary
   and section rules.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a

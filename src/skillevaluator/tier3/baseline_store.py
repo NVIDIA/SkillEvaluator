@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -124,16 +125,31 @@ def baseline_task_tree_digest(task_dirs_by_agent: dict[str, Sequence[Path]]) -> 
                 if path.is_symlink():
                     content = b"symlink\0" + path.readlink().as_posix().encode("utf-8")
                 elif path.is_file():
-                    content = path.read_bytes()
                     if relative == "task.toml":
+                        content = path.read_bytes()
                         content = _ARM_TASK_NAME_SUFFIX.sub(r"\1\2", content.decode("utf-8"), count=1).encode("utf-8")
+                    else:
+                        content = None
                 else:
                     continue
                 file_header = relative.encode("utf-8")
                 digest.update(len(file_header).to_bytes(8, "big"))
                 digest.update(file_header)
-                digest.update(len(content).to_bytes(8, "big"))
-                digest.update(content)
+                if content is not None:
+                    digest.update(len(content).to_bytes(8, "big"))
+                    digest.update(content)
+                    continue
+                with path.open("rb") as source:
+                    remaining = os.fstat(source.fileno()).st_size
+                    digest.update(remaining.to_bytes(8, "big"))
+                    while remaining:
+                        chunk = source.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError(f"Staged baseline file changed while hashing: {path}")
+                        digest.update(chunk)
+                        remaining -= len(chunk)
+                    if source.read(1):
+                        raise ValueError(f"Staged baseline file changed while hashing: {path}")
     return "sha256:" + digest.hexdigest()
 
 

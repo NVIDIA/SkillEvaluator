@@ -5,7 +5,7 @@ license: Apache-2.0
 compatibility: Requires Python 3.12-3.14 and the skillevaluator CLI; live evaluation also needs Docker (or another backend) and an LLM provider key.
 metadata:
   author: Christopher Kevin <christopherk@nvidia.com>
-  version: "1.0.0"
+  version: "1.0.1"
   domain: [evaluation, ai-ml]
   tags: [skills, evaluation, benchmarking, ci, security]
 ---
@@ -135,7 +135,7 @@ do. Report no score, lift or verdict for that tier.
    - `pipx install --python python3.13 "skillevaluator[all]"`
    - `python3 -m pip install --upgrade "skillevaluator[all]"` inside an active
      virtual environment whose Python is 3.12-3.14 (on an older Python, pip
-     installs an empty `0.0.0a0` placeholder with no `skillevaluator` command)
+     installs the empty placeholder release 0.0.0a0 without a `skillevaluator` command)
    - with no install, prefix each command with `uvx --python 3.13 --from "skillevaluator[all]"`
 
    The same permission rule covers isolated installs, `uvx` provisioning,
@@ -187,8 +187,9 @@ do. Report no score, lift or verdict for that tier.
    and an `evals` array; each case has `id`, `prompt`, `expected_output`, and
    `expected_skill` (optional `assertions`, `files`). Validate with
    `skillevaluator tier3 validate <skill-dir> --strict`. Format:
-   [references/tier3-datasets.md](references/tier3-datasets.md); run policy and
-   scoring: [references/tier3-running.md](references/tier3-running.md).
+   [references/tier3-datasets.md](references/tier3-datasets.md); generation and
+   refinement: [references/tier3-dataset-generation.md](references/tier3-dataset-generation.md);
+   run policy and scoring: [references/tier3-running.md](references/tier3-running.md).
 7. **Run live evaluation.** `skillevaluator tier3 <skill-dir>` (or
    `skillevaluator tier3 evaluate <skill-dir> -a opencode --env-mode docker --n-attempts 3`).
    Use `--max-cases 1` for a cheap smoke run first; such runs are never

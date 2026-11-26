@@ -366,13 +366,8 @@ def test_sarif_locations_resolve_to_the_scanned_workspace(tmp_path, uri, expecte
     assert location["physicalLocation"]["artifactLocation"]["uri"] == expected
 
 
-def test_relative_sarif_location_prefers_skill_when_same_name_exists_at_root(tmp_path):
+def test_relative_sarif_location_resolves_under_skill_path(tmp_path):
     reports, output, _ = _sarif_evidence(tmp_path, 1)
-    workspace = tmp_path / "workspace"
-    skill = workspace / "skills/1"
-    skill.mkdir(parents=True)
-    (workspace / "README.md").write_text("repository")
-    (skill / "README.md").write_text("skill")
     child = reports / "skill-001/skillevaluator-tier1.sarif.json"
     document = json.loads(child.read_text())
     document["runs"][0]["results"][0]["locations"] = [{

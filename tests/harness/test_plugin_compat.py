@@ -714,6 +714,28 @@ def test_openclaw_attempts_native_index_after_broken_client_bundle(tmp_path: Pat
     assert entry in result.findings[1]["message"]
 
 
+@pytest.mark.parametrize(
+    ("bundle", "status", "findings"),
+    [
+        (BROKEN, "degraded", ["OW-PLUGIN-MANIFEST-FALLBACK", "OW-PLUGIN-NATIVE-UNCHECKED"]),
+        (VALID, "loads", []),
+    ],
+    ids=["broken-bundle", "valid-bundle"],
+)
+def test_openclaw_native_index_link_respects_bundle_discovery(
+    tmp_path: Path, bundle: str, status: str, findings: list[str]
+):
+    root = _manifest(_plugin(tmp_path / "p", None), ".codex-plugin/plugin.json", bundle)
+    _manifest(root, "openclaw.plugin.json", '{"id":"native-demo","configSchema":{"type":"object"}}')
+    _manifest(root, "dist/start.js", "module.exports = function register() {};")
+    try:
+        (root / "index.js").symlink_to("dist/start.js")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"File symlinks unavailable ({exc})")
+
+    assert _status(root)["openclaw"] == (status, findings)
+
+
 @pytest.mark.parametrize("schema", [None, AGENT_V1, "https://agent-plugins.org/schemas/9.9.0/plugin.schema.json"])
 def test_openclaw_accepts_root_manifest_only_with_supported_agent_schema(tmp_path: Path, schema: str | None):
     data = {"name": "root-demo"}

@@ -227,6 +227,19 @@ def _openclaw_package_extensions(reader: PluginRootReader) -> Literal["absent", 
     return "declared"
 
 
+def _openclaw_native_fallback_is_file(reader: PluginRootReader, entry: str) -> bool:
+    """Recognize a regular root entrypoint or an alias to a file within the plugin."""
+    kind = reader.kind(PurePosixPath(entry))
+    if kind != "link":
+        return kind == "file"
+    try:
+        root = reader.root.resolve(strict=True)
+        target = (root / entry).resolve(strict=True).relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return PluginRootReader(root).kind(PurePosixPath(*target.parts)) == "file"
+
+
 def is_plugin_root(path: Path) -> bool:
     return _is_file(path / OPENCLAW_NATIVE_MANIFEST) or any(_is_file(path / rel) for rel in MANIFESTS.values())
 
@@ -316,7 +329,7 @@ def plugin_facts(root: Path) -> dict[str, Any]:
         and (not selected or facts["openclaw_manifest_invalid"])
     ):
         default_entry = next((rel for rel in OPENCLAW_NATIVE_ENTRIES if _exists(root / rel)), "")
-        if not selected or (default_entry and reader.kind(PurePosixPath(default_entry)) == "file"):
+        if not selected or (default_entry and _openclaw_native_fallback_is_file(reader, default_entry)):
             native_path = default_entry
     facts["openclaw_native_path"] = native_path
     facts["openclaw_native_manifest_missing"] = bool(native_path) and not has_native_manifest

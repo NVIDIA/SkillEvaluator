@@ -36,6 +36,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Full validation runs use distinct report basenames even when they finish at
+  the same time, preserving each run's JSON, HTML and other selected reports.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

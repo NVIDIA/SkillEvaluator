@@ -630,6 +630,7 @@ class LLMClient:
         # bound is passed explicitly instead of inherited from the client.
         self._timeout = timeout
         self._client: Any = None
+        self._client_lock = threading.Lock()
         self._provider_config: ProviderConfig | None = None
         self._provider_config_lock = threading.Lock()
         self.last_failure: str | None = None
@@ -753,11 +754,19 @@ class LLMClient:
         if self._client is not None:
             return self._client
 
+        # Tier 2 workers share this client. Construct one SDK connection pool,
+        # but release the lock before any worker sends a completion request.
+        with self._client_lock:
+            if self._client is None:
+                self._client = self._create_client()
+            return self._client
+
+    def _create_client(self) -> Any:
+        """Build and validate a client before publishing it to other threads."""
         config = self._resolved_config()
 
         if config.provider == "bedrock":
-            self._client = config
-            return self._client
+            return config
 
         if not config.api_key:
             raise LLMClientError(f"No API key resolved for {config.provider}.")
@@ -776,8 +785,7 @@ class LLMClient:
                 client_kwargs["http_client"] = self._http_client
             if self._timeout is not None:
                 client_kwargs["timeout"] = self._timeout
-            self._client = Anthropic(**client_kwargs)
-            return self._client
+            return Anthropic(**client_kwargs)
 
         try:
             from openai import OpenAI
@@ -807,8 +815,7 @@ class LLMClient:
             raise LLMClientError(
                 f"OpenAI base URL is a noncanonical alias for the native OpenAI endpoint. Use {OPENAI_BASE_URL}."
             )
-        self._client = client
-        return self._client
+        return client
 
     # -- direct-use methods -----------------------------------------------
 

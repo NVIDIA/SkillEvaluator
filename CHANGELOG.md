@@ -36,6 +36,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Concurrent Tier 2 verdict requests initialize one shared provider SDK
+  client and connection pool. Initialization failures remain retryable, and
+  completion requests continue to run concurrently.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

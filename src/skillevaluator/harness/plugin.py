@@ -20,6 +20,7 @@ import json5
 from skillevaluator.constants import PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule, version_finding
 from skillevaluator.plugin_format_schema import _claude_name_refused_by_path
+from skillevaluator.utils.structured_data import _reject_json_constant
 
 MANIFESTS = {
     "claude": ".claude-plugin/plugin.json",
@@ -45,8 +46,8 @@ OPENCLAW_DEFAULT_MARKERS = (
 )
 COMPONENTS = {
     "skills": lambda r: len(_skill_sizes(r)),
-    "commands": lambda r: len(list((r / "commands").rglob("*.md"))) if (r / "commands").is_dir() else 0,
-    "agents": lambda r: len(list((r / "agents").rglob("*.md"))) if (r / "agents").is_dir() else 0,
+    "commands": lambda r: len(list((r / "commands").rglob("*.md"))) if _is_dir(r / "commands") else 0,
+    "agents": lambda r: len(list((r / "agents").rglob("*.md"))) if _is_dir(r / "agents") else 0,
     "hooks": lambda r: _json_keys(r / "hooks" / "hooks.json", "hooks") or _json_keys(r / "hooks.json", "hooks"),
     "mcp": lambda r: _json_keys(r / ".mcp.json", "mcpServers") or _json_keys(r / "mcp.json", "mcpServers"),
     "lsp": lambda r: _json_keys(r / ".lsp.json"),
@@ -81,7 +82,7 @@ def _skill_sizes(root: Path) -> dict[Path, int]:
     regular file is ever opened: opening a named pipe with no writer would block forever.
     """
     sizes: dict[Path, int] = {}
-    for path in (root / "skills").rglob("SKILL.md") if (root / "skills").is_dir() else []:
+    for path in (root / "skills").rglob("SKILL.md") if _is_dir(root / "skills") else []:
         try:
             info = path.stat()
             if not stat.S_ISREG(info.st_mode):
@@ -101,8 +102,24 @@ def _is_file(path: Path) -> bool:
         return False
 
 
+def _is_dir(path: Path) -> bool:
+    """``path.is_dir()``, with a path that cannot be examined read as absent."""
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _exists(path: Path) -> bool:
+    """Keep existing nonregular paths eligible for OpenClaw's format selection."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _json_keys(path: Path, key: str | None = None) -> int:
-    if not path.is_file():
+    if not _is_file(path):
         return 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -138,13 +155,14 @@ def _claude_lenient(path: Path) -> Any:
     syntax error or a file that cannot be opened is a manifest it cannot read.
     """
     try:
-        return json.loads(path.read_bytes().decode("utf-8", "replace").removeprefix("\ufeff"))
+        source = path.read_bytes().decode("utf-8", "replace").removeprefix("\ufeff")
+        return json.loads(source, parse_constant=_reject_json_constant)
     except (OSError, ValueError, RecursionError):
         return _UNPARSED
 
 
-def _openclaw_manifest(path: Path) -> Any:
-    """Read the selected client manifest as OpenClaw JSON/JSON5, with its 256 KiB byte limit."""
+def _openclaw_manifest(path: Path, *, strict_json: bool = False) -> Any:
+    """Read a manifest with OpenClaw's 256 KiB cap and format-specific parser."""
     try:
         if not _is_file(path):
             return _UNPARSED
@@ -153,6 +171,9 @@ def _openclaw_manifest(path: Path) -> Any:
         if len(raw) > PLUGIN_CONFIG_MAX_BYTES:
             return _UNPARSED
         source = raw.decode("utf-8", "replace")
+        if strict_json:
+            return json.loads(source, parse_int=float, parse_constant=_reject_json_constant)
+        # JSON5 also accepts the nonstandard constants that json.loads accepts by default.
         try:
             return json.loads(source, parse_int=float)
         except json.JSONDecodeError:
@@ -165,7 +186,7 @@ def _openclaw_manifest(path: Path) -> Any:
 
 
 def is_plugin_root(path: Path) -> bool:
-    return any((path / rel).is_file() for rel in MANIFESTS.values())
+    return any(_is_file(path / rel) for rel in MANIFESTS.values())
 
 
 def plugin_facts(root: Path) -> dict[str, Any]:
@@ -182,15 +203,14 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
     facts.update({f"invalid_{fmt}": False for fmt, rel in MANIFESTS.items() if rel.endswith(".json")})
     facts["nameless_claude"] = facts["unparsed_claude"] = facts["claude_declares_components"] = False
-    facts["openclaw_agent_manifest"] = facts["openclaw_agent_name_invalid"] = False
     for fmt, rel in MANIFESTS.items():
         path = root / rel
-        facts[f"fmt_{fmt}"] = path.is_file()
-        if not path.is_file() or path.suffix != ".json":
+        facts[f"fmt_{fmt}"] = _is_file(path)
+        if not facts[f"fmt_{fmt}"] or path.suffix != ".json":
             continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+            data = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
+        except (OSError, ValueError, RecursionError):
             facts["manifest_invalid"] = True
             facts[f"invalid_{fmt}"] = True
             facts[f"fmt_{fmt}"] = False
@@ -210,23 +230,27 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             facts["fmt_agent_v1"] = isinstance(data, dict) and str(data.get("$schema", "")).startswith(
                 AGENT_PLUGINS_SCHEMA
             )
-            facts["openclaw_agent_manifest"] = isinstance(data, dict) and data.get("$schema") == OPENCLAW_AGENT_SCHEMA
-            facts["openclaw_agent_name_invalid"] = facts["openclaw_agent_manifest"] and not _name(data).strip()
     facts["fmt_copilot"] = facts["fmt_copilot"] or facts.pop("fmt_copilot_alt")
     facts["invalid_copilot"] = facts.pop("invalid_copilot_alt") or facts["invalid_copilot"]
     facts.setdefault("fmt_agent_v1", False)
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
-    facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
+    facts["default_dirs"] = any(_is_dir(root / d) for d in DEFAULT_DIRS)
     facts["default_layout"] = facts["default_dirs"] or any(_is_file(root / f) for f in DEFAULT_FILES)
-    selected = next((rel for rel in OPENCLAW_CLIENT_MANIFESTS if (root / rel).exists()), "")
+    selected = next((rel for rel in OPENCLAW_CLIENT_MANIFESTS if _exists(root / rel)), "")
     manifest = _openclaw_manifest(root / selected) if selected else None
+    agent_path = MANIFESTS["root_json"]
+    agent_manifest = _openclaw_manifest(root / agent_path, strict_json=True) if not selected else None
+    agent_selected = isinstance(agent_manifest, dict) and agent_manifest.get("$schema") == OPENCLAW_AGENT_SCHEMA
+    facts["openclaw_agent_manifest"] = agent_selected
+    facts["openclaw_agent_name_invalid"] = agent_selected and not _name(agent_manifest).strip()
     facts["openclaw_selected_manifest"] = selected
     facts["openclaw_manifest_invalid"] = (
         bool(selected) and manifest is not _PARSE_LIMIT and not isinstance(manifest, dict)
     )
-    facts["openclaw_manifest_unchecked"] = manifest is _PARSE_LIMIT
-    facts["openclaw_default_layout"] = any((root / marker).exists() for marker in OPENCLAW_DEFAULT_MARKERS)
-    claude_layout = selected == MANIFESTS["claude"] or (not selected and not facts["openclaw_agent_manifest"])
+    facts["openclaw_manifest_unchecked"] = manifest is _PARSE_LIMIT or agent_manifest is _PARSE_LIMIT
+    facts["openclaw_unchecked_manifest"] = (selected or agent_path) if facts["openclaw_manifest_unchecked"] else ""
+    facts["openclaw_default_layout"] = any(_exists(root / marker) for marker in OPENCLAW_DEFAULT_MARKERS)
+    claude_layout = selected == MANIFESTS["claude"] or (not selected and not agent_selected)
     facts["openclaw_declares_components"] = _declares_components(manifest) or (
         claude_layout and _is_file(root / "settings.json")
     )

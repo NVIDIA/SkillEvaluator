@@ -501,6 +501,38 @@ def test_openclaw_selected_manifest_respects_the_loader_byte_limit(tmp_path: Pat
     assert _status(root)["openclaw"] == ("not_loaded", ["OW-PLUGIN-MANIFEST-INVALID"])
 
 
+def test_openclaw_reports_a_selected_nonregular_manifest(tmp_path: Path):
+    root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json")
+    (root / ".codex-plugin/plugin.json").mkdir(parents=True)
+    assert _status(root)["openclaw"] == ("not_loaded", ["OW-PLUGIN-MANIFEST-INVALID"])
+
+
+@pytest.mark.parametrize("rel", [".codex-plugin/plugin.json", "plugin.json"])
+def test_openclaw_reports_a_manifest_that_reaches_the_local_nesting_limit(tmp_path: Path, rel: str):
+    nested = '{"name":"demo","$schema":"' + AGENT_V1 + '","x":' + "[" * 50_000 + "]" * 50_000 + "}"
+    assert len(nested.encode()) < PLUGIN_CONFIG_MAX_BYTES
+    root = _manifest(tmp_path / "p", rel, nested)
+    result = _openclaw(root)
+    assert result.status == "degraded"
+    assert [finding["id"] for finding in result.findings] == ["OW-PLUGIN-MANIFEST-UNCHECKED"]
+    assert rel in result.findings[0]["message"]
+
+
+def test_openclaw_portable_manifest_over_the_byte_limit_leaves_default_discovery_available(tmp_path: Path):
+    portable = json.dumps({"$schema": AGENT_V1})
+    root = _manifest(_plugin(tmp_path / "p", None), "plugin.json", portable.ljust(PLUGIN_CONFIG_MAX_BYTES))
+    assert _status(root)["openclaw"] == ("not_loaded", ["OW-PLUGIN-MANIFEST-NAME"])
+    _manifest(root, "plugin.json", portable.ljust(PLUGIN_CONFIG_MAX_BYTES + 1))
+    assert _status(root)["openclaw"] == ("loads", [])
+    assert plugin_facts(root)["fmt_agent_v1"]
+
+
+def test_openclaw_portable_manifest_needs_strict_json(tmp_path: Path):
+    portable = '{"$schema":"' + AGENT_V1 + '","name":"demo","description":NaN}'
+    root = _manifest(_plugin(tmp_path / "p", None, components=()), "plugin.json", portable)
+    assert _status(root)["openclaw"] == ("not_loaded", ["OW-PLUGIN-FORMAT"])
+
+
 @pytest.mark.parametrize(
     ("path", "loads"),
     [("hooks/readme.txt", False), ("hooks/hooks.json", True), ("settings.json", True)],
@@ -566,3 +598,37 @@ def test_claude_code_reads_its_manifest_more_leniently_than_strict_json(
     assert s["claude-code"] == claude_code
     assert plugin_facts(root)["invalid_claude"]
     assert s["openclaw"] == (("loads", []) if openclaw_loads else ("not_loaded", ["OW-PLUGIN-MANIFEST-INVALID"]))
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_claude_code_rejects_nonstandard_constants_that_openclaw_json5_accepts(
+    tmp_path: Path, encoding: str, constant: str
+):
+    root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json")
+    (root / ".claude-plugin/plugin.json").write_text('{"name":"demo","x":' + constant + "}", encoding=encoding)
+    statuses = _status(root)
+    assert statuses["claude-code"] == ("not_loaded", ["CC-PLUGIN-MANIFEST-INVALID"])
+    assert statuses["openclaw"] == ("loads", [])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX directory permissions")
+@pytest.mark.parametrize("unreadable", [".codex-plugin/plugin.json", "hooks/hooks.json"])
+def test_harness_check_skips_paths_beneath_unsearchable_directories(tmp_path: Path, unreadable: str):
+    root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json")
+    _manifest(root, unreadable, VALID)
+    folder = (root / unreadable).parent
+    report = tmp_path / "report.json"
+    original_mode = folder.stat().st_mode
+    folder.chmod(0)
+    try:
+        if os.access(folder, os.X_OK):
+            pytest.skip("filesystem or account permits access despite directory mode")
+        result = CliRunner().invoke(
+            cli, ["harness-check", str(root), "--harness", "claude-code,openclaw", "--json", str(report)]
+        )
+        assert result.exit_code == 0, result.exception
+        rows = json.loads(report.read_text())["harness_compatibility"][f"{root} (plugin)"]
+        assert {row["harness"]: row["status"] for row in rows} == {"claude-code": "loads", "openclaw": "loads"}
+    finally:
+        folder.chmod(original_mode)

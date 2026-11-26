@@ -38,11 +38,11 @@ All notable changes to SkillEvaluator are documented in this file.
   components in manifests with a UTF-8 byte order mark. For OpenClaw, the
   panel checks declared native package extensions before client bundles, checks
   the first present Codex, Cursor, or Claude manifest as JSON5, and accounts
-  for native root entrypoint fallback when that bundle fails, including links
-  to regular files within the plugin. The panel
-  recognizes folders containing only the native OpenClaw plugin manifest
-  and reports native compatibility as unchecked. MCP notes apply across
-  OpenClaw bundle formats. The panel requires a recognized plugin manifest.
+  for native root entrypoint fallback when that bundle fails, including
+  symlinks to in-plugin regular files with a single hard link. The panel
+  recognizes the native OpenClaw manifest on its own and reports native
+  compatibility as unchecked. MCP notes apply across OpenClaw bundle
+  formats. The panel requires a recognized plugin manifest.
 
 ### Documentation
 

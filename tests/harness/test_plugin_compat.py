@@ -508,10 +508,20 @@ def test_openclaw_reports_a_selected_nonregular_manifest(tmp_path: Path):
 
 
 @pytest.mark.parametrize("rel", [".codex-plugin/plugin.json", "plugin.json"])
-def test_openclaw_reports_a_manifest_that_reaches_the_local_nesting_limit(tmp_path: Path, rel: str):
-    nested = '{"name":"demo","$schema":"' + AGENT_V1 + '","x":' + "[" * 50_000 + "]" * 50_000 + "}"
-    assert len(nested.encode()) < PLUGIN_CONFIG_MAX_BYTES
-    root = _manifest(tmp_path / "p", rel, nested)
+def test_openclaw_reports_a_manifest_that_reaches_the_local_nesting_limit(
+    tmp_path: Path, rel: str, monkeypatch: pytest.MonkeyPatch
+):
+    manifest = json.dumps({"name": "demo", "$schema": AGENT_V1})
+    json_loads = json.loads
+
+    def loads(source, **kwargs):
+        # CPython versions differ in where their JSON decoder reaches a nesting limit.
+        if source == manifest:
+            raise RecursionError("OpenClaw manifest decoder reached its nesting limit")
+        return json_loads(source, **kwargs)
+
+    monkeypatch.setattr(json, "loads", loads)
+    root = _manifest(tmp_path / "p", rel, manifest)
     result = _openclaw(root)
     assert result.status == "degraded"
     assert [finding["id"] for finding in result.findings] == ["OW-PLUGIN-MANIFEST-UNCHECKED"]
@@ -545,6 +555,38 @@ def test_openclaw_default_markers_match_bundle_discovery(tmp_path: Path, path: s
     assert ("OW-PLUGIN-FORMAT" in ids) is not loads
     if path == "settings.json":
         assert "OW-PLUGIN-NO-COMPONENTS" not in ids
+
+
+@pytest.mark.parametrize("entry", ["index.ts", "index.js", "index.mjs", "index.cjs"])
+def test_openclaw_default_entry_suppresses_bundle_markers(tmp_path: Path, entry: str):
+    root = _plugin(tmp_path / "p", ".github/plugin/plugin.json")
+    _manifest(root, "settings.json", "{}")
+    _manifest(root, entry, "// Benign entrypoint")
+    assert _status(root)["openclaw"] == ("not_loaded", ["OW-PLUGIN-NATIVE-MANIFEST-MISSING"])
+
+
+@pytest.mark.parametrize(
+    ("client_manifest", "native_manifest", "portable_manifest", "expected"),
+    [
+        (False, False, False, ("not_loaded", ["OW-PLUGIN-NATIVE-MANIFEST-MISSING"])),
+        (True, False, False, ("degraded", ["OW-PLUGIN-COMMANDS"])),
+        (False, False, True, ("degraded", ["OW-PLUGIN-COMMANDS"])),
+        (True, True, False, ("degraded", ["OW-PLUGIN-COMMANDS"])),
+        (False, True, True, ("degraded", ["OW-PLUGIN-NATIVE-UNCHECKED"])),
+    ],
+)
+def test_openclaw_manifest_precedence_with_native_entry(
+    tmp_path: Path, client_manifest: bool, native_manifest: bool, portable_manifest: bool, expected
+):
+    root = _plugin(tmp_path / "p", ".github/plugin/plugin.json", components=("skills", "commands"))
+    _manifest(root, "index.js", "module.exports = function register() {};")
+    if client_manifest:
+        _manifest(root, ".codex-plugin/plugin.json", VALID)
+    if native_manifest:
+        _manifest(root, "openclaw.plugin.json", '{"id":"demo","configSchema":{"type":"object"}}')
+    if portable_manifest:
+        _manifest(root, "plugin.json", json.dumps({"name": "demo", "$schema": AGENT_V1}))
+    assert _status(root)["openclaw"] == expected
 
 
 @pytest.mark.parametrize("schema", [None, AGENT_V1, "https://agent-plugins.org/schemas/9.9.0/plugin.schema.json"])

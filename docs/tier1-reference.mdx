@@ -310,7 +310,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     The Claude Code row checks its JSON manifest and requires a usable `name` without spaces or other forbidden characters. When a recognized plugin has no Claude Code manifest, the row checks `skills/`, `commands/`, `agents/`, `hooks/`, `.mcp.json`, and `.lsp.json`.
 
-    The OpenClaw bundle row checks the first present manifest in Codex, Cursor, then Claude order and expects a JSON5 object. A broken selected manifest stops bundle discovery. A portable root `plugin.json` must declare the Agent Plugins 1.0.0 schema and include a non-blank `name`. The default bundle markers are `skills/`, `commands/`, `agents/`, `hooks/hooks.json`, `.mcp.json`, `.lsp.json`, and `settings.json`.
+    The OpenClaw bundle row checks the first present manifest in Codex, Cursor, then Claude order and expects a JSON5 object. A broken selected manifest stops bundle discovery. Next, `openclaw.plugin.json` selects native discovery. A portable root `plugin.json` must declare the Agent Plugins 1.0.0 schema and include a non-blank `name`. When none of those manifests is selected, a root `index.ts`, `index.js`, `index.mjs`, or `index.cjs` selects native discovery and requires `openclaw.plugin.json`. The bundle row reports native compatibility as unchecked when that manifest is present. The default bundle markers are `skills/`, `commands/`, `agents/`, `hooks/hooks.json`, `.mcp.json`, `.lsp.json`, and `settings.json`.
 
     Plugin component rules cover skill namespacing, Codex's plugin-skill cap and Agent Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a harness registers but doesn't deliver.
 

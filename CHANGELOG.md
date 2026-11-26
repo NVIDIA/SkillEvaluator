@@ -37,9 +37,10 @@ All notable changes to SkillEvaluator are documented in this file.
   from missing manifests, checks plugin names, and recognizes declared
   components in manifests with a UTF-8 byte order mark. For OpenClaw, the
   panel checks the first present Codex, Cursor, or Claude manifest as JSON5
-  and recognizes the loader's default bundle markers. MCP notes apply across
-  OpenClaw bundle formats. The panel requires the checked folder to contain
-  a recognized plugin manifest.
+  and respects native discovery precedence before accepting default bundle
+  markers. Native compatibility requires a separate check in OpenClaw. MCP
+  notes apply across OpenClaw bundle formats. The panel requires the checked
+  folder to contain a recognized plugin manifest.
 
 ### Documentation
 

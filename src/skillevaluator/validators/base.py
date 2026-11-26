@@ -327,6 +327,7 @@ class ValidatorBase(ABC):
             skill_name = skill_dir.name
 
             if skill_result.passed:
+                result.summary.files_scanned += skill_result.summary.files_scanned
                 # Collect detailed check information from the skill result
                 check_details = [
                     {

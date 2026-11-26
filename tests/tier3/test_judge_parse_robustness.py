@@ -498,6 +498,8 @@ def test_template_last_resort_judge_follows_the_selected_provider(judge_env, pro
         "claude-opus-5-5",
         "claude-sonnet-5-5",
         "us.anthropic.claude-opus-5-5",
+        "apac.anthropic.claude-opus-5-5",
+        "us-gov.anthropic.claude-sonnet-5-5",
         "aws/anthropic/bedrock-claude-opus-5",
         "aws/anthropic/bedrock-claude-opus-5-5",
         "claude-3-5-sonnet-20241022",
@@ -922,7 +924,15 @@ def test_template_openai_refusal_or_empty_reply_tries_the_fallback_model(judge_e
     assert (content, error, provenance["model"]) == ("Done", None, "fallback-model")
 
 
-@pytest.mark.parametrize("model", ["us.anthropic.claude-opus-5-5", "eu.anthropic.claude-sonnet-5-5"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "us.anthropic.claude-opus-5-5",
+        "eu.anthropic.claude-sonnet-5-5",
+        "apac.anthropic.claude-opus-5-5",
+        "us-gov.anthropic.claude-sonnet-5-5",
+    ],
+)
 def test_template_bedrock_classifier_refusal_retries_on_opus_4_8(monkeypatch, model):
     import boto3
 

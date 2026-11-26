@@ -208,20 +208,22 @@ Missing required scanner evidence is reported as `INCOMPLETE`.
 <Accordion title="Preinstall or troubleshoot security scanners">
   Tier 1 verifies the SHA-256 checksums of its downloaded scanners. PyPI 0.9.0
   pins SkillSpector 2.13.3, and SkillEvaluator 1.0.1 pins 2.13.4. The current
-  GitHub source pins SkillSpector 2.13.6. All three pin Gitleaks 8.30.0.
+  GitHub source provisions SkillSpector 2.13.7. All three pin Gitleaks 8.30.0.
   In 1.0.1, uv is installed with SkillEvaluator as a base dependency
   and runs SkillSpector in its own environment. PyPI 0.9.0 needs uv installed
   separately, as shown above. An existing uv on PATH is used first.
 
-  SkillEvaluator 1.0.1 and the current GitHub source use an automatically discovered
-  SkillSpector when it matches the pinned version. Otherwise they provision the
-  pinned release. Explicit scanner path overrides are checked separately.
+  SkillEvaluator 1.0.1 uses an automatically discovered SkillSpector when it
+  matches the pinned version. The current GitHub source accepts automatically
+  discovered stable versions 2.13.7 or newer. If no eligible installation is
+  found, SkillEvaluator provisions its pinned release. Use
+  `SKILLEVALUATOR_SKILLSPECTOR_PATH` to select an executable explicitly.
   To preinstall the scanners for a GitHub source install, run the following commands.
   For a published SkillEvaluator release, use its corresponding SkillSpector version above.
 
   ```bash title="Optional scanner installation"
   uv tool install semgrep
-  uv tool install --python 3.13 git+https://github.com/NVIDIA/SkillSpector.git@v2.13.6
+  uv tool install --python 3.13 git+https://github.com/NVIDIA/SkillSpector.git@v2.13.7
   brew install gitleaks
   ```
 

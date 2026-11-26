@@ -12,19 +12,19 @@ import sys
 import urllib.error
 import urllib.request
 
-from url_safety import validate_http_url
+from url_safety import join_url_path, resolve_openapi_server_url, validate_http_url
 
 
-def fetch_spec(url: str) -> dict:
-    """Fetch OpenAPI spec from URL."""
+def fetch_spec(url: str) -> tuple[dict, str]:
+    """Fetch OpenAPI spec from URL. Returns the spec and its final URL after redirects."""
     try:
         req = urllib.request.Request(validate_http_url(url), headers={"User-Agent": "api-caller/1.0"})
         # validate_http_url() rejects non-HTTP schemes before this request.
         with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
             content = response.read().decode("utf-8")
-            return json.loads(content)
+            return json.loads(content), getattr(response, "url", None) or url
     except Exception as e:
-        return {"error": f"Failed to fetch spec: {e!s}"}
+        return {"error": f"Failed to fetch spec: {e!s}"}, url
 
 
 def parse_parameters(params: list) -> list:
@@ -80,15 +80,10 @@ def parse_request_body(body: dict) -> dict:
     return {"type": schema.get("type", "object")}
 
 
-def parse_spec(spec: dict, filter_path: str | None = None) -> dict:
+def parse_spec(spec: dict, filter_path: str | None = None, spec_url: str | None = None) -> dict:
     """Parse OpenAPI spec and extract operations."""
     info = spec.get("info", {})
-    base_url = ""
-
-    # Get base URL from servers
-    servers = spec.get("servers", [])
-    if servers:
-        base_url = servers[0].get("url", "")
+    base_url = resolve_openapi_server_url(spec, spec_url)
 
     paths = spec.get("paths", {})
     operations = []
@@ -97,9 +92,11 @@ def parse_spec(spec: dict, filter_path: str | None = None) -> dict:
         # Optional: filter by path substring
         if filter_path and filter_path.lower() not in path.lower():
             continue
+        if not isinstance(methods, dict):
+            continue
 
         for method, details in methods.items():
-            if method in ["get", "post", "put", "delete", "patch"]:
+            if method in ["get", "post", "put", "delete", "patch"] and isinstance(details, dict):
                 parameters = details.get("parameters", [])
                 path_parameters = methods.get("parameters", [])
                 if (
@@ -121,11 +118,22 @@ def parse_spec(spec: dict, filter_path: str | None = None) -> dict:
                 op = {
                     "method": method.upper(),
                     "path": path,
-                    "full_url": f"{base_url}{path}" if base_url else path,
-                    "operation_id": details.get("operationId", ""),
-                    "summary": details.get("summary", "")[:100],
-                    "parameters": parse_parameters(parameters),
                 }
+                try:
+                    operation_base_url = resolve_openapi_server_url(
+                        spec, spec_url, path_item=methods, operation=details
+                    )
+                except ValueError as exc:
+                    op["error"] = str(exc)
+                else:
+                    op["full_url"] = join_url_path(operation_base_url, path)
+                op.update(
+                    {
+                        "operation_id": details.get("operationId", ""),
+                        "summary": details.get("summary", "")[:100],
+                        "parameters": parse_parameters(parameters),
+                    }
+                )
 
                 # Parse request body for POST/PUT/PATCH
                 if method in ["post", "put", "patch"]:
@@ -162,13 +170,17 @@ def main():
     filter_path = sys.argv[2] if len(sys.argv) > 2 else None
 
     # Fetch the spec
-    spec = fetch_spec(spec_url)
+    spec, final_url = fetch_spec(spec_url)
     if "error" in spec:
         print(json.dumps(spec, indent=2), file=sys.stderr)
         sys.exit(1)
 
     # Parse and return operations
-    result = parse_spec(spec, filter_path)
+    try:
+        result = parse_spec(spec, filter_path, spec_url=final_url)
+    except ValueError as exc:
+        print(json.dumps({"error": f"Invalid input: {exc}"}, indent=2), file=sys.stderr)
+        sys.exit(1)
     print(json.dumps(result, indent=2))
 
 

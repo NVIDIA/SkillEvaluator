@@ -1,7 +1,7 @@
 {
   "repository": "NVIDIA/SkillEvaluator",
-  "workflow_ref": "c9369a7811bde083b550f2ac488222e8c388d7fd",
-  "publisher_ref": "c9369a7811bde083b550f2ac488222e8c388d7fd",
-  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:fbff256df8f760019539d442b7cb533d7ec50efab37f4482b7b670e2e4b4189a",
+  "workflow_ref": "fd6852ddc945c49d003a0898edef4933184d8fb3",
+  "publisher_ref": "fd6852ddc945c49d003a0898edef4933184d8fb3",
+  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:459f7ab610d3c8a5afff5a3a602ae432fb5644e65a7e3c9a9ca9f89cff723399",
   "schema_version": 1
 }

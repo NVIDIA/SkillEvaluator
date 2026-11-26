@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from skillevaluator.reporting.plugin_runtime import SCHEMA_VERSION, SECTIONS, RuntimePluginReport
-from skillevaluator.reporting.plugin_static import MAX_OUTPUT_BYTES, _clean_text, _number
+from skillevaluator.reporting.plugin_static import MAX_OUTPUT_BYTES, _clean_text, _count, _number
 from skillevaluator.utils.secure_fs import SecureRoot
 from skillevaluator.utils.structured_data import load_bounded_json
 
@@ -99,12 +99,7 @@ def _validate(payload: object) -> RuntimePluginReport:
             raise ValueError("Invalid runtime report notes")
         section["notes"] = [settle(note) for note in notes]
         total, omitted = section.get("total"), section.get("omitted")
-        if (
-            type(total) is not int
-            or type(omitted) is not int
-            or not 0 <= omitted <= total
-            or total != len(rows) + omitted
-        ):
+        if _count(total) is None or _count(omitted) is None or total != len(rows) + omitted:
             raise ValueError("Invalid runtime report omission counts")
         row_count += len(rows)
     if row_count > 256:

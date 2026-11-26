@@ -244,3 +244,35 @@ def test_call_api_omits_body_only_when_data_is_absent(monkeypatch: pytest.Monkey
     assert result["success"] is True
     assert len(requests) == 1
     assert requests[0].data is None
+
+
+@pytest.mark.parametrize(
+    ("headers", "content_type"),
+    [
+        (None, "application/json"),
+        ({"Authorization": "Bearer TOKEN"}, "application/json"),
+        ({"Content-Type": "application/merge-patch+json"}, "application/merge-patch+json"),
+        ({"content-type": "application/vnd.api+json"}, "application/vnd.api+json"),
+    ],
+    ids=["default", "other-headers", "custom", "lowercase-name"],
+)
+def test_call_api_keeps_caller_content_type_for_json_bodies(
+    headers: dict[str, str] | None,
+    content_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script("call_api")
+    requests: list[object] = []
+
+    def fake_urlopen(request: object, *, timeout: int):
+        requests.append(request)
+        return _SuccessfulResponse()
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    result = module.make_request("https://example.invalid", method="PATCH", data={"name": "test"}, headers=headers)
+
+    assert result["success"] is True
+    assert len(requests) == 1
+    assert requests[0].get_header("Content-type") == content_type
+    assert requests[0].data == b'{"name": "test"}'

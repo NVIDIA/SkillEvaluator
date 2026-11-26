@@ -941,7 +941,7 @@ class LLMClient:
                         **({"aws_bedrock_runtime_endpoint": endpoint} if endpoint else {}),
                         **({"api_key": ""} if ignore_blank_token else {}),
                         **_temperature_kwargs(config.model, self._temperature),
-                        **({"max_tokens": max_tokens} if max_tokens is not None else {}),
+                        **_token_limit_kwargs(config, max_tokens),
                         **({"timeout": self._timeout} if self._timeout is not None else {}),
                     )
                 return _extract_choice_content(response)

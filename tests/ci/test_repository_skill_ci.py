@@ -11,8 +11,8 @@ import yaml
 ROOT = Path(__file__).parents[2]
 SCAN = ".github/workflows/skill-checks-all-tiers.yml"
 FEEDBACK = ".github/workflows/skill-feedback-all-tiers.yml"
-# Reviewed support commit on main; runtime and image retain their release pins.
-REVIEWED_PRODUCER_WORKFLOW_REF = "bf44a24704833083c556feb0b433ab0d647c3826"
+# Reviewed reusable workflow revision for this repository's caller.
+REVIEWED_PRODUCER_WORKFLOW_REF = "fd6852ddc945c49d003a0898edef4933184d8fb3"
 
 
 def workflow(path):

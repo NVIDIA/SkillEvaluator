@@ -122,6 +122,11 @@ from skillevaluator.tier3.harbor.collector import (
     harbor_timeout_job_recovered,
     validate_harbor_job_result,
 )
+from skillevaluator.tier3.harbor.endpoint_failure import (
+    detect_model_endpoint_failure,
+    endpoint_failure_warning,
+    provider_hosts,
+)
 from skillevaluator.tier3.harbor.gke_environment import (
     GKE_ALLOW_WORKLOAD_IDENTITY_ENV,
     GKE_BOUND_SERVICE_ACCOUNT_ERROR_TEMPLATE,
@@ -2620,8 +2625,13 @@ def _check_prerequisites(
     environment_kwargs: Mapping[str, Any] | None = None,
     verify_live_cluster: bool = False,
     subprocess_env: Mapping[str, str] | None = None,
+    agent_models: Mapping[str, Sequence[str]] | None = None,
 ) -> list[str]:
-    """Check Harbor and the selected environment (built-in, backend, GKE, or local mode)."""
+    """Check Harbor and the selected environment (built-in, backend, GKE, or local mode).
+
+    ``agent_models`` maps an agent to the models it will run; local mode checks
+    the installed agent CLIs against them before any trial starts.
+    """
     if not is_env_mode(env_mode):
         return [
             f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(_supported_env_modes()))}"
@@ -2752,7 +2762,9 @@ def _check_prerequisites(
             return [f"Local mode supports only claude-code, codex, opencode. Unsupported: {', '.join(unsupported)}."]
         try:
             strict_reads = local_sandbox.coerce_flag(None, env_var=local_sandbox.STRICT_READS_ENV)
-            return ensure_local_runtimes(selected_agents, sandbox=sandbox, strict_reads=strict_reads)
+            return ensure_local_runtimes(
+                selected_agents, sandbox=sandbox, strict_reads=strict_reads, agent_models=agent_models
+            )
         except ValueError as exc:
             return [f"Invalid local runtime configuration: {exc}"]
 
@@ -4550,8 +4562,10 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
         merged_trial_results: list[TrialResult] = []
         source_started_at: list[datetime] = []
         source_updated_at: list[datetime] = []
+        source_job_provenance: list[dict[str, str]] = []
         used_trial_names: set[str] = set()
         for source_index, (job_name, job_dir) in enumerate(snapshots):
+            source_identity = {"name": job_name}
             try:
                 source_job_result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
@@ -4562,12 +4576,14 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
                 except Exception:
                     source_job_model = None
                 if source_job_model is not None:
+                    source_identity["id"] = str(source_job_model.id)
                     source_started_at.append(_utc_aware_datetime(source_job_model.started_at))
                     source_updated_at.append(
                         _utc_aware_datetime(
                             source_job_model.updated_at or source_job_model.finished_at or source_job_model.started_at
                         )
                     )
+            source_job_provenance.append(source_identity)
             root_trial_results: dict[str, dict[str, Any]] = {}
             if isinstance(source_job_result, dict) and isinstance(source_job_result.get("trial_results"), list):
                 for candidate in source_job_result["trial_results"]:
@@ -4737,6 +4753,23 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
             aggregate_result.model_dump_json(indent=2),
             encoding="utf-8",
         )
+        # Harbor's analyzer identifies job directories by job.log. Record the
+        # real aggregation provenance without implying another agent execution.
+        (staged_aggregate / "job.log").write_text(
+            json.dumps(
+                {
+                    "kind": "skillevaluator_retained_aggregate",
+                    "job_name": aggregate_path.name,
+                    "job_id": str(aggregate_job_id),
+                    "execution": "Trials retained from source jobs; no independent Harbor execution.",
+                    "n_total_trials": aggregate_total_trials,
+                    "source_jobs": source_job_provenance,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         copytree_secure(
             staged_aggregate,
             aggregate_path,
@@ -4761,13 +4794,31 @@ def _counts_as_judge_call(attempt: object) -> bool:
     return not (method == "ragas" and "prompt_sha256" in attempt)
 
 
+def _valid_budget_metric(value: Any, *, integer: bool = False) -> bool:
+    """Reject malformed usage before summing it or converting it to a float."""
+    if type(value) not in ((int,) if integer else (int, float)) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _budget_usage(job_dir: Path) -> dict[str, Any]:
     """Read attempt usage from Harbor's retained trajectory and judge artifacts."""
     usage: dict[str, Any] = {}
-    for trajectory_path in job_dir.glob("**/trajectory.json"):
+    tokens_complete = True
+    cost_complete = True
+    trajectory_paths = (
+        path
+        for pattern in ("*/agent/trajectory.json", "*/steps/*/agent/trajectory.json", "*/trajectory.json")
+        for path in job_dir.glob(pattern)
+    )
+    for trajectory_path in trajectory_paths:
         try:
             payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            tokens_complete = cost_complete = False
             continue
         final_metrics = payload.get("final_metrics", {}) if isinstance(payload, dict) else {}
         if isinstance(final_metrics, dict):
@@ -4775,25 +4826,50 @@ def _budget_usage(job_dir: Path) -> dict[str, Any]:
             completion = final_metrics.get("total_completion_tokens")
             cached = final_metrics.get("total_cached_tokens")
             cost = final_metrics.get("total_cost_usd")
-            if isinstance(prompt, int) and isinstance(completion, int):
+            if _valid_budget_metric(prompt, integer=True) and _valid_budget_metric(completion, integer=True):
                 usage["input_tokens"] = usage.get("input_tokens", 0) + prompt
                 usage["output_tokens"] = usage.get("output_tokens", 0) + completion
-                if isinstance(cached, int) and not isinstance(cached, bool):
+                if _valid_budget_metric(cached, integer=True):
                     usage["cached_input_tokens"] = usage.get("cached_input_tokens", 0) + cached
-            if isinstance(cost, int | float) and not isinstance(cost, bool):
+            else:
+                tokens_complete = False
+            if _valid_budget_metric(cost):
                 usage["cost_usd"] = usage.get("cost_usd", 0.0) + float(cost)
+            else:
+                cost_complete = False
+        else:
+            tokens_complete = cost_complete = False
+
+    token_keys = ("input_tokens", "output_tokens", "cached_input_tokens")
+    if not tokens_complete or any(
+        not _valid_budget_metric(usage[key], integer=True) for key in token_keys if key in usage
+    ):
+        for key in token_keys:
+            usage.pop(key, None)
+    if not cost_complete or ("cost_usd" in usage and not _valid_budget_metric(usage["cost_usd"])):
+        usage.pop("cost_usd", None)
+
     judge_calls = 0
     saw_judge_artifact = False
-    for artifact_path in job_dir.glob("**/judge_attempts.json"):
+    judge_complete = True
+    judge_paths = (
+        path
+        for pattern in ("*/verifier/judge_attempts.json", "*/steps/*/verifier/judge_attempts.json")
+        for path in job_dir.glob(pattern)
+    )
+    for artifact_path in judge_paths:
         saw_judge_artifact = True
         try:
             payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            judge_complete = False
             continue
         attempts = payload.get("attempts") if isinstance(payload, dict) else payload
-        if isinstance(attempts, list):
+        if isinstance(attempts, list) and all(isinstance(attempt, dict) for attempt in attempts):
             judge_calls += sum(1 for attempt in attempts if _counts_as_judge_call(attempt))
-    if saw_judge_artifact:
+        else:
+            judge_complete = False
+    if saw_judge_artifact and judge_complete:
         usage["judge_calls"] = judge_calls
     return usage
 
@@ -5530,13 +5606,21 @@ def _run_harbor_eval_impl(
             reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
             return {"error": [str(exc)]}
 
+    from skillevaluator.tier3.plugin_execution import runtime_source_path
+
+    publication_source = runtime_source_path(skill_path)
+    publication_name = (
+        _snapshot_publication_target.get("skill_name", publication_source.name)
+        if _snapshot_publication_target and publication_source != skill_path
+        else publication_source.name
+    )
     if _evaluator_skill_path is None:
         assert forwarded is not None
         forwarded.pop("skill_path")
         forwarded.pop("agents")
         with ExitStack() as snapshot_stack:
             try:
-                snapshot_publication_target = publication_target_from_path(skill_path)
+                snapshot_publication_target = publication_target_from_path(publication_source)
                 evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
                 snapshot_config, _ = load_evals_config(evaluator_skill_path)
                 snapshot_workspace = snapshot_config.get("skill_workspace", {})
@@ -5567,7 +5651,7 @@ def _run_harbor_eval_impl(
                     forwarded["_decoy_workspace_paths"] = [*manual, *frozen]
                     forwarded["_decoy_workspace_source_paths"] = source_paths
                     forwarded["_decoy_manifest"] = manifest
-                if publication_target_from_path(skill_path) != snapshot_publication_target:
+                if publication_target_from_path(publication_source) != snapshot_publication_target:
                     raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
                 reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
@@ -5587,6 +5671,15 @@ def _run_harbor_eval_impl(
         return {"error": [str(exc)]}
 
     harbor_config = config.get("harbor", {})
+    if _private_runtime_hooks() is None:
+        plugin_controls = [f"plugin.{name}" for name in sorted(config.get("plugin", {}))]
+        if harbor_config.get("trial_retries"):
+            plugin_controls.append("harbor.trial_retries")
+        if plugin_controls:
+            logger.warning(
+                "Only prepared plugin runs use these settings. The skill run ignores %s.",
+                ", ".join(plugin_controls),
+            )
     workspace_config = config.get("skill_workspace", {})
     grading_config = config.get("grading", {})
     n_attempts = n_attempts if n_attempts is not None else harbor_config.get("n_attempts", 1)
@@ -5765,6 +5858,7 @@ def _run_harbor_eval_impl(
         agents=agents,
         environment_kwargs=effective_environment_kwargs,
         subprocess_env=prerequisite_subprocess_env,
+        agent_models={agent: [model_resolution[agent]["model"]] for agent in agents},
     )
     if prereq_errors:
         reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
@@ -6117,7 +6211,7 @@ def _run_harbor_eval_impl(
             if isinstance(reason_code, str):
                 conflict["reason_code"] = reason_code
             return {"publication_target": None, "publication_target_conflict": conflict}
-        run_end_target = publication_target_from_path(skill_path)
+        run_end_target = publication_target_from_path(publication_source)
         if run_end_target == publication_target:
             return {
                 "publication_target": dict(publication_target) if publication_target is not None else None,
@@ -6151,7 +6245,7 @@ def _run_harbor_eval_impl(
         """Retain redacted probe provenance for failures after run reservation."""
         published_errors, error_total = _published_execution_errors(errors)
         failed_result: dict[str, Any] = {
-            "skill_name": skill_path.name,
+            "skill_name": publication_name,
             "execution_status": "failed",
             "execution_errors": published_errors,
             "execution_error_details_total": error_total,
@@ -6427,7 +6521,7 @@ def _run_harbor_eval_impl(
         )
 
     if not _runtime_context_is_bound_to_publication_target(
-        skill_path,
+        publication_source,
         staged_task_paths,
         reference_skills_dir=reference_skills_dir,
         workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
@@ -6541,24 +6635,24 @@ def _run_harbor_eval_impl(
     run_config["budget"] = budget.metadata()
     variants = 2 - int(skip_baseline) - int(skip_with_skill)
     matrix_trials = expected_trials * sum(variants + len(additional_arms.get(agent, ())) for agent in agents)
+    arm_jobs = {
+        agent: {
+            **({"with_skill": jobs_dir / f"{skill_path.name}-{agent}-with"} if not skip_with_skill else {}),
+            **({"without_skill": jobs_dir / f"{skill_path.name}-{agent}-without"} if not skip_baseline else {}),
+            **{
+                {"sumofparts": "sum_of_parts", "looseparts": "loose_parts"}[variant]: jobs_dir
+                / f"{skill_path.name}-{agent}-{variant}"
+                for variant, _, _ in additional_arms.get(agent, ())
+            },
+        }
+        for agent in agents
+    }
     try:
         if comparison_plan is not None:
             comparison_plan.bind_execution(
                 case_ids, n_attempts=n_attempts, stop_on_pass=bool(stop_on_pass), pass_threshold=float(pass_threshold)
             )
-            jobs = {
-                agent: {
-                    **({"with_skill": jobs_dir / f"{skill_path.name}-{agent}-with"} if not skip_with_skill else {}),
-                    **({"without_skill": jobs_dir / f"{skill_path.name}-{agent}-without"} if not skip_baseline else {}),
-                    **{
-                        {"sumofparts": "sum_of_parts", "looseparts": "loose_parts"}[variant]: jobs_dir
-                        / f"{skill_path.name}-{agent}-{variant}"
-                        for variant, _, _ in additional_arms.get(agent, ())
-                    },
-                }
-                for agent in agents
-            }
-            private_hooks.configure_run(case_id_by_task_selector=case_id_by_task_selector, arm_jobs=jobs)
+            private_hooks.configure_run(case_id_by_task_selector=case_id_by_task_selector, arm_jobs=arm_jobs)
             run_config["private_comparisons"] = comparison_plan.run_config()
     except (OSError, ValueError) as exc:
         return _persist_pre_execution_failure([str(exc)])
@@ -6822,7 +6916,7 @@ def _run_harbor_eval_impl(
             "baseline": baseline,
             "comparison_identity": identity,
             "expected_case_ids": case_ids,
-            "skill_name": skill_path.name,
+            "skill_name": publication_name,
             "run_id": run_id,
             **_run_owned_publication_fields(),
             "run_dir": str(run_dir),
@@ -6844,6 +6938,17 @@ def _run_harbor_eval_impl(
             "partial": bool(budget.not_run),
         }
     )
+    if endpoint_diagnostic := detect_model_endpoint_failure(
+        job_dir for agent_jobs in arm_jobs.values() for job_dir in agent_jobs.values()
+    ):
+        results["model_endpoint_diagnostic"] = endpoint_diagnostic
+        results.setdefault("warnings", []).append(
+            endpoint_failure_warning(
+                endpoint_diagnostic,
+                env_mode=env_mode,
+                hosts=provider_hosts(runtime_plans[agent].provider.base_url for agent in agents),
+            )
+        )
     from skillevaluator.evaluation.tier3_report import (
         _agent_score_policy,
         _build_agent,

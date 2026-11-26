@@ -149,10 +149,15 @@ class ProgressReporter(Protocol):
 
 def redact_progress_detail(detail: object, *, secret_values: set[str] | None = None) -> str:
     """Return a single-line diagnostic safe enough for a progress surface."""
-    text = " ".join(strip_terminal_controls(str(detail)).split())
+    raw = str(detail)
+    secrets = sorted(secret_values or (), key=len, reverse=True)
+    for secret in secrets:
+        if secret and secret != " ".join(strip_terminal_controls(secret).split()):
+            raw = raw.replace(secret, "<redacted>")
+    text = " ".join(strip_terminal_controls(raw).split())
     if "://" in text:
         text = _CREDENTIAL_URI_USERINFO_RE.sub(r"\g<scheme><redacted>@", text)
-    for secret in sorted(secret_values or (), key=len, reverse=True):
+    for secret in secrets:
         if len(secret) >= MIN_EXACT_SECRET_CHARS:
             text = text.replace(secret, "<redacted>")
         elif secret:

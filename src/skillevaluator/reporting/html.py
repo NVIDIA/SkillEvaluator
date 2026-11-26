@@ -35,7 +35,7 @@ from functools import cache
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from jinja2 import BaseLoader, Environment, pass_context
 
@@ -109,12 +109,13 @@ from skillevaluator.reporting.presentation import (
 )
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
 from skillevaluator.reporting.telemetry_view import build_telemetry_view
-from skillevaluator.reporting.tier2_views import tier2_scope_views
+from skillevaluator.reporting.tier2_views import is_catalog_setup_record, tier2_scope_views
 from skillevaluator.reporting.tier3_scope import (
     completed_agent_result,
     tolerated_baseline_agents,
     validate_report_scope,
 )
+from skillevaluator.reporting.tier3_statistics import statistics_section
 from skillevaluator.reporting.tier3_token_usage import token_usage_table
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
@@ -2268,6 +2269,7 @@ class HTMLReporter(ReporterBase):
         environment.filters["related_paths"] = _related_paths
         environment.filters["finding_verification"] = finding_verification
         environment.filters["additional_errors"] = additional_errors
+        environment.filters["catalog_setup_record"] = is_catalog_setup_record
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         environment.filters["skip_reason"] = get_skip_reason
@@ -2901,7 +2903,7 @@ class HTMLReporter(ReporterBase):
         if not url or not url.startswith("https://"):
             return url or ""
         parsed = urlparse(url)
-        path = parsed.path.lstrip("/")
+        path = unquote(parsed.path).lstrip("/")
         if "/-/tree/" in path:
             repo_part, _, rest = path.partition("/-/tree/")
             branch_and_path = rest.split("/", 1)
@@ -2938,7 +2940,7 @@ class HTMLReporter(ReporterBase):
         path = target
         if path.startswith("https://"):
             parsed = urlparse(path)
-            path = parsed.path.lstrip("/")
+            path = unquote(parsed.path).lstrip("/")
             if "/-/tree/" in path:
                 _repo, _, rest = path.partition("/-/tree/")
                 branch_and_path = rest.split("/", 1)
@@ -4019,6 +4021,7 @@ class HTMLReporter(ReporterBase):
             tier3_token_usage=token_usage_table(
                 tier3_data.get("token_usage") if isinstance(tier3_data, dict) else None
             ),
+            tier3_statistics=statistics_section(tier3_data.get("agents") if isinstance(tier3_data, dict) else None),
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.
             steps_by_case_chart=steps_by_case_chart(

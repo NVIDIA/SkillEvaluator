@@ -29,7 +29,7 @@ def test_required_tier1_reuses_hardened_workflow_and_parallel_paid_tiers():
     assert workflow["jobs"]["tier1"]["uses"] == "./.github/workflows/evaluate-skills.yml"
     paid = workflow["jobs"]["paid-tiers"]
     assert paid["strategy"]["fail-fast"] == "false"
-    assert paid["strategy"]["matrix"]["tier"] == ["2", "3"]
+    assert paid["strategy"]["matrix"]["tier"] == "${{ fromJSON(needs.eligibility.outputs.paid-tiers) }}"
     # Existing consumers retain deployment tracking and custom protection apps.
     assert inputs["environment-deployment"]["type"] == "boolean"
     assert inputs["environment-deployment"]["default"] == "true"
@@ -86,7 +86,7 @@ def test_aggregate_reuses_tier_evidence_from_jobs_not_rerun():
         s["with"]["name"].replace("${{ matrix.tier }}", tier)
         for s in workflow["jobs"]["paid-tiers"]["steps"]
         if s.get("uses", "").startswith("actions/upload-artifact@")
-        for tier in workflow["jobs"]["paid-tiers"]["strategy"]["matrix"]["tier"]
+        for tier in ("2", "3")
     ]
     produced += [s["with"]["name"] for s in steps if s.get("uses", "").startswith("actions/upload-artifact@")]
     for attempt in ("1", "2", "12"):
@@ -289,12 +289,62 @@ def test_gitlab_tier2_has_no_docker_service_or_tls_settings():
     }
 
 
+def test_gitlab_excludes_unselected_tiers_before_starting_services():
+    jobs = load("ci/gitlab/all-tiers.yml")
+    for name, tier in (
+        ("skill-evaluation-native", 3),
+        ("skill-evaluation-native-tier2", 2),
+        ("skill-evaluation-image-tier2", 2),
+    ):
+        # Check the whole list token, so selecting 1,2 cannot start Tier 3's Docker service.
+        assert {"if": f"$SKILL_EVAL_TIERS !~ /(^|,){tier}(,|$)/", "when": "never"} in jobs[name]["rules"][:3]
+
+
+def test_gitlab_tier2_image_job_checks_the_image_the_runner_started():
+    import subprocess
+
+    jobs = load("ci/gitlab/all-tiers.yml")
+    assert "skill-evaluation-image-tier2" in jobs
+    job = jobs["skill-evaluation-image-tier2"]
+    assert job["image"] == {"name": "$SKILL_EVAL_TIER2_IMAGE", "entrypoint": [""]}
+    expected_image = "ghcr.io/nvidia/skillevaluator-tier2@sha256:" + "1" * 64
+    result = subprocess.run(
+        ["sh", "-c", job["before_script"][0]],
+        env={"SKILL_EVAL_TIER2_IMAGE": expected_image, "CI_JOB_IMAGE": expected_image[:-1] + "2"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "job image does not match" in result.stderr
+
+
+def test_gitlab_invalid_tier2_image_does_not_run_the_native_evaluator():
+    import subprocess
+
+    script = load("ci/gitlab/all-tiers.yml")["skill-evaluation-native"]["script"][0]
+    result = subprocess.run(
+        ["sh", "-c", script],
+        env={
+            "SKILL_EVAL_TIERS": "1,2,3",
+            "SKILL_EVAL_TIER": "2",
+            "SKILL_EVAL_TIER2_IMAGE": "ghcr.io/nvidia/skillevaluator-tier2:latest",
+            "SKILL_EVAL_TOOLS_DIR": "/tmp/tools",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "immutable Tier 2 GHCR digest" in result.stderr
+
+
 def test_gitlab_native_caller_overrides_and_advisory_policy_apply_to_both_tiers():
     from skillevaluator._ci_onboarding_all_tiers import _gitlab_inherited
 
     jobs = load("ci/gitlab/all-tiers.yml")
     jobs["skill-evaluation-native"].update({"timeout": "45 minutes", "tags": ["native-linux"], "services": []})
-    for name in ("skill-evaluation-native", "skill-evaluation-native-tier2"):
+    for name in ("skill-evaluation-native", "skill-evaluation-native-tier2", "skill-evaluation-image-tier2"):
         job = jobs[name]
         assert _gitlab_inherited(jobs, job, "timeout") == "45 minutes"
         assert _gitlab_inherited(jobs, job, "tags") == ["native-linux"]
@@ -310,6 +360,7 @@ def test_gitlab_aggregate_downloads_evidence_from_both_advisory_tiers():
         {"job": "skill-evaluation", "artifacts": "true", "optional": "true"},
         {"job": "skill-evaluation-native", "artifacts": "true", "optional": "true"},
         {"job": "skill-evaluation-native-tier2", "artifacts": "true", "optional": "true"},
+        {"job": "skill-evaluation-image-tier2", "artifacts": "true", "optional": "true"},
         {"job": "skill-evaluation-tier1-llm", "artifacts": "true", "optional": "true"},
     ]
 

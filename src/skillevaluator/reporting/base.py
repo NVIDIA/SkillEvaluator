@@ -2031,6 +2031,104 @@ def result_has_execution_evidence(result: ValidationResult) -> bool:
     return bool(result.success_details or result.findings or result.summary.checks_performed > 0)
 
 
+def tier2_context_insufficiency(result: ValidationResult) -> str | None:
+    """Read the producer's explicit reason that no context comparison ran."""
+    return next(
+        (
+            detail.message
+            for detail in result.success_details
+            if detail.check_name == "context_dedup"
+            and detail.message in {"No text files found in skill directory", "Not enough content to compare"}
+        ),
+        None,
+    )
+
+
+def tier2_catalog_entries_compared(check_name: str | None, metadata: dict[str, Any]) -> int | None:
+    """Recover a distinct-entry count only when the comparison evidence supports it."""
+
+    def count(key: str) -> int | None:
+        value = metadata.get(key)
+        return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
+
+    total = count("catalog_entry_count" if check_name == "catalog_compared" else "catalog_entries")
+    excluded = count("self_matches_excluded")
+    bundled = count("bundled_skills") if check_name == "skill_catalog_comparison" else None
+    targets = bundled or 1
+    if total is None or excluded is None or excluded > total * targets:
+        return None
+    if "compared_catalog_entries" in metadata:
+        distinct = count("compared_catalog_entries")
+        return distinct if distinct is not None and distinct <= total else None
+    if targets == 1:
+        return total - excluded
+    if excluded == total * targets:
+        return 0
+    # With multiple targets, an entry is still compared if any target did not skip it.
+    paths = metadata.get("excluded_catalog_paths")
+    all_paths_skipped_once = (
+        isinstance(paths, list) and all(isinstance(path, str) for path in paths) and len(set(paths)) == excluded
+    )
+    return total if excluded < targets or all_paths_skipped_once else None
+
+
+def _optional_tier2_catalog_skip(result: ValidationResult, results: list[ValidationResult]) -> bool:
+    """Allow optional catalog absence only alongside the same check's real analysis.
+
+    A plugin dependency-reference success cannot stand in for context analysis.
+    Catalog-only commands likewise need an executed comparison, rather than just
+    an index-build result followed by inapplicable comparisons.
+    """
+    from skillevaluator.reporting.run_status import Status, result_status
+
+    def clean_outcome(candidate: ValidationResult, status: Status) -> bool:
+        metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+        gating = metadata.get("gating")
+        return bool(
+            result_status(candidate) is status
+            and not candidate.errors
+            and not candidate.summary.errors
+            and not candidate.gate_failures
+            and not metadata.get("security_failure")
+            and not (isinstance(gating, dict) and gating.get("tier") != 2)
+        )
+
+    producer = result_publication_evidence(result)
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    catalog_names = {"Inter-Skill Deduplication", "Inter-Plugin Deduplication"}
+    if (
+        producer is None
+        or producer.tier != 2
+        or result.validator_name not in catalog_names
+        or metadata.get("optional_skip") is not True
+        or not clean_outcome(result, Status.SKIPPED)
+    ):
+        return False
+    context_check = producer.check_id == "context-optimization"
+    semantic_names = {"Context Deduplication"} if context_check else catalog_names
+
+    def has_comparison(peer: ValidationResult) -> bool:
+        if context_check:
+            return result_has_execution_evidence(peer) and tier2_context_insufficiency(peer) is None
+        for detail in peer.success_details:
+            if detail.check_name in {"skill_catalog_comparison", "plugin_catalog_comparison"}:
+                count = tier2_catalog_entries_compared(detail.check_name, detail.metadata)
+                if count is None and "compared_catalog_entries" not in detail.metadata:
+                    # Legacy comparison records did not always carry counts.
+                    return True
+                if count is not None and count > 0:
+                    return True
+        return False
+
+    return any(
+        peer.validator_name in semantic_names
+        and result_publication_evidence(peer) == producer
+        and clean_outcome(peer, Status.PASSED)
+        and has_comparison(peer)
+        for peer in results
+    )
+
+
 def is_tier3_result(result: ValidationResult) -> bool:
     """Return whether a result belongs to live Tier 3 evaluation."""
     metadata = result.metadata if isinstance(result.metadata, dict) else {}
@@ -2402,20 +2500,31 @@ def assess_publication(
 
     peer_skill_names: dict[str, str] = {}
     for result in results:
-        if not is_tier3_result(result) and result_publication_evidence(result) is None:
+        producer = result_publication_evidence(result)
+        if not is_tier3_result(result) and producer is None:
             continue
         metadata = result.metadata if isinstance(result.metadata, dict) else {}
         candidates: list[object] = [metadata.get("skill_name"), metadata.get("target_skill_name")]
-        quality = metadata.get("quality_scores")
-        if isinstance(quality, dict):
-            candidates.append(quality.get("skill_name"))
-        quality_all = metadata.get("quality_scores_all")
-        if isinstance(quality_all, list):
-            candidates.extend(item.get("skill_name") for item in quality_all if isinstance(item, dict))
+        result_target = _result_publication_target(result)
+        member_quality = bool(
+            producer is not None
+            and producer.tier == 1
+            and producer.check_id == "quality"
+            and isinstance(metadata.get("plugin_member"), str)
+            and metadata["plugin_member"]
+            and result_target is not None
+        )
+        if not member_quality:
+            quality = metadata.get("quality_scores")
+            if isinstance(quality, dict):
+                candidates.append(quality.get("skill_name"))
+            quality_all = metadata.get("quality_scores_all")
+            if isinstance(quality_all, list):
+                candidates.extend(item.get("skill_name") for item in quality_all if isinstance(item, dict))
         agent_eval_payload = metadata.get("agent_eval")
         if isinstance(agent_eval_payload, dict):
             candidates.append(_agent_eval_consistent_text_field(agent_eval_payload, "skill_name"))
-        if (result_target := _result_publication_target(result)) is not None:
+        if result_target is not None:
             candidates.append(result_target.skill_name)
         for candidate in candidates:
             if (key := _publication_identity_key(candidate)) is not None:
@@ -2453,6 +2562,7 @@ def assess_publication(
         return bool(
             is_cleanly_skipped(result)
             and not is_advisory_agent_eval_skip(result)
+            and not _optional_tier2_catalog_skip(result, results)
             and not (tier2 and not policy["tier2_required"])
             and not (is_tier3_result(result) and not policy["tier3_required"])
         )
@@ -2694,12 +2804,13 @@ class ReporterBase(ABC):
         """
         ...
 
-    def save(self, results: list[ValidationResult], output_path: Path) -> None:
+    def save(self, results: list[ValidationResult], output_path: Path, *, plugin_static: bool = False) -> None:
         """Save rendered output to file.
 
         Args:
             results: List of ValidationResults to render
             output_path: Path to save the output file
+            plugin_static: Include the bounded plugin static evidence projection.
 
         The default implementation renders all results and atomically writes a
         regular file without following symlink or reparse-point output paths.
@@ -2708,9 +2819,15 @@ class ReporterBase(ABC):
         Raises:
             UnsafeReportPathError: If the destination cannot be written safely.
         """
+        if plugin_static:
+            from skillevaluator.reporting.plugin_static_render import render_plugin_static_reports
+
+            document = render_plugin_static_reports(results, reporters=(self,))[self.name]
+        else:
+            document = self.render_all(results)
         # A file name that is not valid UTF-8 reaches messages as lone
         # surrogates; write those as escapes instead of failing the report.
-        payload = self.render_all(results).encode("utf-8", "backslashreplace")
+        payload = document.encode("utf-8", "backslashreplace")
         _write_report_atomically(output_path, payload)
 
     def get_file_extension(self) -> str:

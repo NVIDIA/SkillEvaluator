@@ -769,7 +769,9 @@ def evaluate(
                 "--agent-model provided for agent(s) not selected by -a/--agents: " + ", ".join(unknown_model_agents)
             )
 
-        output_dir = resolve_results_root(skill_path, results_dir)
+        from skillevaluator.tier3.plugin_execution import runtime_source_path
+
+        output_dir = resolve_results_root(runtime_source_path(skill_path), results_dir)
         if execution_backend == NEMO_GYM_BACKEND:
             from skillevaluator.tier3.nemo_gym.runner import run_nemo_gym_eval
 
@@ -1001,6 +1003,7 @@ def readiness_rows(
             environment_kwargs=resolved_env_kwargs,
             subprocess_env=prerequisite_subprocess_env,
             verify_live_cluster=verify_models,
+            agent_models={agent: [model] for agent, (model, _source) in model_resolution.items()},
         )
     if prereq_errors:
         for error in prereq_errors:

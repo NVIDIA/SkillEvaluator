@@ -21,6 +21,7 @@ from harbor.agents.installed.claude_code import ClaudeCode
 from harbor.agents.installed.codex import Codex
 from harbor.agents.installed.opencode import OpenCode
 
+from skillevaluator.tier3.eval_core.log_converters import OPENCODE_FILE_TOOLS
 from skillevaluator.utils.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -186,25 +187,29 @@ class SkillEvaluatorOpenCode(OpenCode):
 
     def _convert_events_to_trajectory(self, events: list[dict[str, Any]]) -> Trajectory | None:
         normalized = []
-        failed_file_calls: list[set[str]] = []
-        turn_failures: set[str] | None = None
+        file_outcomes: list[dict[str, bool]] = []
+        turn_outcomes: dict[str, bool] | None = None
         for event in events:
             part = event.get("part")
             if event.get("type") == "step_start":
-                turn_failures = set()
-            elif event.get("type") == "step_finish" and turn_failures is not None:
-                failed_file_calls.append(turn_failures)
-                turn_failures = None
-            elif (
-                event.get("type") == "tool_use"
-                and isinstance(part, dict)
-                and part.get("tool") in ("read", "edit", "write")
-            ):
+                turn_outcomes = {}
+            elif event.get("type") == "step_finish" and turn_outcomes is not None:
+                file_outcomes.append(turn_outcomes)
+                turn_outcomes = None
+            elif event.get("type") == "tool_use" and isinstance(part, dict) and part.get("tool") in OPENCODE_FILE_TOOLS:
                 state = part.get("state")
+                if isinstance(state, dict) and state.get("status") in ("pending", "running"):
+                    continue
                 call_id = part.get("callID", part.get("id"))
-                if turn_failures is not None and call_id and isinstance(state, dict) and state.get("status") == "error":
-                    turn_failures.add(call_id)
-                    output = state.get("error") or state.get("output") or ""
+                if (
+                    turn_outcomes is not None
+                    and call_id
+                    and isinstance(state, dict)
+                    and state.get("status") in ("completed", "error")
+                ):
+                    failed = state["status"] == "error"
+                    turn_outcomes[call_id] = failed
+                    output = (state.get("error") if failed else None) or state.get("output") or ""
                     event = {**event, "part": {**part, "state": {**state, "output": output}}}
             if event.get("type") == "tool_use" and isinstance(part, dict) and part.get("tool") == "bash":
                 state = part.get("state")
@@ -219,12 +224,12 @@ class SkillEvaluatorOpenCode(OpenCode):
                         event = {**event, "part": {**part, "state": {**state, "output": output}}}
             normalized.append(event)
         trajectory = super()._convert_events_to_trajectory(normalized)
-        if trajectory and any(failed_file_calls):
+        if trajectory and any(file_outcomes):
             agent_steps = (step for step in trajectory.steps if step.source == "agent")
-            for step, failures in zip(agent_steps, failed_file_calls, strict=True):
+            for step, outcomes in zip(agent_steps, file_outcomes, strict=True):
                 for result in step.observation.results if step.observation else ():
-                    if result.source_call_id in failures:
-                        result.extra = {**(result.extra or {}), "tool_result_is_error": True}
+                    if result.source_call_id in outcomes:
+                        result.extra = {**(result.extra or {}), "tool_result_is_error": outcomes[result.source_call_id]}
         return trajectory
 
     async def ensure_system_dependencies(

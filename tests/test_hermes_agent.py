@@ -37,7 +37,11 @@ from harbor.trial.trial import Trial
 
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.commands import validate_agents
-from skillevaluator.tier3.eval_core.atif_helpers import _collect_file_change_evidence, extract_tool_calls_as_dicts
+from skillevaluator.tier3.eval_core.atif_helpers import (
+    _collect_file_change_evidence,
+    build_metric_evidence_bundles,
+    extract_tool_calls_as_dicts,
+)
 from skillevaluator.tier3.eval_core.checks import (
     check_activation,
     check_error_recovery,
@@ -322,6 +326,7 @@ def test_verifier_scores_raw_hermes_calls_like_the_harbor_export(tmp_path):
         ("lookup-code", "lookup-code", "../lookup-code/SKILL.md", False),
         ("lookup-code", "lookup-code", "other/SKILL.md", False),
         ("lookup-code", "lookup-code", "Lookup-Code/SKILL.md", True),
+        ("lookup-code", "lookup-code", "loo\u212aup-code/SKILL.md", False),
     ],
     ids=[
         "categorized",
@@ -338,6 +343,7 @@ def test_verifier_scores_raw_hermes_calls_like_the_harbor_export(tmp_path):
         "returned-traversal",
         "wrong-directory",
         "frontmatter-lookup",
+        "non-ascii-lookalike",
     ],
 )
 def test_hermes_manifest_identity(tmp_path, exported, requested, resolved, manifest, activated):
@@ -358,7 +364,8 @@ def test_hermes_manifest_identity(tmp_path, exported, requested, resolved, manif
 
 
 @pytest.mark.parametrize(
-    "metadata, activated", [({}, True), ({"file": "references/help.md"}, False), ({"path": None}, False)]
+    "metadata, activated",
+    [({}, True), ({"file": "references/help.md"}, False), ({"path": None}, False), ({"content": " \t\n"}, False)],
 )
 def test_hermes_manifest_result_metadata(tmp_path, metadata, activated):
     session = _session(observation={"success": True, "name": "lookup-code", "content": "instructions", **metadata})
@@ -387,6 +394,10 @@ def test_hermes_manifest_read_external_home(tmp_path, failure, home):
     for exporter in (super(SkillEvaluatorHermes, agent), agent):
         traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
         assert check_activation(extract_tool_calls_as_dicts(traj), "calculator")["score"] == (0.0 if failure else 1.0)
+        bundle = build_metric_evidence_bundles(traj, "Inspect the manifest", expected_behavior=["Read `SKILL.md`"])[
+            "behavior_check"
+        ]
+        assert bundle["omitted"]["expected_behaviors_verified"] is (not failure)
 
 
 @pytest.mark.parametrize(
@@ -413,12 +424,14 @@ def test_hermes_relative_manifest_lookup(tmp_path, requested, manifest, score):
         assert check_activation(extract_tool_calls_as_dicts(traj), "calculator")["score"] == score
 
 
-@pytest.mark.parametrize("output, score", [("", 1.0), ("grep: input: read error", 0.0)])
-def test_hermes_quiet_probe_recovery(tmp_path, output, score):
+@pytest.mark.parametrize(
+    "output, error, score", [("", None, 1.0), ("grep: input: read error", None, 0.0), ("", "backend failure", 0.0)]
+)
+def test_hermes_quiet_probe_recovery(tmp_path, output, error, score):
     session = _session(
         tool="terminal",
         arguments={"command": "grep -q needle input"},
-        observation={"output": output, "exit_code": 1, "error": None},
+        observation={"output": output, "exit_code": 1, "error": error},
     )
     agent = _agent(tmp_path)
     for exporter in (super(SkillEvaluatorHermes, agent), agent):
@@ -427,9 +440,50 @@ def test_hermes_quiet_probe_recovery(tmp_path, output, score):
         assert check_error_recovery(calls, "scripts/calc.py")["score"] == score
 
 
-@pytest.mark.parametrize("exit_code", [7, 0, -1])
-def test_hermes_terminal_exit_grading(tmp_path, exit_code):
-    result = {"output": "Input declined", "exit_code": exit_code, "error": None}
+def test_manifest_receipt_verifies_file_read(tmp_path):
+    agent = _agent(tmp_path)
+    for exporter in (super(SkillEvaluatorHermes, agent), agent):
+        traj = exporter._convert_hermes_session_to_atif(_session(), "session").to_json_dict()
+        bundle = build_metric_evidence_bundles(traj, "Inspect the manifest", expected_behavior=["Read `SKILL.md`"])[
+            "behavior_check"
+        ]
+        assert bundle["omitted"]["expected_behaviors_verified"]
+
+
+def test_terminal_approval_message_is_not_execution(tmp_path):
+    session = json.loads(_session(tool="terminal", arguments={"command": "python lookup.py"}))
+    session["messages"][2]["content"] = "Approval required for lookup.py"
+    agent = _agent(tmp_path)
+    for exporter in (super(SkillEvaluatorHermes, agent), agent):
+        traj = exporter._convert_hermes_session_to_atif(json.dumps(session), "session").to_json_dict()
+        assert not check_script_execution(extract_tool_calls_as_dicts(traj), "lookup.py")["passed"]
+
+
+def test_unscoped_sibling_output_is_not_terminal_execution():
+    step = {
+        "source": "agent",
+        "tool_calls": [
+            {"tool_call_id": "term", "function_name": "terminal", "arguments": {"command": "python lookup.py"}},
+            {"tool_call_id": "doc", "function_name": "read_file", "arguments": {"path": "README.md"}},
+        ],
+        "observation": {"results": [{"content": "Use lookup.py for this task"}]},
+    }
+    assert check_script_execution(extract_tool_calls_as_dicts({"steps": [step]}), "lookup.py")["score"] == 0
+
+
+@pytest.mark.parametrize(
+    "exit_code, error, succeeded",
+    [
+        (7, None, False),
+        (0, None, True),
+        (-1, None, False),
+        (7, "runner fault", False),
+        (0, "runner fault", None),
+        (0, "", None),
+    ],
+)
+def test_hermes_terminal_exit_grading(tmp_path, exit_code, error, succeeded):
+    result = {"output": "Input declined", "exit_code": exit_code, "error": error}
     session = _session(tool="terminal", arguments={"command": "python lookup.py"}, observation=result)
     agent = _agent(tmp_path)
     for exporter in (super(SkillEvaluatorHermes, agent), agent):
@@ -441,8 +495,14 @@ def test_hermes_terminal_exit_grading(tmp_path, exit_code):
             final_response="",
             workspace_roots=[],
         )[0]
-        assert check["passed"] is (exit_code == 0)
-        assert check_error_recovery(calls, "lookup.py")["passed"] is (exit_code == 0)
+        assert check["passed"] is succeeded
+        recovery = check_error_recovery(calls, "lookup.py")
+        assert recovery["first_attempt_clean"] is (succeeded is True)
+        assert recovery["passed"] is (succeeded is True)
+        if succeeded is None:
+            assert calls[0]["is_error"] is True
+            failure = {"action": "bash", "action_input": calls[0]["action_input"], "observation": "Exit code: 7"}
+            assert not check_error_recovery([failure, *calls], "lookup.py")["corrections"]
         assert check_script_execution(calls, "lookup.py")["passed"]
 
 
@@ -488,7 +548,9 @@ def test_hermes_terminal_completion_requires_a_process_exit(tmp_path, receipt):
     arguments = {"command": "python lookup.py", "background": background}
     result = {"output": "Background process started", "session_id": "proc_1", "pid": 42, "exit_code": 0, "error": None}
     if receipt == "yielded":
-        result.update(output="working", status="yielded_to_background", exit_code=None, notify_on_complete=True)
+        result.update(
+            output="permission denied", status="yielded_to_background", exit_code=None, notify_on_complete=True
+        )
     session = json.loads(_session(tool="terminal", arguments=arguments, observation=result))
     if receipt == "missing-result":
         session["messages"] = session["messages"][:2]
@@ -511,6 +573,7 @@ def test_hermes_terminal_completion_requires_a_process_exit(tmp_path, receipt):
         )[0]
         assert check["passed"] is (None if started else False)
         if started:
+            assert not check_error_recovery(calls, "lookup.py")["failures"]
             failure = {"action": "bash", "action_input": arguments, "observation": "Exit code: 7"}
             recovery = check_error_recovery([failure, *calls], "lookup.py")
             assert recovery["score"] == 0.0

@@ -14353,9 +14353,11 @@ def check_script_execution(
         # that it ran.
         for tc in tool_calls:
             action = str(tc["action"])
-            if _is_file_read_action(action) or action == "skill_view" or (action == "terminal" and tc.get("is_error")):
+            if _is_file_read_action(action) or action == "skill_view":
                 continue
             obs = str(tc.get("observation", "")).lower()
+            if action == "terminal" and (tc.get("is_error") or obs.lstrip().startswith("approval required")):
+                continue
             if expected_script.lower() in obs:
                 return {"passed": True, "score": 0.75, "reason": f"{expected_script} found in tool observation"}
         return {"passed": False, "score": 0.0, "reason": "No execute/run_code call found"}
@@ -14671,7 +14673,9 @@ def check_error_recovery(
         while isinstance(record, dict) and not isinstance(record.get("output"), str):
             nested = [item for item in record.values() if isinstance(item, dict)]
             record = nested[0] if len(nested) == 1 else None
-        return record["output"] if isinstance(record, dict) and isinstance(record["output"], str) else None
+        if isinstance(record, dict) and record.get("error") is None and isinstance(record.get("output"), str):
+            return record["output"]
+        return None
 
     def _is_quiet_negative_probe(tc: dict[str, Any], observation: str) -> bool:
         # Exit 1 is a normal negative answer for these probes. Be conservative:
@@ -14762,6 +14766,8 @@ def check_error_recovery(
         exit_code = _exit_status(tc)
         if exit_code is not None:
             return exit_code != 0 and not (exit_code == 1 and _is_quiet_negative_probe(tc, obs))
+        if tc.get("process_state") == "completed" and tc.get("is_error") is True:
+            return True
         # Only results without an exit status are judged by their text.
         return failure_text_re.search(obs) is not None
 

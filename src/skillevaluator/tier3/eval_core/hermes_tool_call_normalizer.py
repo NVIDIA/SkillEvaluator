@@ -76,6 +76,7 @@ def normalize_hermes_call(
         payload = {}
     error = bool(payload.get("error"))
     if name == "terminal":
+        error = payload.get("error") is not None
         if content == "[Tool execution cancelled — terminal was skipped due to user interrupt]":
             return HermesCall(name, arguments, True, content, "not_started")
         has_exit_code = type(payload.get("exit_code")) is int
@@ -102,7 +103,7 @@ def normalize_hermes_call(
                 and payload.get("output") == "Background process started"
             ):
                 return HermesCall("bash", arguments, None, content, "running")
-            if has_exit_code:
+            if has_exit_code and (payload["exit_code"] != 0 or not error):
                 content = f"{content.lstrip()}\nExit code: {payload['exit_code']}"
             return HermesCall(
                 "bash",
@@ -113,7 +114,7 @@ def normalize_hermes_call(
             )
         if error:
             return HermesCall(name, arguments, True, content, "not_started")
-        if native_session and content:
+        if native_session and payload.get("success") is True:
             return HermesCall("bash", arguments, None, content, "unknown")
         if isinstance(arguments.get("command"), str) and arguments.get("workdir"):
             return HermesCall(name, arguments, None, content, "unknown")
@@ -126,7 +127,7 @@ def normalize_hermes_call(
             if isinstance(skill, str) and skill and isinstance(file_path, str):
                 if file_path in ("SKILL.md", "./SKILL.md"):
                     if manifest := _manifest_path(skill, payload):
-                        return HermesCall("read", {"path": f"{HERMES_HOME}/skills/{manifest}"}, None, content)
+                        return HermesCall("read", {"path": f"{HERMES_HOME}/skills/{manifest}"}, False, content)
                 elif payload.get("name", skill) == skill:
                     return HermesCall(name, arguments, False, content)
             return HermesCall(name, arguments, None, content)
@@ -137,6 +138,13 @@ def normalize_hermes_call(
     elif name == "read_file":
         path = arguments.get("path")
         read_error = payload.get("error")
+        if (
+            isinstance(path, str)
+            and read_error is None
+            and payload.get("success") is not False
+            and isinstance(payload.get("content"), str)
+        ):
+            return HermesCall(name, arguments, False, content)
         if isinstance(path, str) and (
             (isinstance(read_error, str) and read_error.startswith("File not found: "))
             or (path.endswith("/SKILL.md") and (error or payload.get("success") is False))

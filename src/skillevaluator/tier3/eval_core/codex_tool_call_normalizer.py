@@ -128,7 +128,8 @@ def normalized_tool_call_observation(step: dict[str, Any], tool_call: dict[str, 
     return _outer_tool_call_observation(
         step,
         tool_call,
-        include_unscoped=tool_call.get("_atif_raw_tool_index", 0) == 0,
+        include_unscoped=tool_call.get("_atif_raw_tool_index", 0) == 0
+        and not (tool_call.get("function_name") == "terminal" and len(step.get("tool_calls") or []) > 1),
     )
 
 

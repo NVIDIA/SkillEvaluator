@@ -20,7 +20,10 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
 )
 from skillevaluator.tier3.eval_core.checks import check_activation, check_script_execution, check_tool_efficiency
 from skillevaluator.tier3.eval_core.declarative_checks import evaluate_declarative_checks
-from skillevaluator.tier3.eval_core.log_converters import load_trajectory_with_fallback
+from skillevaluator.tier3.eval_core.log_converters import (
+    load_trajectory_with_fallback,
+    synthetic_trajectory_from_opencode_json,
+)
 from skillevaluator.tier3.eval_core.plugin_signals import compute_plugin_signals
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorOpenCode
 from skillevaluator.tier3.harbor.local_agents import SkillEvaluatorGatewayOpenCode, SkillEvaluatorLocalOpenCode
@@ -150,6 +153,83 @@ def test_native_file_change_controls_missing_evidence_gap(tool, status, source, 
         calls = extract_tool_calls_as_dicts(data)
         assert error in calls[0]["observation"].splitlines()
         assert calls[0]["is_error"] is True
+
+
+@pytest.mark.parametrize("tool", ["edit", "write"])
+def test_saved_text_must_come_from_the_call_that_changed_the_target(tool):
+    target = "/workspace/output/result.txt"
+    expected = "case-SENSITIVE"
+    events = []
+    for path, text in [(target, expected.lower()), ("/workspace/output/other.txt", expected)]:
+        args = {"oldString": expected, "newString": text} if tool == "edit" else {"content": text}
+        state = {"status": "completed", "input": {"filePath": path, **args}, "output": "OK"}
+        events.append(json.dumps({"type": "tool_use", "part": {"tool": tool, "callID": path, "state": state}}))
+    trajectory = synthetic_trajectory_from_opencode_json("\n".join(events))
+    expectation = [f"Save `{expected}` to {target}"]
+    bundle = build_metric_evidence_bundles(trajectory, "Update the file.", expected_behavior=expectation)[
+        "behavior_check"
+    ]
+    assert all(fact["observed"] for fact in bundle["verified"])
+    assert not bundle["omitted"]["expected_behaviors_verified"]
+
+
+@pytest.mark.parametrize("source", ["export", "event-log"])
+@pytest.mark.parametrize(
+    ("edit_status", "edit_detail"),
+    [
+        ("error", {"error": "not found"}),
+        ("running", {"output": "Edit applied"}),
+        ("completed", {"output": "Edit applied"}),
+    ],
+)
+def test_read_and_edit_on_same_path_in_same_turn(tmp_path, monkeypatch, source, edit_status, edit_detail):
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "500")
+    path = "/workspace/output/result.txt"
+    events = [{"type": "step_start"}]
+    for tool, status, detail in [
+        ("read", "completed", {"output": "original"}),
+        ("edit", edit_status, edit_detail),
+    ]:
+        args = {"filePath": path}
+        if tool == "edit":
+            args.update(oldString="original", newString="")
+        events.append(
+            {
+                "type": "tool_use",
+                "part": {
+                    "type": "tool",
+                    "tool": tool,
+                    "callID": tool,
+                    "state": {"status": status, "input": args, **detail},
+                },
+            }
+        )
+    events.extend(
+        [
+            {"type": "step_finish"},
+            {"type": "step_start"},
+            {"type": "text", "part": {"type": "text", "text": "A" * 3000 + "MISSING_MIDDLE" + "B" * 3000}},
+            {"type": "step_finish"},
+        ]
+    )
+    if source == "export":
+        trajectory = SkillEvaluatorOpenCode(
+            logs_dir=tmp_path, model_name="openai/test-model"
+        )._convert_events_to_trajectory(events)
+        data = trajectory.to_json_dict()
+    else:
+        (tmp_path / "opencode.txt").write_text("\n".join(map(json.dumps, events)), encoding="utf-8")
+        data, metadata = load_trajectory_with_fallback(tmp_path / "trajectory.json")
+        assert metadata["source"] == "opencode.txt"
+    for operation in ["Remove text from", "Modify", "Change", "Read"]:
+        expectation = f"{operation} {path}"
+        omitted = build_metric_evidence_bundles(data, "Check the result.", expected_behavior=[expectation])[
+            "behavior_check"
+        ]["omitted"]
+        assert omitted["required_missing"] == ["final response"]
+        assert omitted["expected_behaviors_verified"] is (operation == "Read" or edit_status == "completed"), (
+            expectation
+        )
 
 
 def test_native_read_activation_uses_its_own_result(native_events, tmp_path):

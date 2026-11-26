@@ -21,6 +21,7 @@ from typing import Any
 if __package__:
     from skillevaluator.evidence import evidence_ref_identity
     from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
+        MAPPED_OUTER_EXEC_OBSERVATION,
         atif_content_has_text,
         atif_content_text,
         normalized_tool_call_error_flag,
@@ -38,8 +39,10 @@ if __package__:
     )
     from skillevaluator.tier3.eval_core.hermes_tool_call_normalizer import HERMES_EXIT_UNKNOWN, HERMES_PROCESS_STATE
     from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
+    from skillevaluator.tier3.eval_core.shell_lexing import _shell_tokens
 else:  # Standalone helper staged beside the verifier.
     from codex_tool_call_normalizer import (
+        MAPPED_OUTER_EXEC_OBSERVATION,
         atif_content_has_text,
         atif_content_text,
         normalized_tool_call_error_flag,
@@ -58,6 +61,7 @@ else:  # Standalone helper staged beside the verifier.
     from evidence import evidence_ref_identity
     from hermes_tool_call_normalizer import HERMES_EXIT_UNKNOWN, HERMES_PROCESS_STATE
     from secret_redaction import redact_secrets_in_log_line
+    from shell_lexing import _shell_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -369,7 +373,7 @@ def _append_section_with_budget(
 # rather than imported from ``checks`` so the standalone verifier copy of this
 # module keeps its current, narrow import set.
 _PATCH_BEGIN_MARKER = "*** Begin Patch"
-_PATCH_FILE_HEADER_RE = re.compile(r"^[^\S\n]*\*\*\* (?:Add|Update|Delete) File:[ \t]*([^\n]*)", re.MULTILINE)
+_PATCH_FILE_HEADER_RE = re.compile(r"^\*\*\* (Add|Update|Delete) File:[ \t]*([^\n]*)", re.MULTILINE)
 _MAX_PATCH_PATHS = 10
 
 
@@ -379,7 +383,7 @@ def _patch_input_body(args: dict[str, Any]) -> str:
     Only a value carrying patch markers is returned: a bare ``input`` string is
     also how Codex passes shell source, which is not a file change.
     """
-    value = args.get("input")
+    value = args.get("patchText") or args.get("input")
     if not isinstance(value, str) or not value.strip():
         return ""
     if _PATCH_BEGIN_MARKER in value or _PATCH_FILE_HEADER_RE.search(value):
@@ -391,7 +395,7 @@ def _patch_header_paths(patch: str) -> list[str]:
     """Distinct paths the ``Add``/``Update``/``Delete File`` headers name, in patch order."""
     paths: list[str] = []
     for match in _PATCH_FILE_HEADER_RE.finditer(patch):
-        path = match.group(1).strip()
+        path = match.group(2).strip()
         if path and path not in paths:
             paths.append(path)
     return paths
@@ -1072,6 +1076,142 @@ def _checkable_tokens(text: str, seen_claims: set[str] | None = None) -> list[tu
     return tokens
 
 
+def _file_call_result(step: dict, call: dict) -> tuple[bool | None, str]:
+    """Use only this call's result, never an ambiguous wrapper or a sibling's output."""
+    if call.get("_atif_observation_status") not in (None, MAPPED_OUTER_EXEC_OBSERVATION):
+        return None, ""
+    results = (step.get("observation") or {}).get("results") or []
+    call_id = call.get("tool_call_id")
+    matched = [r for r in results if call_id and r.get("source_call_id") == call_id]
+    raw_calls = step.get("tool_calls") or []
+    if not matched and len(raw_calls) == len(results) == 1 and not results[0].get("source_call_id") and call_id:
+        matched = [{**results[0], "source_call_id": call_id}]
+    if not matched or sum(raw.get("tool_call_id") == call_id for raw in raw_calls) != 1:
+        return None, ""
+    scoped = {**step, "observation": {"results": matched}}
+    return normalized_tool_call_error_flag(scoped, call), _tool_call_observation(scoped, call)
+
+
+_FILE_EXIT_HEADER = re.compile(
+    r"^(?:(?:status=completed\r?\n)?(?:exit_code=|Exit code: )|"
+    r"(?:Chunk ID: [\da-fA-F]+\r?\n)?Wall time: \d+(?:\.\d+)? seconds\r?\nProcess exited with code )"
+    r"(-?\d+)(?:\r?\n|$)"
+)
+
+
+def _shell_file_action(command: str) -> tuple[str, str]:
+    """Recognize only a simple read or output redirection."""
+    words = _shell_tokens(command, strip_comment_text=True)
+    if len(words) == 2 and words[0] == "cat":
+        return "read", words[1]
+    if (
+        len(words) >= 3
+        and words[0] in {"printf", "echo", "cat"}
+        and words[-2] in {">", ">>"}
+        and not any(re.search(r"[;&|()<>`$]", word) for word in words[:-2])
+    ):
+        return "change", words[-1]
+    return "", ""
+
+
+def _file_action_steps(traj: dict[str, Any], claims: set[str]) -> dict[str, dict[str, int]]:
+    """Index confirmed operations separately from the first mention of each file."""
+    actions: dict[str, dict[str, int]] = {}
+    for idx, step in enumerate(traj.get("steps", [])):
+        if step.get("source") != "agent":
+            continue
+        for _, call in iter_tool_calls({"steps": [step]}):
+            name = str(call.get("function_name") or "").lower()
+            args = call.get("arguments")
+            if not isinstance(args, dict):
+                continue
+            read = name in {"read", "read_file"}
+            shell = name in _BEHAVIOR_EXEC_TOOLS
+            if not (shell or read or _tool_name_looks_like_write(name)):
+                continue
+            flag, result = _file_call_result(step, call)
+            target = _tool_file_path(args)
+            created = (
+                name in {"write", "write_file"}
+                and bool(target)
+                and result.strip() == f"File created successfully at: {target}"
+            )
+            if created and flag is None:
+                flag = False
+            patch = _patch_input_body(args) if name == "apply_patch" else ""
+            if shell or patch:
+                header = _FILE_EXIT_HEADER.match(result)
+                if header and header[1] != "0":
+                    continue
+                if (
+                    name == "exec_command"
+                    and re.search(r"^Process running with session ID \d+\r?$", result, re.MULTILINE)
+                    and not header
+                ):
+                    continue
+                if header and flag is None:
+                    flag = False
+            if flag is not False and not (
+                flag is None
+                and not (shell or read)
+                and re.fullmatch(
+                    r"(?:file written|wrote file(?: successfully)?|edit applied|success(?:ful)?)[.!]?",
+                    result.strip(),
+                    re.IGNORECASE,
+                )
+            ):
+                continue
+            contents: dict[str, str] = {}
+            if shell:
+                if (call.get("extra") or {}).get(HERMES_EXIT_UNKNOWN) or args.get("run_in_background") is True:
+                    continue
+                command = str(args.get("command") or args.get("cmd") or "")
+                action, target = _shell_file_action(command)
+                operations = [(target, action)] if action else []
+                literal = re.fullmatch(r"\s*printf\s+%s\s+([A-Za-z0-9_.-]+)\s*>\s*([/\w.\-]+)\s*", command)
+                if action == "change" and literal and literal[2] == target:
+                    contents[target] = literal[1]
+            elif patch:
+                operations = [
+                    (match[2].strip(), {"Add": "create", "Update": "change", "Delete": "delete"}[match[1]])
+                    for match in _PATCH_FILE_HEADER_RE.finditer(patch)
+                ]
+                for section in re.finditer(
+                    r"^\*\*\* Add File:[ \t]*([^\n]+)\n((?:\+[^\n]*\n)+)(?=\*\*\* (?:Add File:|Update File:|Delete File:|End Patch))",
+                    patch,
+                    re.MULTILINE,
+                ):
+                    contents[section[1].strip()] = "\n".join(line[1:] for line in section[2].splitlines())
+            else:
+                operations = [(target, "read" if read else "create" if created else "change")]
+            for path, action in operations:
+                for claim in claims:
+                    if path != claim and (claim.startswith("/") or not path.endswith("/" + claim)):
+                        continue
+                    steps = actions.setdefault(claim, {})
+                    steps.setdefault(action, idx)
+                    if action == "create":
+                        steps.setdefault("change", idx)
+                    old = args.get("oldString", args.get("old_string"))
+                    new = args.get("newString", args.get("new_string"))
+                    written = (
+                        args.get("content")
+                        if name in {"write", "write_file"}
+                        else new
+                        if name in {"edit", "edit_file"}
+                        else contents.get(path)
+                    )
+                    if isinstance(written, str) and written in claims:
+                        steps.setdefault(f"write:{written}", idx)
+                    if name in {"edit", "edit_file"} and isinstance(old, str) and isinstance(new, str):
+                        if len(new) < len(old):
+                            steps.setdefault("remove", idx)
+                        for literal in claims:
+                            if literal in old and literal not in new:
+                                steps.setdefault(f"remove:{literal}", idx)
+    return actions
+
+
 def build_verified_facts(
     traj: dict[str, Any],
     expected_behavior: list[str] | None,
@@ -1079,7 +1219,9 @@ def build_verified_facts(
 ) -> list[dict[str, Any]]:
     """Derive deterministic facts from the trajectory vs expected tokens.
 
-    Each fact: {"claim": str, "observed": bool, "step_id": int|None, "evidence": str}.
+    Each fact records the claim, observation step and evidence. A confirmed
+    change to the named file also records its mutation step, which need not
+    be the first step to mention the path.
     Only emits facts for tokens extractable from *expected_behavior* and *ground_truth*
     via artifact-path regex or backtick-quoted snippets. No fuzzy matching, no prose.
     """
@@ -1096,6 +1238,8 @@ def build_verified_facts(
 
     if not tokens:
         return []
+
+    actions = _file_action_steps(traj, {claim for claim, _ in tokens[:_VERIFIED_FACTS_MAX]})
 
     # 2. Scan trajectory steps for each token
     steps = traj.get("steps", [])
@@ -1114,7 +1258,9 @@ def build_verified_facts(
             # Check tool call arguments: command/cmd/code and file-path args
             for _, tc in iter_tool_calls({"steps": [step]}):
                 name = str(tc.get("function_name", "")).lower()
-                if name in ("write", "edit") and normalized_tool_call_is_error(step, tc):
+                if (
+                    name in ("read", "read_file") or _tool_name_looks_like_write(name)
+                ) and normalized_tool_call_is_error(step, tc):
                     continue
                 args = tc.get("arguments") or {}
                 if not isinstance(args, dict):
@@ -1147,12 +1293,18 @@ def build_verified_facts(
             if observed:
                 break
 
+        if not observed and mode == "ci":
+            for target, file_steps in actions.items():
+                if f"remove:{claim}" in file_steps:
+                    observed, step_id, evidence = True, file_steps[f"remove:{claim}"], f"removed from {target}"
+                    break
         facts.append(
             {
                 "claim": claim,
                 "observed": observed,
                 "step_id": step_id,
                 "evidence": evidence,
+                **({"file_steps": actions[claim]} if claim in actions else {}),
             }
         )
 
@@ -1170,6 +1322,8 @@ def _build_verified_facts_section(facts: list[dict[str, Any]]) -> str:
             sid = fact["step_id"]
             ev = fact["evidence"]
             line = f"- [OBSERVED step {sid}] {claim}"
+            if "change" in fact.get("file_steps", {}):
+                line += f" (file changed at step {fact['file_steps']['change']})"
             if ev:
                 line = f"{line} :: {ev}"
             if len(line) > _VERIFIED_FACT_LINE_MAX:
@@ -1303,9 +1457,49 @@ def _result_evidence_incomplete_sections(
 # Clause separators for an expectation. A dot only separates when whitespace
 # follows it, so an artifact path such as ``report.py`` is never split apart.
 _BEHAVIOR_CLAUSE_SPLIT_RE = re.compile(
-    r"(?:\band\b|\bthen\b|\balso\b|\bplus\b|\bas well as\b|\bwhile\b|\bbefore\b|\bafter\b|[;]|\.\s)",
+    r"(?<!\S)(?:and|then|also|plus|as well as|while|before|after)(?!\S)|[;]|\.\s",
     re.IGNORECASE,
 )
+
+_FILE_VERB_RE = re.compile(
+    r"\b(?:(?P<read>reads?|reading|(?:inspect|view|open)(?:s|ed|ing)?)|"
+    r"(?P<change>writ(?:es?|ing|ten)|wrote|edit(?:s|ed|ing)?|(?:sav|updat|chang)(?:es?|ed|ing)|"
+    r"modif(?:y|ies|ied|ying))|"
+    r"(?P<create>creat(?:es?|ed|ing))|(?P<delete>(?:remov|delet)(?:es?|ed|ing)))\b",
+    re.IGNORECASE,
+)
+
+
+def _file_clause_verified(clause: str, observed: dict[str, dict[str, Any]]) -> bool:
+    predicate = re.sub(r"^(?:(?:the )?agent\s+)?(?:(?:should|must)\s+)?", "", clause.strip(), flags=re.IGNORECASE)
+    match = _FILE_VERB_RE.match(predicate)
+    if match is None:
+        prose = _EXPECTED_ARTIFACT_PATH_RE.sub("", _BACKTICK_TOKEN_RE.sub("", clause))
+        if _FILE_VERB_RE.search(prose):
+            return False
+        if re.fullmatch(r"(?:run|runs|ran)\s+`[^`]+`[.!]?", predicate, re.IGNORECASE):
+            return True
+        return not any(
+            mode == "path" or observed.get(claim, {}).get("file_steps") or re.search(r"[/\\]|\.\w+$", claim)
+            for claim, mode in _checkable_tokens(clause)
+        )
+    action = match.lastgroup
+    targets = predicate[match.end() :].strip().rstrip(".!")
+    if action == "read":
+        targets = re.sub(r"^(?:from\s+)?(?:(?:the\s+)?contents\s+of\s+)?", "", targets, flags=re.IGNORECASE)
+    elif action == "change" and (save := re.fullmatch(r"`([^`]+)`\s+to\s+(.+)", targets, re.IGNORECASE)):
+        action, targets = f"write:{save[1]}", save[2]
+    elif action == "delete" and (removal := re.fullmatch(r"(?:text|`([^`]+)`)\s+from\s+(.+)", targets, re.IGNORECASE)):
+        action = f"remove:{removal[1]}" if removal[1] else "remove"
+        targets = removal[2]
+    targets = re.sub(r"^(?:the\s+)?file\s+(?:at\s+)?", "", targets, flags=re.IGNORECASE)
+    for target in targets.split(","):
+        target = target.strip()
+        if target.startswith("`") and target.endswith("`"):
+            target = target[1:-1]
+        if action not in observed.get(target, {}).get("file_steps", {}):
+            return False
+    return True
 
 
 def _expected_behaviors_verified(expected_behavior: Any, facts: list[dict[str, Any]]) -> bool:
@@ -1335,18 +1529,27 @@ def _expected_behaviors_verified(expected_behavior: Any, facts: list[dict[str, A
     """
     if not isinstance(expected_behavior, list) or not expected_behavior:
         return False
-    observed = {str(fact.get("claim")) for fact in facts if fact.get("observed")}
+    observed = {str(fact.get("claim")): fact for fact in facts if fact.get("observed")}
     for behavior in expected_behavior:
         text = str(behavior or "")
         claims = [claim for claim, _mode in _checkable_tokens(text)]
         if not claims or any(claim not in observed for claim in claims):
             return False
-        for clause in _BEHAVIOR_CLAUSE_SPLIT_RE.split(text):
+        clauses = re.split(f"({_BEHAVIOR_CLAUSE_SPLIT_RE.pattern})", text, flags=_BEHAVIOR_CLAUSE_SPLIT_RE.flags)
+        previous = ""
+        for index in range(0, len(clauses), 2):
+            clause = clauses[index].strip()
+            if index and clauses[index - 1].lower() == "and" and re.fullmatch(r"`[^`]+`|/\S+", clause.rstrip(".!")):
+                clause = f"{previous}, {clause}"
+            previous = clause
             # A clause with no letters or digits is punctuation or filler left
             # behind by the split, not something the agent was asked to do.
             if not any(char.isalnum() for char in clause):
                 continue
-            if not _checkable_tokens(clause):
+            tokens = _checkable_tokens(clause)
+            if not tokens or any(claim not in observed for claim, _ in tokens):
+                return False
+            if not _file_clause_verified(clause, observed):
                 return False
     return True
 

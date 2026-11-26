@@ -12,15 +12,22 @@ from __future__ import annotations
 
 import json
 import stat
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
 import json5
 
 from skillevaluator.constants import PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule, version_finding
 from skillevaluator.plugin_format_schema import _claude_name_refused_by_path
-from skillevaluator.utils.structured_data import _reject_json_constant
+from skillevaluator.plugin_paths import PluginRootReader
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    _reject_json_constant,
+    load_bounded_json,
+)
 
 MANIFESTS = {
     "claude": ".claude-plugin/plugin.json",
@@ -36,6 +43,8 @@ AGENT_PLUGINS_SCHEMA = "https://agent-plugins.org/schemas/"
 OPENCLAW_CLIENT_MANIFESTS = tuple(MANIFESTS[fmt] for fmt in ("codex", "cursor", "claude"))
 OPENCLAW_AGENT_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 OPENCLAW_NATIVE_MANIFEST = "openclaw.plugin.json"
+OPENCLAW_PACKAGE_FILE = "package.json"
+OPENCLAW_PACKAGE_EXTENSIONS = f"{OPENCLAW_PACKAGE_FILE}#openclaw.extensions"
 OPENCLAW_NATIVE_ENTRIES = ("index.ts", "index.js", "index.mjs", "index.cjs")
 OPENCLAW_DEFAULT_MARKERS = (
     "skills",
@@ -187,6 +196,37 @@ def _openclaw_manifest(path: Path, *, strict_json: bool = False) -> Any:
         return _PARSE_LIMIT
 
 
+def _openclaw_package_extensions(reader: PluginRootReader) -> Literal["absent", "declared", "invalid", "unchecked"]:
+    """Classify the package declaration that OpenClaw checks before bundle discovery."""
+    if reader.kind(PurePosixPath(OPENCLAW_PACKAGE_FILE)) != "file":
+        return "absent"
+    try:
+        with SecureRoot(reader.root) as secure_root:
+            raw, _ = secure_root.read_bytes(Path(OPENCLAW_PACKAGE_FILE), PLUGIN_CONFIG_MAX_BYTES)
+        package = load_bounded_json(raw.decode("utf-8", "replace"))
+    except (OSError, SecurePathError, StructuredDataLimitError):
+        return "unchecked"
+    except StructuredDataSyntaxError:
+        return "absent"
+
+    metadata = package.get("openclaw") if isinstance(package, dict) else None
+    if metadata is None:
+        return "absent"
+    if not isinstance(metadata, dict):
+        return "invalid"
+    entries = metadata.get("extensions")
+    if entries is None:
+        return "absent"
+    if (
+        not isinstance(entries, list)
+        or not entries
+        or any(not isinstance(entry, str) or not entry.strip() for entry in entries)
+    ):
+        return "invalid"
+    # This branch consumes the directory even if no declared entry resolves.
+    return "declared"
+
+
 def is_plugin_root(path: Path) -> bool:
     return _is_file(path / OPENCLAW_NATIVE_MANIFEST) or any(_is_file(path / rel) for rel in MANIFESTS.values())
 
@@ -238,12 +278,18 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any(_is_dir(root / d) for d in DEFAULT_DIRS)
     facts["default_layout"] = facts["default_dirs"] or any(_is_file(root / f) for f in DEFAULT_FILES)
-    selected = next((rel for rel in OPENCLAW_CLIENT_MANIFESTS if _exists(root / rel)), "")
+    reader = PluginRootReader(root)
+    package_extensions = _openclaw_package_extensions(reader)
+    check_bundle = package_extensions == "absent"
+    selected = next((rel for rel in OPENCLAW_CLIENT_MANIFESTS if _exists(root / rel)), "") if check_bundle else ""
     manifest = _openclaw_manifest(root / selected) if selected else None
-    native_manifest = not selected and _exists(root / OPENCLAW_NATIVE_MANIFEST)
+    has_native_manifest = _exists(root / OPENCLAW_NATIVE_MANIFEST)
+    native_manifest = check_bundle and not selected and has_native_manifest
     agent_path = MANIFESTS["root_json"]
     agent_manifest = (
-        _openclaw_manifest(root / agent_path, strict_json=True) if not selected and not native_manifest else None
+        _openclaw_manifest(root / agent_path, strict_json=True)
+        if check_bundle and not selected and not native_manifest
+        else None
     )
     agent_selected = isinstance(agent_manifest, dict) and agent_manifest.get("$schema") == OPENCLAW_AGENT_SCHEMA
     facts["openclaw_agent_manifest"] = agent_selected
@@ -252,16 +298,30 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["openclaw_manifest_invalid"] = (
         bool(selected) and manifest is not _PARSE_LIMIT and not isinstance(manifest, dict)
     )
-    facts["openclaw_manifest_unchecked"] = manifest is _PARSE_LIMIT or agent_manifest is _PARSE_LIMIT
-    facts["openclaw_unchecked_manifest"] = (selected or agent_path) if facts["openclaw_manifest_unchecked"] else ""
-    # Native manifest paths precede portable manifests. Bare native entrypoints precede default markers.
+    unchecked_manifest = ""
+    if package_extensions == "unchecked":
+        unchecked_manifest = OPENCLAW_PACKAGE_FILE
+    elif manifest is _PARSE_LIMIT or agent_manifest is _PARSE_LIMIT:
+        unchecked_manifest = selected or agent_path
+    facts["openclaw_manifest_unchecked"] = bool(unchecked_manifest)
+    facts["openclaw_unchecked_manifest"] = unchecked_manifest
+    facts["openclaw_package_invalid"] = package_extensions == "invalid"
+
     native_path = OPENCLAW_NATIVE_MANIFEST if native_manifest else ""
-    if not (selected or native_manifest or agent_selected or facts["openclaw_manifest_unchecked"]):
-        native_path = next((rel for rel in OPENCLAW_NATIVE_ENTRIES if _exists(root / rel)), "")
+    if package_extensions == "declared":
+        native_path = OPENCLAW_PACKAGE_EXTENSIONS
+    elif (
+        check_bundle
+        and not (native_manifest or agent_selected or unchecked_manifest)
+        and (not selected or facts["openclaw_manifest_invalid"])
+    ):
+        default_entry = next((rel for rel in OPENCLAW_NATIVE_ENTRIES if _exists(root / rel)), "")
+        if not selected or (default_entry and reader.kind(PurePosixPath(default_entry)) == "file"):
+            native_path = default_entry
     facts["openclaw_native_path"] = native_path
-    facts["openclaw_native_manifest_missing"] = bool(native_path) and not native_manifest
-    facts["openclaw_default_layout"] = not native_path and any(
-        _exists(root / marker) for marker in OPENCLAW_DEFAULT_MARKERS
+    facts["openclaw_native_manifest_missing"] = bool(native_path) and not has_native_manifest
+    facts["openclaw_default_layout"] = (
+        check_bundle and not native_path and any(_exists(root / marker) for marker in OPENCLAW_DEFAULT_MARKERS)
     )
     claude_layout = selected == MANIFESTS["claude"] or not (selected or agent_selected or native_path)
     facts["openclaw_declares_components"] = _declares_components(manifest) or (
@@ -288,7 +348,10 @@ def evaluate_plugin(
                 finding[key] = _fill(rule[key], facts)
         findings.append(finding)
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
-    if worst < 2 and not (profile["harness"] == "openclaw" and facts.get("openclaw_native_path")):
+    openclaw_bundle_unconfirmed = profile["harness"] == "openclaw" and (
+        facts.get("openclaw_native_path") or facts.get("openclaw_unchecked_manifest") == OPENCLAW_PACKAGE_FILE
+    )
+    if worst < 2 and not openclaw_bundle_unconfirmed:
         for kind, outcome in (section.get("components") or {}).items():
             n = facts["components"].get(kind, 0)
             effect = OUTCOME_EFFECT[outcome]

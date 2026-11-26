@@ -635,6 +635,85 @@ def test_openclaw_manifest_precedence_with_native_entry(
     assert _status(root)["openclaw"] == expected
 
 
+@pytest.mark.parametrize("bundle", [VALID, BROKEN], ids=["valid-bundle", "broken-bundle"])
+@pytest.mark.parametrize("harnesses", ["openclaw", "openclaw,codex"])
+def test_openclaw_package_extensions_precede_client_bundles(tmp_path: Path, bundle: str, harnesses: str):
+    root = _manifest(_plugin(tmp_path / "p", None), ".codex-plugin/plugin.json", bundle)
+    _manifest(root, "openclaw.plugin.json", '{"id":"native-demo","configSchema":{"type":"object"}}')
+    _manifest(root, "package.json", '{"openclaw":{"extensions":["./lib/start.js"]}}')
+    _manifest(root, "lib/start.js", "module.exports = function register() {};")
+    report = tmp_path / "report.json"
+    result = CliRunner().invoke(cli, ["harness-check", str(root), "--harness", harnesses, "--json", str(report)])
+
+    assert result.exit_code == 0, result.output
+    rows = json.loads(report.read_text(encoding="utf-8"))["harness_compatibility"][f"{root} (plugin)"]
+    rows_by_harness = {row["harness"]: row for row in rows}
+    assert set(rows_by_harness) == set(harnesses.split(","))
+    openclaw = rows_by_harness["openclaw"]
+    assert openclaw["status"] == "degraded"
+    assert [finding["id"] for finding in openclaw["findings"]] == ["OW-PLUGIN-NATIVE-UNCHECKED"]
+    assert "package.json#openclaw.extensions" in openclaw["findings"][0]["message"]
+    if "codex" in rows_by_harness:
+        assert rows_by_harness["codex"]["status"] == ("loads" if bundle == VALID else "not_loaded")
+
+
+@pytest.mark.parametrize(
+    ("extensions", "status", "findings"),
+    [
+        (None, "loads", []),
+        ([], "not_loaded", ["OW-PLUGIN-PACKAGE-INVALID"]),
+        (["./missing.js"], "degraded", ["OW-PLUGIN-NATIVE-UNCHECKED"]),
+    ],
+    ids=["null-declaration", "empty-declaration", "unresolved-entry"],
+)
+def test_openclaw_package_declaration_controls_bundle_discovery(
+    tmp_path: Path, extensions: object, status: str, findings: list[str]
+):
+    root = _plugin(tmp_path / "p", ".codex-plugin/plugin.json")
+    _manifest(root, "openclaw.plugin.json", '{"id":"native-demo","configSchema":{"type":"object"}}')
+    _manifest(root, "package.json", json.dumps({"openclaw": {"extensions": extensions}}))
+    assert _status(root)["openclaw"] == (status, findings)
+
+
+@pytest.mark.parametrize("read_error", [False, True], ids=["size-limit", "read-error"])
+def test_openclaw_unread_package_leaves_bundle_compatibility_unchecked(
+    tmp_path: Path, read_error: bool, monkeypatch: pytest.MonkeyPatch
+):
+    root = _plugin(tmp_path / "p", ".codex-plugin/plugin.json", components=("commands",))
+    package = '{"openclaw":{"extensions":["./lib/start.js"]}}'
+    if read_error:
+
+        def fail_read(*args, **kwargs):
+            raise OSError("Unable to read package")
+
+        monkeypatch.setattr("skillevaluator.harness.plugin.SecureRoot.read_bytes", fail_read)
+    else:
+        package = package.ljust(PLUGIN_CONFIG_MAX_BYTES + 1)
+    _manifest(root, "package.json", package)
+
+    result = _openclaw(root)
+    assert result.status == "degraded"
+    assert [finding["id"] for finding in result.findings] == ["OW-PLUGIN-MANIFEST-UNCHECKED"]
+    assert result.findings[0]["message"] == (
+        "The compatibility check could not inspect package.json. OpenClaw acceptance is unverified."
+    )
+
+
+@pytest.mark.parametrize("entry", ["index.ts", "index.js", "index.mjs", "index.cjs"])
+def test_openclaw_attempts_native_index_after_broken_client_bundle(tmp_path: Path, entry: str):
+    root = _manifest(_plugin(tmp_path / "p", None), ".codex-plugin/plugin.json", BROKEN)
+    _manifest(root, "openclaw.plugin.json", '{"id":"native-demo","configSchema":{"type":"object"}}')
+    _manifest(root, entry, "module.exports = function register() {};")
+
+    result = _openclaw(root)
+    assert result.status == "degraded"
+    assert [finding["id"] for finding in result.findings] == [
+        "OW-PLUGIN-MANIFEST-FALLBACK",
+        "OW-PLUGIN-NATIVE-UNCHECKED",
+    ]
+    assert entry in result.findings[1]["message"]
+
+
 @pytest.mark.parametrize("schema", [None, AGENT_V1, "https://agent-plugins.org/schemas/9.9.0/plugin.schema.json"])
 def test_openclaw_accepts_root_manifest_only_with_supported_agent_schema(tmp_path: Path, schema: str | None):
     data = {"name": "root-demo"}

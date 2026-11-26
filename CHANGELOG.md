@@ -36,12 +36,12 @@ All notable changes to SkillEvaluator are documented in this file.
 - The `harness-check` plugin panel distinguishes broken Claude Code manifests
   from missing manifests, checks plugin names, and recognizes declared
   components in manifests with a UTF-8 byte order mark. For OpenClaw, the
-  panel checks the first present Codex, Cursor, or Claude manifest as JSON5
-  and respects native discovery precedence before accepting default bundle
-  markers. The panel recognizes folders containing only the native OpenClaw
-  plugin manifest and reports native compatibility as unchecked. MCP notes
-  apply across OpenClaw bundle formats. The panel requires a recognized plugin
-  manifest.
+  panel checks declared native package extensions before client bundles, checks
+  the first present Codex, Cursor, or Claude manifest as JSON5, and accounts
+  for native root entrypoint fallback when that bundle fails. The panel
+  recognizes folders containing only the native OpenClaw plugin manifest
+  and reports native compatibility as unchecked. MCP notes apply across
+  OpenClaw bundle formats. The panel requires a recognized plugin manifest.
 
 ### Documentation
 

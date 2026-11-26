@@ -264,8 +264,8 @@ jobs:
             exit 1
           fi
           if [ "$FORK_PR" = true ]; then
-            echo "::error::Code Scanning upload skipped: fork PR uploads cannot target the scanned head commit."
-            exit 1
+            echo "::warning::Code Scanning upload skipped: fork PR uploads cannot target the scanned head commit. The scan verdict is unchanged."
+            exit 0
           fi
           if [ "$SCAN_EXIT_CODE" != 0 ] && [ "$SCAN_EXIT_CODE" != 1 ]; then
             echo "::error::Code Scanning upload skipped: the scan did not finish normally."
@@ -277,12 +277,14 @@ jobs:
             --cap-drop ALL --security-opt no-new-privileges \
             --mount "type=bind,src=$RUNNER_TEMP/skill-reports,dst=/reports,readonly" \
             --mount "type=bind,src=$RUNNER_TEMP/skill-sarif,dst=/output" \
-            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
-            --workdir /tmp --entrypoint python "$IMAGE" -I - /reports /output /workspace <<'PY'
+            --workdir /tmp --entrypoint python "$IMAGE" -I - /reports /output <<'PY'
           import json, os, pathlib, sys, urllib.parse
           from skillevaluator.reporting.sarif_reporter import merge_catalog_sarif_documents
 
-          reports, output, workspace = map(pathlib.Path, sys.argv[1:])
+          MAX_DISPLAYED_RESULTS = 5_000
+          MAX_RESULTS_PER_RUN = 25_000
+
+          reports, output = map(pathlib.Path, sys.argv[1:])
 
           def normalize_location(location, skill):
               physical = location.get("physicalLocation")
@@ -300,13 +302,7 @@ jobs:
               elif uri.scheme:
                   raise ValueError("a SARIF location cannot be mapped to the workspace")
               else:
-                  skill_path = pathlib.PurePosixPath(skill) / path
-                  root_exists = (workspace / path).exists()
-                  skill_exists = (workspace / skill_path).exists()
-                  if root_exists and skill_exists and path != skill_path:
-                      raise ValueError("a SARIF location is ambiguous")
-                  if not root_exists:
-                      path = skill_path
+                  path = pathlib.PurePosixPath(skill) / path
               if ".." in path.parts:
                   raise ValueError("a SARIF location escapes the workspace")
               artifact["uri"] = urllib.parse.quote(os.fsencode(str(path)), safe="/")
@@ -357,6 +353,18 @@ jobs:
               merged = merge_catalog_sarif_documents(documents)
               # upload-sarif only applies its category when automationDetails is absent.
               merged["runs"][0].pop("automationDetails", None)
+              result_count = sum(len(run["results"]) for run in merged["runs"])
+              if result_count > MAX_DISPLAYED_RESULTS:
+                  warning = (
+                      f"SARIF contains {result_count} results; GitHub displays only the "
+                      f"{MAX_DISPLAYED_RESULTS:,} highest-priority results."
+                  )
+                  if result_count > MAX_RESULTS_PER_RUN:
+                      warning += (
+                          f" GitHub rejects SARIF runs over {MAX_RESULTS_PER_RUN:,} results, "
+                          "but upload will still be attempted."
+                      )
+                  print(f"::warning::{warning}", flush=True)
               (output / "catalog.sarif.json").write_text(json.dumps(merged), encoding="utf-8")
           except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
               raise SystemExit(f"Code Scanning upload skipped: missing, malformed, or incomplete scan evidence ({exc}).")

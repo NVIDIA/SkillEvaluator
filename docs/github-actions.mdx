@@ -127,8 +127,8 @@ error, 10 warning, and 10 notice annotations per step; see
 
 <AccordionGroup>
   <Accordion title="Publish Tier 1 findings to Code Scanning">
-    This option requires a reusable workflow revision that includes SARIF
-    upload; the released 1.2.1 and stable templates do not yet expose it.
+    Pin the reusable workflow at a revision that includes the `upload-sarif`
+    input; check whether your chosen release or stable template exposes it.
     In a caller of `evaluate-skills.yml`, grant the job `contents: read`,
     `actions: read`, and `security-events: write`, and add:
 
@@ -144,8 +144,10 @@ error, 10 warning, and 10 notice annotations per step; see
     require GitHub Code Security. The caller cannot grant a reusable workflow
     more permissions than it has itself. Fork PR tokens may be read-only, and
     the upload action ignores the requested commit on fork PRs. Full-scan
-    publication therefore fails explicitly on fork PRs rather than attributing
-    head results to the merge commit. Publication is unsupported for
+    publication therefore skips with a warning on fork PRs rather than
+    attributing head results to the merge commit. The scan verdict still
+    determines the job outcome, so a successful job does not guarantee
+    SARIF was published. Publication is unsupported for
     `pull_request_target`; do not use that event to run untrusted PR code with
     a privileged token.
 
@@ -162,7 +164,16 @@ error, 10 warning, and 10 notice annotations per step; see
     Run full scans on the default branch to refresh its baseline; a narrower
     `paths` configuration under the same category can close alerts outside
     that scope. To publish PR analyses, explicitly select `scan-mode: all`
-    and ensure the event's token can upload.
+    for same-repository PRs and ensure the event's token can upload. Fork PRs
+    do not publish; run a full scan on the default branch after merging.
+
+    All findings share one SARIF run. GitHub rejects runs over 25,000 results
+    and includes only the 5,000 highest-priority results when a run exceeds
+    that display limit. The workflow warns before upload when the report exceeds
+    5,000 results; it still attempts the upload, including when the report exceeds
+    GitHub's 25,000-result limit. See
+    [GitHub's SARIF limits](https://docs.github.com/en/code-security/reference/code-scanning/sarif-support-for-code-scanning#file-compatibility)
+    when scanning large collections.
   </Accordion>
   <Accordion title="Use advisory enforcement">
     The 1.2.1 bundle pins a matching workflow and scanner image with

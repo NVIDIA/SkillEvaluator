@@ -42,12 +42,20 @@ def test_context_allocation_does_not_scale_with_unread_tail(tmp_path):
         for _ in range(128):
             stream.write(tail)
 
-    tracemalloc.start()
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    else:
+        tracemalloc.reset_peak()
     try:
+        baseline, _ = tracemalloc.get_traced_memory()
         context = FindingVerifier._read_file_context(tmp_path, "large.txt")
         _, peak = tracemalloc.get_traced_memory()
     finally:
-        tracemalloc.stop()
+        if not was_tracing:
+            tracemalloc.stop()
 
+    # An existing tracing session can already hold unrelated allocations.
+    peak -= baseline
     assert context == prefix.removesuffix("\n")
     assert peak < 1024 * 1024, f"100-line context allocated {peak:,} bytes for the unused tail"

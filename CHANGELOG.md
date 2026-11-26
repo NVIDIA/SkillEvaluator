@@ -36,6 +36,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Quality scoring reports unreadable or non-UTF-8 manifests per skill and
+  keeps quality results for healthy members of the same directory. Unreadable
+  members fail validation without receiving a numeric quality score.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

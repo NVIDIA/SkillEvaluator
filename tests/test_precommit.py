@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -24,6 +25,9 @@ from skillevaluator.precommit import (
     skill_root_for,
 )
 from skillevaluator.tier1.commands import run_quality_check
+
+if TYPE_CHECKING:
+    from skillevaluator.models.result import ValidationResult
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -324,7 +328,7 @@ def test_precommit_fails_when_an_earlier_skill_fails(tmp_path: Path) -> None:
     assert lines[1] == "PASS  valid-skill  schema"
 
 
-def test_precommit_reports_skill_that_raises_and_checks_the_rest(tmp_path: Path) -> None:
+def test_precommit_reports_unreadable_manifest_and_checks_the_rest(tmp_path: Path) -> None:
     broken = tmp_path / "latin1-skill"
     broken.mkdir()
     text = _VALID_SKILL_MD.format(name="latin1-skill", title="Caf\u00e9 Skill")
@@ -337,8 +341,41 @@ def test_precommit_reports_skill_that_raises_and_checks_the_rest(tmp_path: Path)
 
     assert code == 1
     assert len(lines) == 2
-    assert lines[0].startswith("FAIL  latin1-skill  quality  error: UnicodeDecodeError: ")
-    assert lines[1].startswith("PASS  valid-skill  quality")
+    assert lines[0].startswith(
+        f"FAIL  latin1-skill  quality  Cannot compute quality score for {broken / 'SKILL.md'}: "
+        "could not read the manifest as UTF-8 text ("
+    )
+    assert "'utf-8' codec can't decode byte 0xe9" in lines[0]
+    assert "/100" not in lines[0]
+    assert re.fullmatch(r"PASS  valid-skill  quality  \d+\.\d/100", lines[1])
+
+
+def test_precommit_reports_skill_that_raises_and_checks_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broken = _write_skill(tmp_path, "broken-skill")
+    valid = _write_skill(tmp_path, "valid-skill")
+    checked: list[Path] = []
+
+    def raise_for_broken_skill(
+        skill_root: Path, *, min_score: int, quality_config: Path | None = None
+    ) -> list[ValidationResult]:
+        checked.append(skill_root)
+        if skill_root == broken:
+            raise RuntimeError("unexpected validator failure")
+        return run_quality_check(skill_root, min_score=min_score, quality_config=quality_config)
+
+    monkeypatch.setattr("skillevaluator.precommit.run_quality_check", raise_for_broken_skill)
+
+    code, lines = run_precommit(
+        "quality", [str(broken / "SKILL.md"), str(valid / "SKILL.md")], min_score=0, cwd=tmp_path
+    )
+
+    assert code == 1
+    assert checked == [broken, valid]
+    assert len(lines) == 2
+    assert lines[0] == "FAIL  broken-skill  quality  error: RuntimeError: unexpected validator failure"
+    assert re.fullmatch(r"PASS  valid-skill  quality  \d+\.\d/100", lines[1])
 
 
 def test_skill_root_finds_repo_root_skill_from_relative_path(tmp_path: Path) -> None:

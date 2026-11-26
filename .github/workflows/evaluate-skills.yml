@@ -287,10 +287,18 @@ jobs:
           reports, output = map(pathlib.Path, sys.argv[1:])
 
           def normalize_location(location, skill):
-              physical = location.get("physicalLocation")
-              if not physical or "artifactLocation" not in physical:
+              if not isinstance(location, dict):
+                  raise ValueError("a SARIF location is not an object")
+              if "physicalLocation" not in location:
+                  return
+              physical = location["physicalLocation"]
+              if not isinstance(physical, dict):
+                  raise ValueError("a SARIF physical location is not an object")
+              if "artifactLocation" not in physical:
                   return
               artifact = physical["artifactLocation"]
+              if not isinstance(artifact, dict) or not isinstance(artifact.get("uri"), str):
+                  raise ValueError("a SARIF artifact location has no valid URI")
               uri = urllib.parse.urlsplit(artifact["uri"])
               if uri.query or uri.fragment or uri.netloc or uri.scheme not in ("", "file"):
                   raise ValueError("a SARIF location cannot be mapped to the workspace")
@@ -347,13 +355,17 @@ jobs:
                              for invocation in run.get("invocations", []))):
                       raise ValueError("a skill SARIF report is malformed or incomplete")
                   for result in run["results"]:
-                      for location in result.get("locations", []):
+                      locations = result.get("locations", [])
+                      if not isinstance(locations, list):
+                          raise ValueError("SARIF locations are not a list")
+                      for location in locations:
                           normalize_location(location, row["path"])
                   documents.append(document)
               merged = merge_catalog_sarif_documents(documents)
               # upload-sarif only applies its category when automationDetails is absent.
               merged["runs"][0].pop("automationDetails", None)
               result_count = sum(len(run["results"]) for run in merged["runs"])
+              warning = ""
               if result_count > MAX_DISPLAYED_RESULTS:
                   warning = (
                       f"SARIF contains {result_count} results; GitHub displays only the "
@@ -365,10 +377,14 @@ jobs:
                           "but upload will still be attempted."
                       )
                   print(f"::warning::{warning}", flush=True)
+              (output / "warnings.md").write_text(f"{warning}\n" if warning else "", encoding="utf-8")
               (output / "catalog.sarif.json").write_text(json.dumps(merged), encoding="utf-8")
           except (OSError, ValueError, TypeError, KeyError, IndexError) as exc:
               raise SystemExit(f"Code Scanning upload skipped: missing, malformed, or incomplete scan evidence ({exc}).")
           PY
+          if [ -s "$RUNNER_TEMP/skill-sarif/warnings.md" ]; then
+            cat "$RUNNER_TEMP/skill-sarif/warnings.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
           echo "ready=true" >> "$GITHUB_OUTPUT"
       - name: Upload SARIF to GitHub Code Scanning
         if: ${{ always() && !cancelled() && steps.sarif.outputs.ready == 'true' }}

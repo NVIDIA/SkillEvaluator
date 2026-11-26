@@ -288,6 +288,34 @@ def _prepare_sarif(reports, output):
     )
 
 
+def _run_sarif_step_with_local_docker(tmp_path):
+    binary = tmp_path / "docker"
+    binary.write_text(
+        '#!/bin/sh\nexec "$TEST_PYTHON" - "$RUNNER_TEMP/skill-reports" "$RUNNER_TEMP/skill-sarif"\n'
+    )
+    binary.chmod(0o755)
+    return subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", _sarif_step()["run"]],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "PYTHONPATH": str(ROOT / "src"),
+            "TEST_PYTHON": sys.executable,
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_OUTPUT": str(tmp_path / "github-output"),
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "step-summary"),
+            "IMAGE": "test-image",
+            "SCAN_MODE": "all",
+            "SCAN_EXIT_CODE": "0",
+            "SARIF_CATEGORY": "catalog",
+            "EVENT_NAME": "push",
+            "FORK_PR": "false",
+        },
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_sarif_upload_is_opt_in_and_failures_are_not_suppressed():
     inputs = _workflow()["on"]["workflow_call"]["inputs"]
     assert inputs["upload-sarif"]["default"] == "false"
@@ -325,6 +353,7 @@ def test_complete_reports_are_merged_even_with_a_failed_verdict(tmp_path):
     [
         (5_000, None),
         (5_001, "GitHub displays only the 5,000 highest-priority results"),
+        (25_000, "GitHub displays only the 5,000 highest-priority results"),
         (25_001, "GitHub rejects SARIF runs over 25,000 results"),
     ],
 )
@@ -382,6 +411,24 @@ def test_relative_sarif_location_resolves_under_skill_path(tmp_path):
     )
 
 
+def test_skill_relative_path_starting_with_skill_name_stays_relative_to_skill(tmp_path):
+    reports, output, _ = _sarif_evidence(tmp_path, 1)
+    finding = Finding(
+        category="SCHEMA", severity=Severity.LOW, check_name="fixture",
+        message="Example finding", file_path="skills/1/README.md",
+    )
+    validation = ValidationResult(validator_name="Schema", validator_description="Fixture validation")
+    validation.add_finding(finding)
+    (reports / "skill-001/skillevaluator-tier1.sarif.json").write_text(SARIFReporter().render_all([validation]))
+
+    result = _prepare_sarif(reports, output)
+
+    assert result.returncode == 0, result.stderr
+    merged = json.loads((output / "catalog.sarif.json").read_text())
+    uri = merged["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+    assert uri == "skills/1/skills/1/README.md"
+
+
 @pytest.mark.parametrize(
     "source,expected",
     [("README.md", "skills/1/README.md"), ("/workspace/skills/1/SKILL.md", "skills/1/SKILL.md")],
@@ -436,6 +483,95 @@ def test_external_sarif_location_cannot_be_attributed_to_the_workspace(tmp_path)
     result = _prepare_sarif(reports, output)
     assert result.returncode != 0
     assert "outside the workspace" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "locations",
+    [
+        ["not-an-object"],
+        [{"physicalLocation": "not-an-object"}],
+        [{"physicalLocation": None}],
+        [{"physicalLocation": {"artifactLocation": "not-an-object"}}],
+        [{"physicalLocation": {"artifactLocation": {"uri": 42}}}],
+        {"not": "a-list"},
+    ],
+)
+def test_malformed_sarif_locations_fail_with_clear_error(tmp_path, locations):
+    reports, output, _ = _sarif_evidence(tmp_path, 1)
+    child = reports / "skill-001/skillevaluator-tier1.sarif.json"
+    document = json.loads(child.read_text())
+    document["runs"][0]["results"][0]["locations"] = locations
+    child.write_text(json.dumps(document))
+
+    result = _prepare_sarif(reports, output)
+
+    assert result.returncode != 0
+    assert "Code Scanning upload skipped: missing, malformed, or incomplete scan evidence" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not (output / "catalog.sarif.json").exists()
+
+
+def test_completed_preparation_sets_ready_for_upload(tmp_path):
+    reports, _, _ = _sarif_evidence(tmp_path, 1)
+    reports.rename(tmp_path / "skill-reports")
+
+    result = _run_sarif_step_with_local_docker(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "github-output").read_text() == "ready=true\n"
+    assert (tmp_path / "skill-sarif/catalog.sarif.json").is_file()
+
+
+def test_failed_preparation_does_not_set_ready_for_upload(tmp_path):
+    reports, _, _ = _sarif_evidence(tmp_path, 1)
+    (reports / "skill-001/skillevaluator-tier1.sarif.json").write_text("{")
+    reports.rename(tmp_path / "skill-reports")
+
+    result = _run_sarif_step_with_local_docker(tmp_path)
+
+    assert result.returncode != 0
+    assert "Code Scanning upload skipped" in result.stderr
+    assert not (tmp_path / "github-output").exists()
+    assert not (tmp_path / "skill-sarif/catalog.sarif.json").exists()
+
+
+def test_catalog_at_display_limit_does_not_add_warning_to_step_summary(tmp_path):
+    reports, _, _ = _sarif_evidence(tmp_path, 1)
+    child = reports / "skill-001/skillevaluator-tier1.sarif.json"
+    document = json.loads(child.read_text())
+    finding = document["runs"][0]["results"][0]
+    document["runs"][0]["results"] = [finding.copy() for _ in range(5_000)]
+    child.write_text(json.dumps(document))
+    reports.rename(tmp_path / "skill-reports")
+
+    result = _run_sarif_step_with_local_docker(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "step-summary").exists()
+    assert (tmp_path / "github-output").read_text() == "ready=true\n"
+
+
+@pytest.mark.parametrize("count", [5_001, 25_001])
+def test_large_catalog_warning_is_in_step_summary_without_skipping_upload(tmp_path, count):
+    reports, _, _ = _sarif_evidence(tmp_path, 1)
+    child = reports / "skill-001/skillevaluator-tier1.sarif.json"
+    document = json.loads(child.read_text())
+    finding = document["runs"][0]["results"][0]
+    document["runs"][0]["results"] = [finding.copy() for _ in range(count)]
+    child.write_text(json.dumps(document))
+    reports.rename(tmp_path / "skill-reports")
+
+    result = _run_sarif_step_with_local_docker(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    summary = (tmp_path / "step-summary").read_text()
+    assert f"{count} results" in summary
+    assert "5,000 highest-priority results" in summary
+    if count > 25_000:
+        assert "rejects SARIF runs over 25,000 results" in summary
+    assert (tmp_path / "github-output").read_text() == "ready=true\n"
+    merged = json.loads((tmp_path / "skill-sarif/catalog.sarif.json").read_text())
+    assert len(merged["runs"][0]["results"]) == count
 
 
 @pytest.mark.parametrize(

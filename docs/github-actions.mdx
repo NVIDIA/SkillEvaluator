@@ -209,9 +209,9 @@ error, 10 warning, and 10 notice annotations per step; see
 
     All findings share one SARIF run. GitHub rejects runs over 25,000 results
     and includes only the 5,000 highest-priority results when a run exceeds
-    that display limit. The workflow warns before upload when the report exceeds
-    5,000 results; it still attempts the upload, including when the report exceeds
-    GitHub's 25,000-result limit. See
+    that display limit. The workflow warns in the run and step summary before
+    upload when the report exceeds 5,000 results; it still attempts the upload,
+    including when the report exceeds GitHub's 25,000-result limit. See
     [GitHub's SARIF limits](https://docs.github.com/en/code-security/reference/code-scanning/sarif-support-for-code-scanning#file-compatibility)
     when scanning large collections.
   </Accordion>

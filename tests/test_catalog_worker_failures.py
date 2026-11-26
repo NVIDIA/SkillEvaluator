@@ -21,6 +21,10 @@ from skillevaluator import cli as cli_module
 _FIXTURE = Path(__file__).parent / "fixtures" / "skills" / "simple"
 
 
+def _raise_worker_error(detail: str) -> None:
+    raise RuntimeError(detail)
+
+
 class _MissingWorkdirExecutor(ProcessPoolExecutor):
     def submit(self, worker, job):
         if job["skill_name"] == "beta":
@@ -109,3 +113,71 @@ def test_parallel_catalog_records_worker_failures(
     assert "skills failed validation" in result.output
     assert "::error" in result.output
     assert error_type in result.output
+
+
+@pytest.mark.parametrize("stage", ["submit", "result"])
+@pytest.mark.parametrize("long_detail", [False, True], ids=["credentials", "long-message"])
+def test_parallel_catalog_bounds_and_redacts_worker_details(tmp_path, monkeypatch, stage, long_detail):
+    credential = "sk-" + "catalog-test-placeholder-123456789"
+    detail = (
+        "missing-workdir" + " padding" * 4000
+        if long_detail
+        else f"missing-workdir \x1b[31m{credential}\x1b[0m https://user:password@example.test/path"
+    )
+
+    class FailingExecutor(ProcessPoolExecutor):
+        def submit(self, _worker, _job):
+            if stage == "submit":
+                raise RuntimeError(detail)
+            return super().submit(_raise_worker_error, detail)
+
+    catalog = tmp_path / "catalog"
+    shutil.copytree(_FIXTURE, catalog / "simple")
+    reports = tmp_path / "reports"
+    monkeypatch.setattr(cli_module, "ProcessPoolExecutor", FailingExecutor)
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "validate",
+            str(catalog),
+            "--tiers",
+            "1",
+            "--no-dedup",
+            "--checks",
+            "schema",
+            "--workers",
+            "2",
+            "-r",
+            "json",
+            "-r",
+            "github",
+            "-o",
+            str(reports),
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    summary_text = (reports / "catalog-summary.json").read_text(encoding="utf-8")
+    summary = json.loads(summary_text)
+    assert summary["total"] == summary["failed"] == 1
+    assert summary["passed"] == 0
+    (entry,) = summary["skills"]
+    assert entry["passed"] is False
+    assert "json_report" not in entry
+    prefix = "worker could not start" if stage == "submit" else "worker returned no result"
+    assert entry["reason"].startswith(f"{prefix} (RuntimeError: missing-workdir")
+    if long_detail:
+        assert len(entry["reason"]) <= 1100
+        assert entry["reason"].endswith("...<truncated>)")
+    else:
+        assert entry["reason"] == (
+            f"{prefix} (RuntimeError: missing-workdir sk-<redacted> https://<redacted>@example.test/path)"
+        )
+        for text in [summary_text, result.output]:
+            assert credential not in text
+            assert "password" not in text
+            assert "catalog-test-placeholder" not in text
+        assert "\x1b" not in entry["reason"]
+    assert "::error" in result.output
+    assert "RuntimeError" in result.output

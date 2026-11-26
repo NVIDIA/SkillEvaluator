@@ -86,6 +86,7 @@ from skillevaluator.tier_group import TierGroup
 from skillevaluator.utils.helpers import resolve_git_root
 from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias, resolve_repo_context_root
+from skillevaluator.utils.redaction import redact_printable_text
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
     is_link_or_reparse,
@@ -2155,14 +2156,16 @@ def _validate_catalog_parallel(
             try:
                 futures[executor.submit(_run_catalog_skill_worker, job)] = job["skill_name"]
             except Exception as exc:
-                failures.append((job["skill_name"], f"worker could not start ({type(exc).__name__}: {exc})"))
+                detail = redact_printable_text(str(exc), max_len=1024, max_input_chars=16_384)
+                failures.append((job["skill_name"], f"worker could not start ({type(exc).__name__}: {detail})"))
                 execution_failures.add(job["skill_name"])
         for future in as_completed(futures):
             try:
                 skill_name, reason, execution_failed, json_report_name, annotations = future.result()
             except Exception as exc:
                 skill_name = futures[future]
-                failures.append((skill_name, f"worker returned no result ({type(exc).__name__}: {exc})"))
+                detail = redact_printable_text(str(exc), max_len=1024, max_input_chars=16_384)
+                failures.append((skill_name, f"worker returned no result ({type(exc).__name__}: {detail})"))
                 execution_failures.add(skill_name)
                 continue
             worker_reports[skill_name] = json_report_name

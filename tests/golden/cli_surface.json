@@ -1837,7 +1837,7 @@
             "--min-score"
           ],
           "param_type": "option",
-          "type": "integer"
+          "type": "integer range"
         },
         {
           "name": "quality_config",
@@ -1888,7 +1888,7 @@
             "--min-score"
           ],
           "param_type": "option",
-          "type": "integer"
+          "type": "integer range"
         },
         {
           "name": "quality_config",
@@ -1947,7 +1947,7 @@
             "--min-score"
           ],
           "param_type": "option",
-          "type": "integer"
+          "type": "integer range"
         },
         {
           "choices": [
@@ -2335,7 +2335,7 @@
                 "--min-score"
               ],
               "param_type": "option",
-              "type": "integer"
+              "type": "integer range"
             },
             {
               "name": "quality_config",
@@ -2394,7 +2394,7 @@
                 "--min-score"
               ],
               "param_type": "option",
-              "type": "integer"
+              "type": "integer range"
             },
             {
               "choices": [
@@ -5294,7 +5294,7 @@
             "--min-score"
           ],
           "param_type": "option",
-          "type": "integer"
+          "type": "integer range"
         },
         {
           "name": "quality_config",

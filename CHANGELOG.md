@@ -36,6 +36,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `validate`, `quality-check`, `rubric-eval` and the pre-commit hooks reject a
+  `--min-score` outside 0 to 100 with a usage error (exit `2`), as `tier1` already
+  did. A negative value previously turned the quality gate off and still passed.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

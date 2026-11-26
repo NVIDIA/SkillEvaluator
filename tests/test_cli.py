@@ -132,6 +132,20 @@ def test_similarity_help_exposes_catalog_workflow_and_hides_legacy_cache_names()
     assert "--save-cache" not in result.output
 
 
+@pytest.mark.parametrize("command", ["validate", "quality-check", "rubric-eval", "precommit-run"])
+@pytest.mark.parametrize("value", ["-1", "101"])
+def test_min_score_outside_0_to_100_is_a_usage_error(tmp_path: Path, command: str, value: str) -> None:
+    """An out-of-range gate must not run: -5 would otherwise disable the quality gate and still pass."""
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: sample\ndescription: Sample skill\n---\n")
+
+    result = CliRunner().invoke(cli, [command, "--min-score", value, str(skill)])
+
+    assert result.exit_code == 2, result.output
+    assert "0<=x<=100" in result.output
+
+
 def test_similarity_cli_rejects_nonfinite_and_out_of_range_thresholds(tmp_path: Path) -> None:
     skill = tmp_path / "skill"
     skill.mkdir()

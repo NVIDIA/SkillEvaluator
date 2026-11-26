@@ -47,6 +47,12 @@ All notable changes to SkillEvaluator are documented in this file.
   model they name. Claude 4.7 and later on those profiles no longer receive a
   `temperature` the provider rejects, and the Tier 3 Bedrock refusal fallback
   keeps the request's geography prefix.
+- `harness-check` checks a plugin's manifest file or manifest folder (for
+  example `.claude-plugin/plugin.json`) as the plugin folder it belongs to. In
+  `--json` output the plugin entry for such a target is now keyed by the plugin
+  folder. A plugin run no longer prints a false "Tier 1 schema also fails ...
+  No skills found" line for the plugin entry. Plugin detection continues if a
+  potential manifest cannot be inspected because its parent directory is inaccessible.
 
 ### Documentation
 

@@ -241,6 +241,11 @@ def write_json_block(json_report: Path, block: Block) -> None:
         json_report.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def plugin_key(root: Path) -> str:
+    """Block key of a plugin's own rows. It is a label, not a path: no folder has this name under the plugin."""
+    return f"{root} (plugin)"
+
+
 def run_harness_check(
     target: Path,
     harness: str,
@@ -250,8 +255,7 @@ def run_harness_check(
     verbose: bool = False,
     config: dict[str, Any] | None = None,
 ) -> Block:
-    """Evaluate each skill harness by harness, updating a live panel as each finishes."""
-    target = target.parent if target.is_file() else target
+    """Evaluate the plugin and skills in an already normalized target directory."""
     profiles = load_profiles(harness, profiles_dir)
     finder = HarnessValidator()
     skills = [target] if finder._is_skill_directory(target) else finder._find_all_skills(target)
@@ -269,7 +273,7 @@ def run_harness_check(
             )
         )
         console.print()
-        block[f"{target} (plugin)"] = rows
+        block[plugin_key(target)] = rows
     all_facts = facts_for(skills, profiles)
     for skill in skills:
         rows: list[dict[str, Any]] = [{"harness": p["harness"], "status": "pending"} for p in profiles]

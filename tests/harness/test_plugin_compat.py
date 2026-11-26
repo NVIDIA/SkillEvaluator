@@ -43,6 +43,12 @@ def _status(root: Path) -> dict[str, tuple[str, list[str]]]:
     return out
 
 
+@pytest.fixture(autouse=True)
+def _empty_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+
 def test_every_profile_has_plugin_section():
     for profile in load_profiles():
         assert "rules" in profile["plugin"] and "components" in profile["plugin"]
@@ -257,3 +263,223 @@ def test_plugin_json_nested_past_the_parser_recursion_limit_is_an_invalid_manife
     (tmp_path / ".claude-plugin" / "plugin.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
 
     assert plugin_facts(tmp_path)["manifest_invalid"] is True
+
+
+MANIFEST_LOCATIONS = (
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".cursor-plugin/plugin.json",
+    ".github/plugin/plugin.json",
+    ".plugin/plugin.json",
+    "plugin.json",
+    "plugin.yaml",
+)
+
+
+def _report(target: Path, out: Path) -> tuple[str, dict]:
+    """The plugin panel and schema hints as printed, and the JSON block, of ``harness-check <target>``."""
+    result = CliRunner().invoke(cli, ["harness-check", str(target), "--json", str(out)])
+    assert result.exit_code == 0, result.output
+    panel = result.output.split("Harness compatibility")[0] + "\n".join(_schema_hints(result.output))
+    return panel, json.loads(out.read_text(encoding="utf-8"))["harness_compatibility"]
+
+
+@pytest.mark.parametrize("manifest", MANIFEST_LOCATIONS)
+def test_manifest_path_reports_the_same_as_the_plugin_folder(tmp_path: Path, manifest: str):
+    root = _plugin(tmp_path / "demo-plugin", manifest, components=("skills", "commands", "mcp")).resolve()
+    panel, block = _report(root, tmp_path / "out.json")
+    assert "Plugin compatibility · demo" in panel
+    assert list(block) == [f"{root} (plugin)", str(root / "skills" / "demo")]
+    assert _report(root / manifest, tmp_path / "out.json") == (panel, block)
+    assert _report((root / manifest).parent, tmp_path / "out.json") == (panel, block)
+
+
+@pytest.mark.parametrize("manifest", [rel for rel in MANIFEST_LOCATIONS if "/" in rel])
+def test_manifest_folder_is_not_a_plugin_root(tmp_path: Path, manifest: str):
+    root = _plugin(tmp_path / "demo-plugin", manifest)
+    assert is_plugin_root(root) and not is_plugin_root((root / manifest).parent)
+
+
+def test_plugin_called_plugin_or_under_dot_github_is_checked_as_itself(tmp_path: Path):
+    plugins = [
+        (tmp_path / "a" / "plugin", "plugin.json"),
+        (tmp_path / "b" / "plugin", ".claude-plugin/plugin.json"),
+        (tmp_path / "c" / ".github" / "plugins" / "demo", ".claude-plugin/plugin.json"),
+        (tmp_path / "d" / ".github" / "plugin", ".claude-plugin/plugin.json"),
+    ]
+    for folder, manifest in plugins:
+        root = _plugin(folder, manifest).resolve()
+        assert is_plugin_root(root)
+        assert f"{root} (plugin)" in _report(root, tmp_path / "out.json")[1]
+        assert f"{root} (plugin)" in _report(root / manifest, tmp_path / "out.json")[1]
+
+
+def test_other_files_and_skill_paths_are_read_as_before(tmp_path: Path):
+    root = _plugin(tmp_path / "demo-plugin", ".claude-plugin/plugin.json").resolve()
+    (root / "README.md").write_text("# demo\n", encoding="utf-8")
+    expected = _report(root, tmp_path / "out.json")
+    assert _report(root / "README.md", tmp_path / "out.json") == expected
+    for skill in (root / "skills" / "demo", root / "skills" / "demo" / "SKILL.md"):
+        assert list(_report(skill, tmp_path / "out.json")[1]) == [str(root / "skills" / "demo")]
+
+
+def test_another_file_in_the_manifest_folder_stands_for_the_plugin(tmp_path: Path):
+    root = _plugin(tmp_path / "demo-plugin", ".claude-plugin/plugin.json").resolve()
+    marketplace = root / ".claude-plugin" / "marketplace.json"
+    marketplace.write_text('{"name": "m", "plugins": []}', encoding="utf-8")
+    assert _report(marketplace, tmp_path / "out.json") == _report(root, tmp_path / "out.json")
+
+
+@pytest.mark.parametrize("with_codex_manifest", [False, True])
+def test_manifest_folder_without_a_plugin_manifest_is_not_read_as_its_parent(tmp_path: Path, with_codex_manifest: bool):
+    repo = tmp_path / "repo"
+    (repo / ".claude-plugin").mkdir(parents=True)
+    marketplace = repo / ".claude-plugin" / "marketplace.json"
+    marketplace.write_text('{"name": "m", "plugins": []}', encoding="utf-8")
+    if with_codex_manifest:
+        (repo / ".codex-plugin").mkdir()
+        (repo / ".codex-plugin/plugin.json").write_text('{"name": "codex-demo"}', encoding="utf-8")
+    (repo / "skills" / "demo").mkdir(parents=True)
+    (repo / "skills" / "demo" / "SKILL.md").write_text("---\nname: demo\ndescription: Use when testing.\n---\nBody\n")
+    for target in (marketplace.parent, marketplace):
+        result = CliRunner().invoke(cli, ["harness-check", str(target)])
+        assert result.exit_code != 0 and "No skills found" in result.output
+
+
+@pytest.mark.parametrize("manifest", [".claude-plugin/plugin.json", "plugin.json", "plugin.yaml"])
+def test_symlinked_manifest_is_checked_from_its_plugin_root(tmp_path: Path, manifest: str):
+    root = _plugin(tmp_path / "demo-plugin", manifest)
+    link = root / manifest
+    contents = tmp_path / "shared-manifest"
+    link.rename(contents)
+    try:
+        link.symlink_to(contents)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    assert _report(link, tmp_path / "out.json") == _report(root, tmp_path / "out.json")
+
+
+@pytest.mark.parametrize("alias_folder", ["", ".claude-plugin"])
+def test_other_symlinked_file_still_checks_its_destination_directory(tmp_path: Path, alias_folder: str):
+    root = _plugin(tmp_path / "demo-plugin", ".claude-plugin/plugin.json")
+    readme = root / "README.md"
+    readme.write_text("# Demo", encoding="utf-8")
+    other = _plugin(tmp_path / "other-plugin", ".claude-plugin/plugin.json")
+    alias = other / alias_folder / "shared-readme.md"
+    try:
+        alias.symlink_to(readme)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    assert _report(alias, tmp_path / "out.json") == _report(root, tmp_path / "out.json")
+
+
+def test_plugin_root_for_keeps_relative_paths_and_agrees_with_validate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from skillevaluator.cli_core import resolve_plugin_path
+    from skillevaluator.harness.plugin import plugin_root_for
+
+    root = _plugin(tmp_path / "demo-plugin", ".claude-plugin/plugin.json")
+    manifest = root / ".claude-plugin" / "plugin.json"
+    assert plugin_root_for(manifest) == resolve_plugin_path(manifest) == root
+    monkeypatch.chdir(tmp_path)
+    assert plugin_root_for(Path("demo-plugin/.claude-plugin")) == Path("demo-plugin")
+    monkeypatch.chdir(root)
+    assert plugin_root_for(Path(".claude-plugin/plugin.json")) == Path()
+    assert is_plugin_root(Path()) and not is_plugin_root(Path(".claude-plugin"))
+
+
+_CLEAN_SKILL = "---\nname: demo\ndescription: Use when testing.\n---\n# Demo\n\nBody\n"
+
+
+def _schema_hints(output: str) -> list[str]:
+    return [line for line in output.splitlines() if line.startswith("Tier 1 schema also fails for ")]
+
+
+def test_harness_check_prints_no_schema_hint_for_the_plugin_entry(tmp_path: Path):
+    root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json")
+    (root / "skills/demo/SKILL.md").write_text(_CLEAN_SKILL, encoding="utf-8")
+    out = tmp_path / "h.json"
+    result = CliRunner().invoke(cli, ["harness-check", str(root), "--json", str(out)])
+    assert result.exit_code == 0, result.output
+    assert "Plugin compatibility" in result.output and _schema_hints(result.output) == []
+    block = json.loads(out.read_text(encoding="utf-8"))["harness_compatibility"]
+    assert [key.endswith(" (plugin)") for key in block] == [True, False]  # the plugin rows stay in the JSON
+
+
+@pytest.mark.parametrize("manifest", [".claude-plugin/plugin.json", ".github/plugin/plugin.json"])
+def test_manifest_file_under_a_directory_alias_uses_the_plugin_report(tmp_path: Path, manifest: str):
+    root = _plugin(tmp_path / "demo-bundle", manifest).resolve()
+    alias = tmp_path / "manifest-folder"
+    try:
+        alias.symlink_to((root / manifest).parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    # Place a sibling at the synthetic report label to catch filesystem-based filtering.
+    root.with_name(f"{root.name} (plugin)").mkdir()
+    out = tmp_path / "out.json"
+    expected = _report(root, out)
+    panel, block = expected
+    assert list(block) == [f"{root} (plugin)", str(root / "skills" / "demo")]
+    assert panel.count("Tier 1 schema also fails for ") == 1
+    assert "Tier 1 schema also fails for demo: " in panel
+    assert _report(alias, out) == expected
+    assert _report(alias / "plugin.json", out) == expected
+
+
+def test_harness_check_prints_no_schema_hint_for_a_plugin_without_skills(tmp_path: Path):
+    root = _plugin(tmp_path / "p", ".codex-plugin/plugin.json", components=("commands",))
+    result = CliRunner().invoke(cli, ["harness-check", str(root)])
+    assert result.exit_code == 0, result.output
+    assert "Plugin compatibility" in result.output and _schema_hints(result.output) == []
+
+
+def test_harness_check_keeps_the_schema_hint_for_a_plugin_member_skill(tmp_path: Path):
+    root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json")  # its skill has no top-level heading
+    result = CliRunner().invoke(cli, ["harness-check", str(root)])
+    assert result.exit_code == 0, result.output
+    assert _schema_hints(result.output) == [
+        "Tier 1 schema also fails for demo: [SCHEMA-HIGH] Missing top-level heading (# Title) in SKILL.md body. "
+        "Run `skillevaluator validate --tiers 1` for details."
+    ]
+
+
+def test_skill_folder_named_like_a_plugin_entry_keeps_its_schema_hint(tmp_path: Path):
+    _plugin(tmp_path / "demo", ".claude-plugin/plugin.json", components=())
+    skill = tmp_path / "demo (plugin)"  # the same text as the key of the plugin entry for ./demo
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(_CLEAN_SKILL, encoding="utf-8")
+    for target in (skill, tmp_path):
+        result = CliRunner().invoke(cli, ["harness-check", str(target)])
+        assert result.exit_code == 0, result.output
+        hints = _schema_hints(result.output)
+        assert len(hints) == 1 and hints[0].startswith(
+            "Tier 1 schema also fails for demo (plugin): [SCHEMA-HIGH] Folder 'demo (plugin)' must be kebab-case"
+        )
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="needs file permissions")
+@pytest.mark.parametrize("target", [".claude-plugin/plugin.json", ".claude-plugin", "."])
+def test_folder_that_cannot_be_examined_does_not_stop_the_check(tmp_path: Path, target: str):
+    root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json")
+    (root / ".github").mkdir()
+    (root / ".github").chmod(0)
+    try:
+        result = CliRunner().invoke(cli, ["harness-check", str(root / target), "--harness", "claude-code"])
+    finally:
+        (root / ".github").chmod(0o755)
+    assert result.exit_code == 0 and "Plugin compatibility" in result.output, result.output
+
+
+def test_relative_manifest_from_its_folder_uses_the_plugin_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=())
+    direct_report = tmp_path / "direct.json"
+    relative_report = tmp_path / "relative.json"
+    direct = CliRunner().invoke(cli, ["harness-check", str(root), "--json", str(direct_report)])
+    assert direct.exit_code == 0, direct.output
+    monkeypatch.chdir(root / ".claude-plugin")
+    relative = CliRunner().invoke(cli, ["harness-check", "plugin.json", "--json", str(relative_report)])
+    assert relative.exit_code == 0, relative.output
+    assert "Tier 1 schema also fails" not in relative.output
+    assert relative_report.read_bytes() == direct_report.read_bytes()

@@ -3479,7 +3479,7 @@ validate.help_group_descriptions = {
 
 
 @cli.command("harness-check")
-@_target_argument
+@click.argument("target_path", type=click.Path(exists=True, path_type=Path))
 @click.option(
     "--harness",
     default="all",
@@ -3542,7 +3542,8 @@ def harness_check(
 ) -> None:
     """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
     from skillevaluator.harness.overlay import profile_names
-    from skillevaluator.harness.report import run_harness_check
+    from skillevaluator.harness.plugin import plugin_root_for
+    from skillevaluator.harness.report import plugin_key, run_harness_check
     from skillevaluator.reporting.console_ui import make_view_console
 
     try:
@@ -3560,16 +3561,20 @@ def harness_check(
                 f"unknown harness {', '.join(unknown)}; choose from {', '.join(sorted(known))}",
                 param_hint="--harness-version",
             )
+        target = plugin_root_for(target_path, resolve_path=True)
         block = run_harness_check(
-            target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose, config=config
+            target, harness, harness_profiles, console=make_view_console(), verbose=verbose, config=config
         )
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if not block:
-        raise click.ClickException(f"No skills found in {target_path}")
+        raise click.ClickException(f"No skills found in {target_path.resolve()}")
     from skillevaluator.validators.schema import SchemaValidator
 
+    plugin_entry = plugin_key(target)
     for skill in block:
+        if skill == plugin_entry:
+            continue
         schema = SchemaValidator().validate(Path(skill))
         if not schema.passed and schema.errors:
             click.echo(

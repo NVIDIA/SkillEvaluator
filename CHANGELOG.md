@@ -22,8 +22,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
-- Tier 1 accepts automatically discovered stable SkillSpector releases
-  starting at 2.13.7. Managed installs and the Tier 1 CI image pin 2.13.7.
+- Tier 1 accepts automatically discovered SkillSpector releases starting at
+  2.13.7 that report a plain `X.Y.Z` version. Other versions, such as
+  `2.13.7rc1` or `2.13.7.post1`, use the managed runtime. Managed installs and
+  the Tier 1 CI image pin 2.13.7.
 - Tier 1 plugin reports label the validator `Plugin Schema & Component Checks` and
   use `manifest_missing_or_unsafe` for absent or unsafe manifests. Manifest schema
   validation runs even when `--checks` selects other checks. Auto-detection

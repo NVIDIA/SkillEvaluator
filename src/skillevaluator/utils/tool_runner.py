@@ -25,6 +25,7 @@ from packaging.version import InvalidVersion, Version
 
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
+from skillevaluator.models.skill import SEMVER_RE
 from skillevaluator.utils.scanner_install import (
     GITLEAKS_VERSION,
     SKILLSPECTOR_UV_ENV,
@@ -219,7 +220,7 @@ class ExternalTool:
     def _accept_skillspector_candidate(self, version: str | None) -> bool:
         """Keep a supported stable release or switch to the managed runtime."""
         try:
-            parsed_version = Version(version) if version is not None else None
+            parsed_version = Version(version) if version is not None and SEMVER_RE.fullmatch(version) else None
         except InvalidVersion:
             parsed_version = None
         if (

@@ -504,6 +504,8 @@ class TestAutomaticSkillSpectorVersion:
             ("SkillSpector v2.13.7", 2),
             ("SkillSpector v2.13.7rc1", 0),
             ("SkillSpector v2.13.7_rc1", 0),
+            ("SkillSpector v2.13.7.post1", 0),
+            ("SkillSpector v2.13.7+local", 0),
             ("Dependency foo 2.13.7 initialized; scanner version unavailable", 0),
             ("SkillSpector v2.13.7\nSkillSpector v2.11.2", 0),
         ],

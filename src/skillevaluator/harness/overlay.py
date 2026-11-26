@@ -158,6 +158,28 @@ def _link_location_parts(path: Path) -> tuple[str, ...]:
     return tuple(parts)
 
 
+def _same_directory(actual: Path, expected: Path) -> bool:
+    """True when both paths name one folder.
+
+    A cased alias on a case-insensitive volume counts (`.PI/skills` is where pi's lowercase default lands), while a
+    distinct folder on a case-sensitive volume does not.
+    """
+    try:
+        return expected.samefile(actual)
+    except OSError:
+        return False
+
+
+def _same_root(window: tuple[str, ...], root: str, above: tuple[str, ...]) -> bool:
+    """Whether *window* names the known *root*, by name or by being the same folder spelled differently."""
+    if "/".join(window) == root:
+        return True
+    words = root.split("/")
+    if tuple(word.casefold() for word in window) != tuple(word.casefold() for word in words):
+        return False
+    return _same_directory(Path(*above, *window), Path(*above, *words))
+
+
 def _install_root(skill_path: Path) -> tuple[str | None, int]:
     # Harnesses scan the folder a skill is installed in, so a symlinked skill counts where the link is.
     parts = _link_location_parts(skill_path)
@@ -171,7 +193,7 @@ def _install_root(skill_path: Path) -> tuple[str | None, int]:
         # index + size == len(parts): the skill dir is the root itself (pi's
         # loose manifests); that counts as installed at the root, depth 0.
         for index in range(len(parts) - size, -1, -1):
-            if "/".join(parts[index : index + size]) == root:
+            if _same_root(tuple(parts[index : index + size]), root, tuple(parts[:index])):
                 user = parts[:index] in homes
                 return f"~/{root}" if user else root, max(len(parts) - (index + size) - 1, 0)
     return None, 0
@@ -180,6 +202,13 @@ def _install_root(skill_path: Path) -> tuple[str | None, int]:
 #: pi 1.6.0 discovery (collectSkillEntries modes "pi"/"agents"): a loose
 #: manifest at the .pi skills roots loads with any .md name, a nested one only
 #: as exact SKILL.md; under .agents/skills it is the other way around.
+#: (path suffix, scan mode) of the roots pi discovers on its own.
+_PI_ROOT_SUFFIXES = (
+    ("/.pi/skills", "pi"),
+    ("/.pi/agent/skills", "pi"),
+    ("/.agents/skills", "agents"),
+)
+
 _PI_ROOT_FAMILIES = {
     ".pi/skills": "pi",
     ".pi/agent/skills": "pi",
@@ -200,7 +229,7 @@ def _pi_manifest_ignored(skill_path: Path) -> bool:
     for root, family in _PI_ROOT_FAMILIES.items():
         size = len(root.split("/"))
         for index in range(len(parts) - size, -1, -1):
-            if "/".join(parts[index : index + size]) == root:
+            if _same_root(tuple(parts[index : index + size]), root, tuple(parts[:index])):
                 return (family == "pi") != (index + size == len(parts))  # the skill dir is the root: loose
     return False
 
@@ -984,12 +1013,20 @@ def _on_disk_spelling(path: Path) -> Path:
 
 
 def _pi_skills_mode(base: Path) -> str | None:
-    """How pi 1.6.0 scans *base*: "pi" roots keep loose .md files at the root, .agents/skills keeps them only nested."""
-    posix = base.absolute().as_posix()
-    if posix.endswith("/.pi/skills") or posix.endswith("/.pi/agent/skills"):
-        return "pi"
-    if posix.endswith("/.agents/skills"):
-        return "agents"
+    """How pi 1.6.0 scans *base*: "pi" roots keep loose .md files at the root, .agents/skills keeps them only nested.
+
+    A root stored with other case (".PI/skills" on a case-insensitive volume) is the folder pi's lowercase default
+    reaches, so a name that misses falls back to the folder identity, which keeps a distinct ".PI" apart from ".pi" on
+    a case-sensitive volume.
+    """
+    absolute = base.absolute()
+    posix = absolute.as_posix()
+    for suffix, mode in _PI_ROOT_SUFFIXES:
+        if posix.endswith(suffix):
+            return mode
+        words = suffix.strip("/").split("/")
+        if len(absolute.parts) > len(words) and _same_directory(absolute, Path(*absolute.parts[: -len(words)], *words)):
+            return mode
     return None
 
 

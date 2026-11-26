@@ -2203,3 +2203,35 @@ def test_on_disk_spelling_keeps_missing_components(tmp_path: Path):
     missing = tmp_path / "nope" / "sky"
 
     assert overlay._on_disk_spelling(missing) == missing.absolute()
+
+
+@pytest.mark.parametrize("stored", [".PI/skills", ".pi/Skills"])
+def test_pi_root_stored_with_other_case_is_the_same_root(tmp_path: Path, stored: str):
+    """Pi's lowercase default reaches a root stored with other case on a case-insensitive volume, so the verdict matches."""
+    if not _case_insensitive(tmp_path):
+        pytest.skip("a case-sensitive volume has no cased alias")
+    proj = tmp_path / "proj"
+    group = proj / stored / "group"
+    _ancestor_manifest(group)
+    sky = _install(group, "sky")
+    (sky / "SKILL.md").write_text(
+        "---\nname: sky\ndescription: Use when testing catalogs.\ndisable-model-invocation: true\n---\n" + BODY,
+        encoding="utf-8",
+    )
+
+    row = _rows(proj / ".pi" / "skills" / "group" / "sky")["pi"]
+
+    ids = {f["id"] for f in row["findings"]}
+    assert row["status"] == "not_loaded" and "PI-ANCESTOR-MANIFEST" in ids and "PI-HIDDEN" not in ids
+
+
+def test_distinct_cased_root_is_not_the_pi_root(tmp_path: Path):
+    """A `.PI` folder that is not `.pi` is outside pi's discovery: its ancestor manifest is not pi's cutoff."""
+    root, other = tmp_path / "proj" / ".pi" / "skills", tmp_path / "proj" / ".PI" / "skills"
+    other.mkdir(parents=True)
+    if _case_insensitive(tmp_path):
+        pytest.skip("a case-insensitive volume cannot hold both spellings")
+    _ancestor_manifest(root)
+    sky = _install(other, "sky")
+
+    assert "PI-ANCESTOR-MANIFEST" not in {f["id"] for f in _rows(sky)["pi"]["findings"]}

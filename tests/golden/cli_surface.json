@@ -71,9 +71,12 @@
     "context-optimization-check": {
       "params": [
         {"name": "skill_path", "opts": ["skill_path"], "param_type": "argument", "required": true, "type": "path"},
+        {"choices": ["skill", "plugin", "auto"], "default": "auto", "name": "content_type", "opts": ["--type"], "param_type": "option"},
         {"default": "0.8", "name": "threshold", "opts": ["--threshold"], "param_type": "option", "type": "float"},
         {"name": "model", "opts": ["--model"], "param_type": "option", "type": "text"},
         {"name": "llm_model", "opts": ["--llm-model"], "param_type": "option", "type": "text"},
+        {"name": "max_scalar_comparisons", "opts": ["--plugin-context-max-scalar-comparisons"], "param_type": "option", "type": "integer range"},
+        {"name": "max_chunks", "opts": ["--plugin-context-max-chunks"], "param_type": "option", "type": "integer range"},
         {
           "choices": ["cli", "json", "html", "markdown", "sarif", "junit", "github"],
           "default": "('cli',)",
@@ -109,9 +112,14 @@
     "dedup-scan": {
       "params": [
         {"name": "skill_path", "opts": ["skill_path"], "param_type": "argument", "required": true, "type": "path"},
+        {"choices": ["skill", "plugin", "auto"], "default": "auto", "name": "content_type", "opts": ["--type"], "param_type": "option"},
         {"default": "0.8", "name": "threshold", "opts": ["--threshold"], "param_type": "option", "type": "float"},
         {"name": "llm_model", "opts": ["--llm-model"], "param_type": "option", "type": "text"},
         {"name": "model", "opts": ["--model"], "param_type": "option", "type": "text"},
+        {"name": "catalog", "opts": ["--catalog"], "param_type": "option", "type": "file"},
+        {"default": "False", "is_flag": true, "name": "llm_verdict", "opts": ["--llm"], "param_type": "option", "type": "boolean"},
+        {"name": "max_scalar_comparisons", "opts": ["--plugin-context-max-scalar-comparisons"], "param_type": "option", "type": "integer range"},
+        {"name": "max_chunks", "opts": ["--plugin-context-max-chunks"], "param_type": "option", "type": "integer range"},
         {
           "choices": ["cli", "json", "html", "markdown", "sarif", "junit", "github"],
           "default": "('cli',)",
@@ -437,7 +445,7 @@
     "similarity-check": {
       "params": [
         {"name": "content_path", "opts": ["content_path"], "param_type": "argument", "required": true, "type": "path"},
-        {"choices": ["skill", "rules", "workflows", "auto"], "default": "auto", "name": "content_type", "opts": ["--type"], "param_type": "option"},
+        {"choices": ["skill", "rules", "workflows", "plugin", "auto"], "default": "auto", "name": "content_type", "opts": ["--type"], "param_type": "option"},
         {"default": "0.75", "name": "threshold", "opts": ["--threshold"], "param_type": "option", "type": "float"},
         {"default": "False", "is_flag": true, "name": "full_body", "opts": ["--full-body"], "param_type": "option", "type": "boolean"},
         {"name": "model", "opts": ["--model"], "param_type": "option", "type": "text"},
@@ -447,6 +455,8 @@
         {"name": "save_catalog", "opts": ["--save-catalog"], "param_type": "option", "type": "file"},
         {"name": "cache", "opts": ["--cache"], "param_type": "option", "type": "path"},
         {"name": "save_cache", "opts": ["--save-cache"], "param_type": "option", "type": "path"},
+        {"default": "False", "is_flag": true, "name": "llm_verdict", "opts": ["--llm"], "param_type": "option", "type": "boolean"},
+        {"name": "llm_model", "opts": ["--llm-model"], "param_type": "option", "type": "text"},
         {
           "choices": ["cli", "json", "html", "markdown", "sarif", "junit", "github"],
           "default": "('cli',)",
@@ -597,9 +607,12 @@
         "context-optimization-check": {
           "params": [
             {"name": "skill_path", "opts": ["skill_path"], "param_type": "argument", "required": true, "type": "path"},
+            {"choices": ["skill", "plugin", "auto"], "default": "auto", "name": "content_type", "opts": ["--type"], "param_type": "option"},
             {"default": "0.8", "name": "threshold", "opts": ["--threshold"], "param_type": "option", "type": "float"},
             {"name": "model", "opts": ["--model"], "param_type": "option", "type": "text"},
             {"name": "llm_model", "opts": ["--llm-model"], "param_type": "option", "type": "text"},
+            {"name": "max_scalar_comparisons", "opts": ["--plugin-context-max-scalar-comparisons"], "param_type": "option", "type": "integer range"},
+            {"name": "max_chunks", "opts": ["--plugin-context-max-chunks"], "param_type": "option", "type": "integer range"},
             {
               "choices": ["cli", "json", "html", "markdown", "sarif", "junit", "github"],
               "default": "('cli',)",
@@ -614,9 +627,14 @@
         "dedup-scan": {
           "params": [
             {"name": "skill_path", "opts": ["skill_path"], "param_type": "argument", "required": true, "type": "path"},
+            {"choices": ["skill", "plugin", "auto"], "default": "auto", "name": "content_type", "opts": ["--type"], "param_type": "option"},
             {"default": "0.8", "name": "threshold", "opts": ["--threshold"], "param_type": "option", "type": "float"},
             {"name": "llm_model", "opts": ["--llm-model"], "param_type": "option", "type": "text"},
             {"name": "model", "opts": ["--model"], "param_type": "option", "type": "text"},
+            {"name": "catalog", "opts": ["--catalog"], "param_type": "option", "type": "file"},
+            {"default": "False", "is_flag": true, "name": "llm_verdict", "opts": ["--llm"], "param_type": "option", "type": "boolean"},
+            {"name": "max_scalar_comparisons", "opts": ["--plugin-context-max-scalar-comparisons"], "param_type": "option", "type": "integer range"},
+            {"name": "max_chunks", "opts": ["--plugin-context-max-chunks"], "param_type": "option", "type": "integer range"},
             {
               "choices": ["cli", "json", "html", "markdown", "sarif", "junit", "github"],
               "default": "('cli',)",
@@ -631,7 +649,7 @@
         "similarity-check": {
           "params": [
             {"name": "content_path", "opts": ["content_path"], "param_type": "argument", "required": true, "type": "path"},
-            {"choices": ["skill", "rules", "workflows", "auto"], "default": "auto", "name": "content_type", "opts": ["--type"], "param_type": "option"},
+            {"choices": ["skill", "rules", "workflows", "plugin", "auto"], "default": "auto", "name": "content_type", "opts": ["--type"], "param_type": "option"},
             {"default": "0.75", "name": "threshold", "opts": ["--threshold"], "param_type": "option", "type": "float"},
             {"default": "False", "is_flag": true, "name": "full_body", "opts": ["--full-body"], "param_type": "option", "type": "boolean"},
             {"name": "model", "opts": ["--model"], "param_type": "option", "type": "text"},
@@ -641,6 +659,8 @@
             {"name": "save_catalog", "opts": ["--save-catalog"], "param_type": "option", "type": "file"},
             {"name": "cache", "opts": ["--cache"], "param_type": "option", "type": "path"},
             {"name": "save_cache", "opts": ["--save-cache"], "param_type": "option", "type": "path"},
+            {"default": "False", "is_flag": true, "name": "llm_verdict", "opts": ["--llm"], "param_type": "option", "type": "boolean"},
+            {"name": "llm_model", "opts": ["--llm-model"], "param_type": "option", "type": "text"},
             {
               "choices": ["cli", "json", "html", "markdown", "sarif", "junit", "github"],
               "default": "('cli',)",
@@ -955,6 +975,20 @@
             {"name": "destination", "opts": ["--output"], "param_type": "option", "type": "file"}
           ]
         },
+        "report-plugin": {
+          "params": [
+            {"name": "run_dir", "opts": ["run_dir"], "param_type": "argument", "required": true, "type": "directory"},
+            {
+              "choices": ["cli", "json", "html", "markdown", "sarif", "benchmark"],
+              "default": "('cli',)",
+              "multiple": true,
+              "name": "report_formats",
+              "opts": ["--report", "-r"],
+              "param_type": "option"
+            },
+            {"default": "reports", "name": "output_dir", "opts": ["--output-dir", "-o"], "param_type": "option", "type": "directory"}
+          ]
+        },
         "select-decoys": {
           "params": [
             {"name": "skill_path", "opts": ["skill_path"], "param_type": "argument", "required": true, "type": "directory"},
@@ -1187,6 +1221,11 @@
         {"name": "evaluated_source_repository", "opts": ["--evaluated-source-repository"], "param_type": "option", "type": "text"},
         {"name": "evaluated_source_revision", "opts": ["--evaluated-source-revision"], "param_type": "option", "type": "text"},
         {"name": "evaluator_container_revision", "opts": ["--evaluator-container-revision"], "param_type": "option", "type": "text"},
+        {"name": "repo_root", "opts": ["--repo-root"], "param_type": "option", "type": "directory"},
+        {"default": "False", "is_flag": true, "name": "resolve_endpoints", "opts": ["--resolve-endpoints"], "param_type": "option", "type": "boolean"},
+        {"default": "False", "is_flag": true, "name": "claude_validate", "opts": ["--claude-validate"], "param_type": "option", "type": "boolean"},
+        {"name": "max_scalar_comparisons", "opts": ["--plugin-context-max-scalar-comparisons"], "param_type": "option", "type": "integer range"},
+        {"name": "max_chunks", "opts": ["--plugin-context-max-chunks"], "param_type": "option", "type": "integer range"},
         {
           "choices": ["cli", "json", "html", "markdown", "sarif", "junit", "github"],
           "default": "('cli',)",

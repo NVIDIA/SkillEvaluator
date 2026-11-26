@@ -1085,6 +1085,8 @@ def _tier3_finite_number(value: object) -> float | None:
 
 _VALIDATOR_CHECK_KEYS = (
     ("schema", "schema"),
+    ("plugin endpoint checks", "endpoint-resolution"),
+    ("claude plugin validate parity", "claude-validate"),
     ("security scan", "security"),
     ("pii", "pii"),
     ("license", "license"),

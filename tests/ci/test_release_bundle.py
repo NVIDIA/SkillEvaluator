@@ -100,6 +100,8 @@ def test_release_bundle_contains_deterministic_pins_and_verified_evidence(qualif
     assert archive.read_bytes() == (repeated / "ci/bundles" / VERSION / archive_name).read_bytes()
     with ZipFile(archive) as released:
         assert released.namelist() == sorted(path.name for path in bundle.iterdir() if path != archive)
+        assert "comment-skill-checks.yml" in released.namelist()
+        assert "comment-skill-checks-stable.yml" not in released.namelist()
         assert all(released.read(name) == (bundle / name).read_bytes() for name in released.namelist())
     sums = (bundle / "SHA256SUMS.txt").read_text().splitlines()
     assert sums == [
@@ -131,7 +133,7 @@ def test_release_bundle_contains_deterministic_pins_and_verified_evidence(qualif
     assert all_tiers["tools_ref"] == all_tiers["gitlab_ref"] == all_tiers["feedback_ref"] == SOURCE
     assert all_tiers["evaluator_version"] == VERSION
     assert all_tiers["runtime_lock_sha256"] == hashlib.sha256((ROOT / "uv.lock").read_bytes()).hexdigest()
-    for name in ("skill-checks-stable.yml", "publish-skill-reports-stable.yml"):
+    for name in ("skill-checks-stable.yml", "comment-skill-checks-stable.yml", "publish-skill-reports-stable.yml"):
         workflow = (output / ".github/workflows" / name).read_text()
         assert f"# SkillEvaluator release: v{VERSION}" in workflow
         assert SOURCE in workflow

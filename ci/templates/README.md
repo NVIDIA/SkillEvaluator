@@ -20,12 +20,14 @@ a separate demo repository.
 ## Get a version you can run
 
 **These source templates contain placeholders.** Copy the
-[ready-to-use configurations](../bundles/1.2.0/README.md) instead; their reviewed
+[ready-to-use configurations](../bundles/1.2.1/README.md) instead; their reviewed
 workflow commits and container image digest are already filled in.
-The 1.2.0 bundle includes the comments-only workflow; the archived 0.9.0 bundle
+The 1.2.1 bundle includes the comments-only workflow; the archived 0.9.0 bundle
 does not. Default CLI feedback still configures the hosted publisher. For
-comments only, copy the versioned workflow and follow the
-[comment setup](../README.md#pr-comments-without-hosted-reports).
+comments only, follow the [comment setup](../README.md#pr-comments-without-hosted-reports).
+For a scan following `@stable`, copy the
+[stable comment template](manual/comment-skill-checks-stable.yml) once the
+comments-only workflow is promoted to the channel.
 
 Open a file in that folder and use GitHub's **Raw** view to copy its complete
 contents. The generated files and their checksums are kept in this public

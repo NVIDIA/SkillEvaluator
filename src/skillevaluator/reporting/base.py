@@ -2804,12 +2804,13 @@ class ReporterBase(ABC):
         """
         ...
 
-    def save(self, results: list[ValidationResult], output_path: Path) -> None:
+    def save(self, results: list[ValidationResult], output_path: Path, *, plugin_static: bool = False) -> None:
         """Save rendered output to file.
 
         Args:
             results: List of ValidationResults to render
             output_path: Path to save the output file
+            plugin_static: Include the bounded plugin static evidence projection.
 
         The default implementation renders all results and atomically writes a
         regular file without following symlink or reparse-point output paths.
@@ -2818,9 +2819,15 @@ class ReporterBase(ABC):
         Raises:
             UnsafeReportPathError: If the destination cannot be written safely.
         """
+        if plugin_static:
+            from skillevaluator.reporting.plugin_static_render import render_plugin_static_reports
+
+            document = render_plugin_static_reports(results, reporters=(self,))[self.name]
+        else:
+            document = self.render_all(results)
         # A file name that is not valid UTF-8 reaches messages as lone
         # surrogates; write those as escapes instead of failing the report.
-        payload = self.render_all(results).encode("utf-8", "backslashreplace")
+        payload = document.encode("utf-8", "backslashreplace")
         _write_report_atomically(output_path, payload)
 
     def get_file_extension(self) -> str:

@@ -275,8 +275,9 @@ def _snapshot_report(args: list[str], report: dict, *, exit_code: int = 0) -> To
     )
 
 
+@pytest.mark.parametrize("tier1_plugin", [False, True], ids=["security-only", "tier1-plugin"])
 @patch("skillevaluator.validators.security.Tools")
-def test_reviewed_hook_waiver_clears_only_the_manifest_gate(mock_tools, tmp_path: Path) -> None:
+def test_reviewed_hook_waiver_clears_only_the_manifest_gate(mock_tools, tmp_path: Path, tier1_plugin: bool) -> None:
     root = _review_plugin(tmp_path)
     _write(root, {"skills/bundled/SKILL.md": "---\nname: bundled\ndescription: Bundled skill\n---\n"})
     waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
@@ -293,7 +294,14 @@ def test_reviewed_hook_waiver_clears_only_the_manifest_gate(mock_tools, tmp_path
 
     mock_tools.skillspector.version = "2.13.6"
     mock_tools.skillspector.run.side_effect = scan
-    result = SecurityValidator(hook_waivers=waiver).validate_security_only(root)
+    if tier1_plugin:
+        from skillevaluator.tier1.commands import run_validation
+
+        results = run_validation(root, content_type="plugin", checks="security", hook_waivers=waiver)
+        (result,) = [entry for entry in results if entry.metadata.get("plugin_check") == "security"]
+        assert result.metadata["plugin_scan_scope"] == "whole_tree"
+    else:
+        result = SecurityValidator(hook_waivers=waiver).validate_security_only(root)
 
     assert result.passed and not result.is_incomplete
     mock_tools.skillspector.run.assert_called_once()
@@ -490,8 +498,11 @@ def test_waiver_path_cannot_normalize_away_a_linked_ancestor(mock_tools, tmp_pat
     mock_tools.skillspector.run.assert_not_called()
 
 
+@pytest.mark.parametrize("verify_plugin", [False, True], ids=["security-only", "tier1-plugin-verify"])
 @patch("skillevaluator.validators.security.Tools")
-def test_reviewed_package_keeps_independent_high_findings(mock_tools, tmp_path: Path) -> None:
+def test_reviewed_package_keeps_independent_high_findings(
+    mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verify_plugin: bool
+) -> None:
     root = _review_plugin(tmp_path)
     report = _report(_REVIEW_REPORT)
     script = "results/plugin_paths.py"
@@ -510,7 +521,21 @@ def test_reviewed_package_keeps_independent_high_findings(mock_tools, tmp_path: 
 
     mock_tools.skillspector.version = "2.13.6"
     mock_tools.skillspector.run.side_effect = lambda args, **_kwargs: _snapshot_report(args, report, exit_code=1)
-    result = SecurityValidator(content_type="plugin", hook_waivers=waiver).validate_security_only(root)
+    if verify_plugin:
+        from skillevaluator.tier1.commands import run_validation
+
+        verified_source = []
+
+        def verify_source(_validator, _result, snapshot):
+            assert snapshot.resolve() != root.resolve()
+            verified_source.append((snapshot / script).read_bytes())
+
+        monkeypatch.setattr(SecurityValidator, "_verify_findings_with_llm", verify_source)
+        results = run_validation(root, content_type="plugin", checks="security", hook_waivers=waiver, llm_verify=True)
+        (result,) = [entry for entry in results if entry.metadata.get("plugin_check") == "security"]
+        assert verified_source == [(root / script).read_bytes()]
+    else:
+        result = SecurityValidator(content_type="plugin", hook_waivers=waiver).validate_security_only(root)
 
     assert not result.passed and not result.is_incomplete, result.errors
     assert any(f.severity == Severity.HIGH and f.file_path == script for f in result.findings)

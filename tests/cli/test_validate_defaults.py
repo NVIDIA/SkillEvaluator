@@ -136,6 +136,86 @@ def test_non_skill_default_does_not_generate_or_run_skill_evals(monkeypatch, tmp
     assert result.exit_code == 0, result.output
 
 
+def test_validate_bundle_manifest_runs_static_and_dedup_checks_and_reports_inventory(monkeypatch, tmp_path):
+    from skillevaluator import provider_config
+    from skillevaluator.tier2 import commands
+
+    root = tmp_path / "bundle"
+    manifest = root / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name":"sample-bundle","description":"A sample bundle."}', encoding="utf-8")
+    seen = []
+
+    def dedup(path, **options):
+        seen.append((path, options))
+        result = ValidationResult(validator_name="Bundle overlap")
+        result.add_success("dedup", "Compared bundled content")
+        return [result]
+
+    monkeypatch.setattr(provider_config, "resolve_embedding_provider", lambda: None)
+    monkeypatch.setattr(commands, "run_dedup_scan", dedup)
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", lambda *_a, **_kw: pytest.fail("unexpected evaluation"))
+    output_dir = tmp_path / "reports"
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "validate",
+            str(manifest),
+            "--tiers",
+            "1,2",
+            "--checks",
+            "schema",
+            "--plugin-context-max-chunks",
+            "9",
+            "-r",
+            "json,html",
+            "-o",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [(manifest, {"content_type": "plugin", "max_chunks": 9, "max_scalar_comparisons": None})]
+    document = json.loads(next(output_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert document["plugin_static"]["name"] == "sample-bundle"
+    assert "sample-bundle" in next(output_dir.glob("*.html")).read_text(encoding="utf-8")
+
+
+def test_quiet_bundle_check_progress_includes_optional_checks(monkeypatch, tmp_path):
+    from skillevaluator.validators.claude_plugin_validate import ClaudePluginValidateParity
+    from skillevaluator.validators.endpoint_resolution import EndpointChecker
+
+    manifest = tmp_path / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir()
+    manifest.write_text('{"name": "sample-bundle"}', encoding="utf-8")
+    monkeypatch.setattr(EndpointChecker, "check", lambda _self, _targets: ({}, []))
+    monkeypatch.setattr(
+        ClaudePluginValidateParity,
+        "validate",
+        lambda _self, _root, **_kwargs: ValidationResult("Claude Plugin Validate"),
+    )
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "validate",
+            str(tmp_path),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--resolve-endpoints",
+            "--claude-validate",
+            "-r",
+            "cli",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Tier 1/checks: running - endpoint-resolution" in result.output
+    assert "Tier 1/checks: running - claude-validate" in result.output
+
+
 def test_default_tier3_runs_after_tier1_failure(monkeypatch, tmp_path):
     skill = tmp_path / "failing-skill"
     skill.mkdir()

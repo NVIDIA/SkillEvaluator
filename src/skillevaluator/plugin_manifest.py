@@ -505,7 +505,7 @@ def _probe_manifest_files(root: Path) -> list[SecureFile]:
     return sorted((file for file in files if file is not None), key=lambda item: item.rel_path)
 
 
-def locate_plugin_manifest(path: Path) -> PluginManifestLocation | None:
+def locate_plugin_manifest(path: Path, *, require_agent_plugins_opt_in: bool = False) -> PluginManifestLocation | None:
     """Locate one regular single-link manifest beneath a regular plugin root.
 
     All supported manifest variants are selected during discovery, so a linked,
@@ -513,6 +513,9 @@ def locate_plugin_manifest(path: Path) -> PluginManifestLocation | None:
     variant would otherwise win precedence. The returned object carries the
     discovered inode metadata and must perform the eventual bounded read. The
     other supported manifests in the same root are returned in ``additional``.
+
+    Auto-detection requires a root ``plugin.json`` to opt into Agent Plugins
+    even when the caller passes that file directly.
     """
     target = path.expanduser()
     direct_relative: Path | None = None
@@ -556,9 +559,11 @@ def locate_plugin_manifest(path: Path) -> PluginManifestLocation | None:
     agent_plugins_file = by_relative.get(_AGENT_PLUGINS_RELATIVE)
     if (
         agent_plugins_file is not None
-        and direct_canonical != _AGENT_PLUGINS_RELATIVE
+        and (direct_canonical != _AGENT_PLUGINS_RELATIVE or require_agent_plugins_opt_in)
         and not _is_agent_plugins_manifest(agent_plugins_file, root / agent_plugins_file.relative_path)
     ):
+        if direct_canonical == _AGENT_PLUGINS_RELATIVE:
+            return None
         del by_relative[_AGENT_PLUGINS_RELATIVE]
     present = [relative for relative in _MANIFEST_PATHS if relative in by_relative]
     if direct_relative is not None:

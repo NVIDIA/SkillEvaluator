@@ -36,6 +36,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- NeMo Gym rollout ingestion reads JSONL incrementally instead of retaining
+  whole-file text copies alongside parsed rows. A row beyond the JSON decoder
+  nesting limit is reported as unreadable while healthy rows remain available.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

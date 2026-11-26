@@ -45,24 +45,26 @@ def _safe(value: str) -> str:
 def read_rollouts(path: Path, errors: list[str] | None = None) -> list[dict[str, Any]]:
     """Read a Gym rollouts JSONL file, skipping blank lines.
 
-    A line Gym was still writing when it was stopped (timeout, OOM, full disk) is
-    skipped and reported through ``errors``, so it becomes a missing trial.
+    A line Gym was still writing when it was stopped (timeout, OOM, full disk),
+    or that exceeds the JSON decoder's nesting limit, is skipped and reported
+    through ``errors``, so it becomes a missing trial.
     """
     if not path.is_file():
         return []
     rows: list[dict[str, Any]] = []
     skipped = 0
     # Gym ends each row with "\n"; str.splitlines() would also split on raw U+2028/U+0085 inside strings.
-    for line in path.read_text(encoding="utf-8", errors="replace").split("\n"):
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            skipped += 1
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
+    with path.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except (ValueError, RecursionError):
+                skipped += 1
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
     if skipped and errors is not None:
         lost = (
             "those failure reasons were lost"

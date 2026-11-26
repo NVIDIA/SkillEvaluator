@@ -22,6 +22,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Retained-run history avoids quadratic directory membership scans when
+  combining completed runs and incomplete reservations. Existing chronological
+  ordering and directory eligibility checks are preserved.
 - Tier 1 accepts automatically discovered stable SkillSpector releases
   starting at 2.13.7. Managed installs and the Tier 1 CI image pin 2.13.7.
 - Tier 1 plugin reports label the validator `Plugin Schema & Component Checks` and

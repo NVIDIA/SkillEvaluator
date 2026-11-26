@@ -36,13 +36,15 @@ from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 def history_directories(root: Path) -> list[Path]:
     """Keep shared ordering, including reservations without completion artifacts."""
     directories = ordered_run_directories(root, completed_only=False)
+    known = set(directories)
     try:
         for candidate in root.iterdir():
             parsed = _run_timestamp_parts(candidate.name)
             if parsed is None or (parsed[1] and not _CURRENT_RUN_SUFFIX.fullmatch(parsed[1])):
                 continue
-            if candidate not in directories and stat.S_ISDIR(candidate.lstat().st_mode) and not candidate.is_symlink():
+            if candidate not in known and stat.S_ISDIR(candidate.lstat().st_mode) and not candidate.is_symlink():
                 directories.append(candidate)
+                known.add(candidate)
     except OSError:
         pass
 

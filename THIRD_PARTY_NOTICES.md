@@ -57,7 +57,7 @@ license is retained at `/usr/local/share/licenses/gitleaks/LICENSE`.
 | Tool | Pinned source | License |
 | --- | --- | --- |
 | Semgrep | [v1.182.0](https://github.com/semgrep/semgrep/tree/v1.182.0) | LGPL-2.1 |
-| SkillSpector | [e2674da](https://github.com/NVIDIA/SkillSpector/tree/e2674da339b0bddc6e565d059c0577c6d9cd25da) | Apache-2.0 |
+| SkillSpector | [c323ad4](https://github.com/NVIDIA/SkillSpector/tree/c323ad4c43e3c8f2de051572cc25b2711d11e648) | Apache-2.0 |
 | Gitleaks | [v8.30.0](https://github.com/gitleaks/gitleaks/tree/v8.30.0) | MIT |
 
 ## Unicode security data

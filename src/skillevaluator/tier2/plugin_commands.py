@@ -3,13 +3,16 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 
 from skillevaluator.cli_core import detect_content_type, resolve_plugin_path
 from skillevaluator.constants import CONTENT_TYPE_PLUGIN
 from skillevaluator.models.result import ValidationResult
+from skillevaluator.publication_identity import publication_target_from_path
 from skillevaluator.tier2.results import guarded_results
+from skillevaluator.utils.tier2_paths import paths_refer_to_same_location
 
 # Tier 2 views treat this catalog setup record as similarity evidence.
 CATALOG_SUMMARY_NAME = "Plugin Catalog Similarity"
@@ -36,7 +39,10 @@ def run_public_plugin_dedup(path: Path, **options) -> list[ValidationResult]:
     validate_plugin_context_limits(options.get("max_chunks"), options.get("max_scalar_comparisons"))
     root = resolve_plugin_path(path)
     return guarded_results(
-        "Plugin Deduplication", root, lambda: plugin_dedup_results(path, **options), check_id="context-optimization"
+        "Plugin Deduplication",
+        root,
+        lambda _initial_target: plugin_dedup_results(path, **options),
+        check_id="context-optimization",
     )
 
 
@@ -58,9 +64,24 @@ class _IndexedQueries:
         return self.client.embed(texts)
 
 
+def _validate_catalog_output(destination: Path, source: Path, root: Path) -> None:
+    """Keep generated catalogs outside the source even when an alias is used."""
+    destination = destination.expanduser()
+    lexical = Path(os.path.abspath(destination))  # noqa: PTH100 - keep links visible
+    try:
+        resolved = destination.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ValueError("Cannot resolve the catalog output safely") from exc
+    if paths_refer_to_same_location(destination, source) or any(
+        paths_refer_to_same_location(parent, root) for path in (lexical, resolved) for parent in (path, *path.parents)
+    ):
+        raise ValueError("Catalog output must be outside the scan target")
+
+
 def plugin_similarity_results(
     path: Path,
     *,
+    initial_target: dict[str, str] | None,
     threshold,
     full_body,
     model,
@@ -91,6 +112,8 @@ def plugin_similarity_results(
             raise ValueError("Plugin catalogs compare descriptions; --full-body is not supported for plugins")
         if catalog is not None and save_catalog is not None:
             raise ValueError("--catalog and --save-catalog cannot be used together")
+        if save_catalog is not None:
+            _validate_catalog_output(save_catalog, path, root)
         client = EmbeddingClient(model=model)
         if catalog is not None:
             local = LocalCatalog.load(catalog, client=client, max_scalar_comparisons=max_scalar_comparisons)
@@ -150,8 +173,17 @@ def plugin_similarity_results(
                             finding.file_path = (prefix / finding.file_path).as_posix()
             results.extend(compared)
         if save_catalog is not None:
-            local.save(save_catalog)
-            summary.add_success("catalog_saved", f"Saved local catalog to {save_catalog.name}")
+            if summary.is_incomplete:
+                summary.add_warning("Catalog output was skipped because the scan was incomplete.")
+            elif initial_target is None or publication_target_from_path(root) != initial_target:
+                summary.mark_scan_incomplete("plugin-catalog-source")
+                summary.add_warning(
+                    "Catalog output was skipped because the scan target changed or its identity could not be verified."
+                )
+            else:
+                _validate_catalog_output(save_catalog, path, root)
+                local.save(save_catalog)
+                summary.add_success("catalog_saved", f"Saved local catalog to {save_catalog.name}")
     except SecurePathError as exc:
         results.append(_security_result(exc))
     except SimilarityConfigError as exc:

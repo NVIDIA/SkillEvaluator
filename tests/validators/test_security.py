@@ -9134,7 +9134,8 @@ def test_plugin_root_security_reports_png_exclusion_in_every_format(
     assert run.exit_code == 0, run.output
     note = "1 passive PNG file (assets/logo.png)"
     [json_path] = [path for path in reports.glob("*.json") if not path.name.endswith(".sarif.json")]
-    [security] = json.loads(json_path.read_text(encoding="utf-8"))["results"]
+    results = json.loads(json_path.read_text(encoding="utf-8"))["results"]
+    [security] = [result for result in results if result["validator"] == "Security Scan"]
     assert security["passed"]
     [finding] = security["findings"]
     assert finding["severity"] == "info"
@@ -11035,7 +11036,7 @@ class TestSkillspectorMissingReferences:
         )
         _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
         if manifest:
-            # A parallel job detects the skill's type again, and a manifest makes it a plugin.
+            # Catalog discovery selects this as a skill even with a plugin manifest.
             _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.3", "staged-script"))
         mock_tools.skillspector.is_available = True
@@ -11836,7 +11837,7 @@ class TestSkillspectorCompleteWithCaveats:
         )
         _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
         if manifest:
-            # A parallel job detects the skill's type again, and a manifest makes it a plugin.
+            # Catalog discovery selects this as a skill even with a plugin manifest.
             _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.4", "staged-script"))
         mock_tools.skillspector.is_available = True

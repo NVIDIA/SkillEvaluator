@@ -821,7 +821,8 @@ def test_public_cli_exposes_both_tier_two_workflows_without_a_service() -> None:
     assert "inter-skill-check" not in root_help.output
     assert "--save-catalog" in similarity_help.output
     assert "--catalog" in similarity_help.output
-    assert "--catalog" not in dedup_help.output
+    assert "--catalog" in dedup_help.output
+    assert "--save-catalog" not in dedup_help.output
 
 
 def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
@@ -974,10 +975,10 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     assert "are not interchangeable" in environment
 
 
-SKILLSPECTOR_RELEASE = "v2.13.6"
+SKILLSPECTOR_RELEASE = "v2.13.7"
 # Tag commit of SKILLSPECTOR_RELEASE. The Tier 1 CI image installs this commit's
 # source archive, so it must move together with the install instructions.
-SKILLSPECTOR_RELEASE_COMMIT = "e2674da339b0bddc6e565d059c0577c6d9cd25da"
+SKILLSPECTOR_RELEASE_COMMIT = "c323ad4c43e3c8f2de051572cc25b2711d11e648"
 
 
 def test_skillspector_install_instructions_pin_one_release() -> None:

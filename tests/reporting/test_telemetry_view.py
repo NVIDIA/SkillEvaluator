@@ -192,6 +192,56 @@ def test_chart_fallback_is_visible_until_the_shared_lifecycle_draws_chart():
     assert 'class="chart-description"' in description
 
 
+def _built_token_usage():
+    from skillevaluator.tier3.token_usage import build_token_usage
+
+    def trial(prompt, completion, cached):
+        return {
+            "entry_id": "case-one",
+            "trial_id": "case-one__a",
+            "tokens": {"prompt": prompt, "completion": completion, "cached": cached},
+        }
+
+    def condition(status):
+        return {"execution_status": status, "expected_attempts": 1, "scored_attempts": 1}
+
+    agent = {
+        "trials": [trial(100, 20, 40)],
+        "trials_baseline": [trial(200, 40, 20)],
+        "usage_only_attempts": [],
+        "usage_only_attempts_baseline": [],
+        "conditions": {"with_skill": condition("succeeded"), "without_skill": condition("succeeded")},
+        "execution_status": "succeeded",
+    }
+    usage = build_token_usage({"agent-a": agent})
+    assert usage is not None
+    return usage
+
+
+def test_built_token_usage_fills_the_efficiency_column_and_every_change_cell():
+    # The builder's own payload, not a hand-written one, so a measure it does not write shows as N/A.
+    view = _view({"token_usage": _built_token_usage()})
+
+    for section in view["token_sections"]:
+        with_skill, baseline, change = section["rows"][:3]
+        assert with_skill["values"] == ["100", "40", "60", "20", "120", "80"]
+        assert baseline["values"] == ["200", "20", "180", "40", "240", "220"]
+        assert change["values"] == ["-100", "+20", "-120", "-20", "-120 (-50.00%)", "-140"]
+        assert "N/A" not in [value for row in section["rows"] for value in row["values"]]
+    case_rows = view["token_sections"][1]["rows"][3:6]
+    assert [row["case"] for row in case_rows] == ["case-one"] * 3
+    assert case_rows[2]["values"] == ["-100", "+20", "-120", "-20", "-120 (-50.00%)", "-140"]
+
+
+def test_built_token_usage_names_its_accounting_source_in_the_table():
+    view = _view({"token_usage": _built_token_usage()})
+
+    assert view["token_sections"][0]["source"] == "atif_final_metrics"
+    html = _render(view)
+    assert "Accounting source: atif_final_metrics" in html
+    assert "Accounting source: unknown" not in html
+
+
 def test_zero_is_recorded_but_unknown_counters_and_unavailable_deltas_stay_na():
     payload = _payload()
     scope = payload["token_usage"]["dataset"]

@@ -488,6 +488,19 @@
           "type": "path"
         },
         {
+          "choices": [
+            "skill",
+            "plugin",
+            "auto"
+          ],
+          "default": "auto",
+          "name": "content_type",
+          "opts": [
+            "--type"
+          ],
+          "param_type": "option"
+        },
+        {
           "default": "0.8",
           "name": "threshold",
           "opts": [
@@ -511,6 +524,22 @@
           ],
           "param_type": "option",
           "type": "text"
+        },
+        {
+          "name": "max_scalar_comparisons",
+          "opts": [
+            "--plugin-context-max-scalar-comparisons"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_chunks",
+          "opts": [
+            "--plugin-context-max-chunks"
+          ],
+          "param_type": "option",
+          "type": "integer range"
         },
         {
           "choices": [
@@ -686,6 +715,19 @@
           "type": "path"
         },
         {
+          "choices": [
+            "skill",
+            "plugin",
+            "auto"
+          ],
+          "default": "auto",
+          "name": "content_type",
+          "opts": [
+            "--type"
+          ],
+          "param_type": "option"
+        },
+        {
           "default": "0.8",
           "name": "threshold",
           "opts": [
@@ -709,6 +751,40 @@
           ],
           "param_type": "option",
           "type": "text"
+        },
+        {
+          "name": "catalog",
+          "opts": [
+            "--catalog"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "llm_verdict",
+          "opts": [
+            "--llm"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "name": "max_scalar_comparisons",
+          "opts": [
+            "--plugin-context-max-scalar-comparisons"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_chunks",
+          "opts": [
+            "--plugin-context-max-chunks"
+          ],
+          "param_type": "option",
+          "type": "integer range"
         },
         {
           "choices": [
@@ -2001,6 +2077,7 @@
             "skill",
             "rules",
             "workflows",
+            "plugin",
             "auto"
           ],
           "default": "auto",
@@ -2086,6 +2163,24 @@
           ],
           "param_type": "option",
           "type": "path"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "llm_verdict",
+          "opts": [
+            "--llm"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "name": "llm_model",
+          "opts": [
+            "--llm-model"
+          ],
+          "param_type": "option",
+          "type": "text"
         },
         {
           "choices": [
@@ -2700,6 +2795,19 @@
               "type": "path"
             },
             {
+              "choices": [
+                "skill",
+                "plugin",
+                "auto"
+              ],
+              "default": "auto",
+              "name": "content_type",
+              "opts": [
+                "--type"
+              ],
+              "param_type": "option"
+            },
+            {
               "default": "0.8",
               "name": "threshold",
               "opts": [
@@ -2723,6 +2831,22 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "name": "max_scalar_comparisons",
+              "opts": [
+                "--plugin-context-max-scalar-comparisons"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "max_chunks",
+              "opts": [
+                "--plugin-context-max-chunks"
+              ],
+              "param_type": "option",
+              "type": "integer range"
             },
             {
               "choices": [
@@ -2767,6 +2891,19 @@
               "type": "path"
             },
             {
+              "choices": [
+                "skill",
+                "plugin",
+                "auto"
+              ],
+              "default": "auto",
+              "name": "content_type",
+              "opts": [
+                "--type"
+              ],
+              "param_type": "option"
+            },
+            {
               "default": "0.8",
               "name": "threshold",
               "opts": [
@@ -2790,6 +2927,40 @@
               ],
               "param_type": "option",
               "type": "text"
+            },
+            {
+              "name": "catalog",
+              "opts": [
+                "--catalog"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "llm_verdict",
+              "opts": [
+                "--llm"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "max_scalar_comparisons",
+              "opts": [
+                "--plugin-context-max-scalar-comparisons"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "max_chunks",
+              "opts": [
+                "--plugin-context-max-chunks"
+              ],
+              "param_type": "option",
+              "type": "integer range"
             },
             {
               "choices": [
@@ -2838,6 +3009,7 @@
                 "skill",
                 "rules",
                 "workflows",
+                "plugin",
                 "auto"
               ],
               "default": "auto",
@@ -2923,6 +3095,24 @@
               ],
               "param_type": "option",
               "type": "path"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "llm_verdict",
+              "opts": [
+                "--llm"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "name": "llm_model",
+              "opts": [
+                "--llm-model"
+              ],
+              "param_type": "option",
+              "type": "text"
             },
             {
               "choices": [
@@ -4223,6 +4413,47 @@
             }
           ]
         },
+        "report-plugin": {
+          "params": [
+            {
+              "name": "run_dir",
+              "opts": [
+                "run_dir"
+              ],
+              "param_type": "argument",
+              "required": true,
+              "type": "directory"
+            },
+            {
+              "choices": [
+                "cli",
+                "json",
+                "html",
+                "markdown",
+                "sarif",
+                "benchmark"
+              ],
+              "default": "('cli',)",
+              "multiple": true,
+              "name": "report_formats",
+              "opts": [
+                "--report",
+                "-r"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "reports",
+              "name": "output_dir",
+              "opts": [
+                "--output-dir",
+                "-o"
+              ],
+              "param_type": "option",
+              "type": "directory"
+            }
+          ]
+        },
         "select-decoys": {
           "params": [
             {
@@ -5468,6 +5699,50 @@
           ],
           "param_type": "option",
           "type": "text"
+        },
+        {
+          "name": "repo_root",
+          "opts": [
+            "--repo-root"
+          ],
+          "param_type": "option",
+          "type": "directory"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "resolve_endpoints",
+          "opts": [
+            "--resolve-endpoints"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "claude_validate",
+          "opts": [
+            "--claude-validate"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "name": "max_scalar_comparisons",
+          "opts": [
+            "--plugin-context-max-scalar-comparisons"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "max_chunks",
+          "opts": [
+            "--plugin-context-max-chunks"
+          ],
+          "param_type": "option",
+          "type": "integer range"
         },
         {
           "choices": [

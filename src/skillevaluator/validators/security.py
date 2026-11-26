@@ -3683,7 +3683,12 @@ class SecurityValidator(ValidatorBase):
 
         return result
 
-    def _run_skillspector(self, skill_path: Path) -> ValidationResult:
+    def _run_skillspector(
+        self,
+        skill_path: Path,
+        *,
+        verify_reviewed: Callable[[ValidationResult, Path], ValidationResult] | None = None,
+    ) -> ValidationResult:
         """Execute skillspector security scan via CLI on a single directory.
 
         Runs `skillspector scan <path> --format json`; adds `--no-llm` when
@@ -3699,6 +3704,8 @@ class SecurityValidator(ValidatorBase):
         An explicitly selected baseline is passed to both stages with
         ``--baseline``. When it lives inside a staged skill, the staged copy is
         passed instead so SkillSpector excludes the file it actually scans.
+
+        *verify_reviewed* runs on the attested package snapshot while it exists.
         """
         result = ValidationResult()
 
@@ -3810,6 +3817,8 @@ class SecurityValidator(ValidatorBase):
                     static_summary=static_summary,
                 )
             if hook_review is not None:
+                if verify_reviewed is not None and not result.is_incomplete:
+                    result = verify_reviewed(result, scan_root)
                 try:
                     unchanged = capture_hook_review_artifact(skill_path) == hook_review.artifact
                 except (OSError, ValueError):

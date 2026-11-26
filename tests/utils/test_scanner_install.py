@@ -45,7 +45,7 @@ class TestSkillSpectorWheel:
         monkeypatch.setattr(scanner_install, "SKILLSPECTOR_WHEEL_SHA256", hashlib.sha256(payload).hexdigest())
         with (
             patch("urllib.request.urlopen", return_value=io.BytesIO(payload)),
-            patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.6", "")) as run,
+            patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.7", "")) as run,
         ):
             assert scanner_install.prepare_skillspector("/opt/uv") is None
         wheel = scanner_install.managed_skillspector_wheel()
@@ -103,7 +103,7 @@ class TestSkillSpectorWheel:
             patch("subprocess.run") as run,
         ):
             result = tool.run(["scan", "x"])
-        assert result.error_message == "SkillSpector 2.13.6 download failed checksum verification"
+        assert result.error_message == "SkillSpector 2.13.7 download failed checksum verification"
         run.assert_not_called()
 
     def test_pinned_wheel_url_matches_version(self):
@@ -116,9 +116,11 @@ class TestSkillSpectorWheel:
         found = {"uv": "/opt/uv", "skillspector": "/usr/bin/skillspector"}
         with patch.object(tool_runner, "resolve_tool_path", _resolver(found)):
             tool = ExternalTool("skillspector", "skillspector", managed=True)
-        with patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.6", "")) as run:
-            tool.run(["--version"])
+        with patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.14.0", "")) as run:
+            result = tool.run(["--version"])
+        assert run.call_count == 1
         assert run.call_args.args[0] == ["/usr/bin/skillspector", "--version"]
+        assert result.stdout == "SkillSpector v2.14.0"
 
     @pytest.mark.usefixtures("runtime_dir")
     def test_patched_path_does_not_inherit_uv_arguments(self):

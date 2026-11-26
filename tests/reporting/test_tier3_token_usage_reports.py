@@ -1122,6 +1122,8 @@ def test_docs_and_changelog_describe_the_token_usage_contract() -> None:
         "token_usage",
         "total_tokens",
         "uncached_prompt_tokens",
+        "efficiency_tokens",
+        "atif_final_metrics",
         "expected_attempts",
         "observed_attempts",
         "measured_attempts",

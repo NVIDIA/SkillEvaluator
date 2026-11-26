@@ -173,6 +173,9 @@ def test_yaml_dataset_syntax_error_keeps_what_is_wrong_and_where_without_the_sou
         assert "hunter2" not in message
 
 
-def test_yaml_dataset_value_error_without_a_position_stays_generic():
-    with pytest.raises(ValueError, match=r"^Input is not valid YAML$"):
+def test_yaml_dataset_value_error_keeps_its_position_without_the_value():
+    with pytest.raises(ValueError) as caught:
         parse_dataset_text("- !!int abc\n", ".yaml")
+
+    assert str(caught.value) == "Input is not valid YAML: line 1, column 3: cannot parse a value"
+    assert "abc" not in str(caught.value)

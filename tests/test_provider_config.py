@@ -129,6 +129,9 @@ def test_skillspector_reasoning_effort_is_set_only_for_gpt_6_models(model: str, 
         ("claude-opus-5-5", False, True, False),
         ("claude-sonnet-5-5", False, True, False),
         ("us.anthropic.claude-opus-5-5", False, True, False),
+        # Bedrock geographies beyond two letters: apac and the us-gov partition.
+        ("apac.anthropic.claude-opus-5-5", False, True, False),
+        ("us-gov.anthropic.claude-sonnet-5-5", False, True, False),
         ("azure/anthropic/claude-opus-5-5", False, True, False),
         # Gateway catalogs prefix vendor words; the old leaf check sent these a temperature.
         ("aws/anthropic/bedrock-claude-opus-5", False, False, False),

@@ -17,6 +17,7 @@ from click.testing import CliRunner
 
 from skillevaluator import doctor as readiness
 from skillevaluator.cli import cli
+from skillevaluator.constants import CONTENT_DEDUP_LLM_MAX_TOKENS
 from skillevaluator.utils import tool_runner
 from skillevaluator.utils.tool_runner import ExternalTool, Tools
 
@@ -152,11 +153,11 @@ def test_tier1_reports_managed_provisioning_without_naming_an_override(scanners,
     monkeypatch.setattr(gitleaks, "_ensure", None)
     monkeypatch.setattr(Tools, "skillspector", skillspector)
     monkeypatch.setattr(Tools, "gitleaks", gitleaks)
-    scanners.output["uv"] = "SkillSpector v2.13.6\n"
+    scanners.output["uv"] = "SkillSpector v2.13.7\n"
 
     rows = _rows(tier="1", checks="security,code")
 
-    assert rows["SkillSpector"] == ("pass", "2.13.6 at /env/bin/uv (uv tool run)")
+    assert rows["SkillSpector"] == ("pass", "2.13.7 at /env/bin/uv (uv tool run)")
     assert rows["Gitleaks"] == ("pass", f"8.21.2 at {gitleaks.path} (managed)")
     assert scanners.calls[0][0][:3] == ["/env/bin/uv", "tool", "run"]
     assert scanners.calls[0][0][-2:] == ["skillspector", "--version"]
@@ -168,13 +169,13 @@ def test_tier1_reports_source_selected_during_probe(scanners, monkeypatch) -> No
     def run(*args, **kwargs):
         tool._path = "/doctor-tools/uv"
         tool.resolution_source = "uv tool run"
-        return tool_runner.ToolResult(True, "SkillSpector v2.13.6", "", 0)
+        return tool_runner.ToolResult(True, "SkillSpector v2.13.7", "", 0)
 
     monkeypatch.setattr(tool, "run", run)
 
     assert _rows(tier="1", checks="security")["SkillSpector"] == (
         "pass",
-        "2.13.6 at /doctor-tools/uv (uv tool run)",
+        "2.13.7 at /doctor-tools/uv (uv tool run)",
     )
 
 
@@ -347,6 +348,8 @@ def test_tier2_live_probe_sends_one_bounded_request_per_model(provider_api, time
     assert _request_timeouts(provider_api.requests) == [bound, bound]
     chat = json.loads(provider_api.requests[1].content)
     assert chat["model"] == rows["LLM provider"][1].split(" / ", 1)[1]
+    # The probe uses the output ceiling of Tier 2 duplicate analysis.
+    assert chat["max_tokens"] == CONTENT_DEDUP_LLM_MAX_TOKENS
 
 
 def test_tier2_anthropic_chat_probe_is_bounded_by_the_timeout(provider_api, monkeypatch) -> None:

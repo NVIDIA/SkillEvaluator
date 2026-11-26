@@ -1,0 +1,181 @@
+---
+title: "MCP Servers and Sidecars"
+description: "Give a skill's agent MCP servers during evaluation, and learn where localhost, service names and commands resolve in Docker and local runs."
+---
+
+A skill can ship MCP servers for its evaluation runs. SkillEvaluator declares
+them to the agent; it does not decide where they run. This page explains that
+boundary, the declaration file, Docker Compose sidecars, and how an address
+resolves in each backend. The short reference for the files is in
+[Dataset Format and Policy](/skills/skillevaluator/eval-datasets#fixtures-and-custom-environments).
+
+## The runtime boundary
+
+The agent's own MCP client connects to a server, from inside the agent's
+runtime. In Docker that runtime is the `main` container. In local mode it is a
+process on your machine under an operating-system sandbox. A URL, a command and
+a file path in a declaration are therefore all relative to that runtime, not to
+the machine you typed them on.
+
+SkillEvaluator reads `evals/environment/mcp_servers.toml` and writes each entry
+as an `[[environment.mcp_servers]]` table in every staged `task.toml`. It starts
+nothing itself. A server exists during a trial in one of three ways:
+
+- A **stdio** server: the agent's client launches the `command` you declare.
+- A **sidecar** service: Docker Compose starts it next to the `main` container.
+- A **running endpoint** that the runtime can already reach.
+
+## Declare servers
+
+`mcp_servers.toml` is an array of `[[mcp_servers]]` tables:
+
+| Field | Meaning |
+| --- | --- |
+| `name` | Required. The name the agent sees for the server. |
+| `url` | The endpoint, for `sse` and `streamable-http` servers. |
+| `command` | The executable, for a `stdio` server. Put each argument in `args`, not in `command`. |
+| `args` | List of arguments for `command`. |
+| `transport` | `stdio`, `sse` or `streamable-http`. |
+
+Each entry needs `name` plus `url` or `command`. A `command` entry gets
+`stdio` inferred, but `tier3 validate` warns until you write
+`transport = "stdio"`. A URL entry without a `transport` uses Harbor's default,
+`sse`.
+
+```toml title="evals/environment/mcp_servers.toml"
+[[mcp_servers]]
+name = "tool-api"
+transport = "streamable-http"
+url = "http://tool-api:8080/mcp"
+
+[[mcp_servers]]
+name = "local-tools"
+transport = "stdio"
+command = "python"
+args = ["/workspace/skills/my-skill/scripts/mcp_server.py"]
+```
+
+`tier3 validate` checks this file. When tasks are staged, an entry without a
+`name`, an entry with neither `url` nor `command`, and a file with a TOML syntax
+error are skipped with a log warning, not an error, so validate before you run:
+
+```bash
+skillevaluator tier3 validate ./my-skill --strict
+```
+
+A `${VAR}` reference to a credential in a declaration must be approved by the
+operator, and a literal credential is rejected. The two allowlist variables,
+`SKILLEVALUATOR_ALLOWED_MCP_HOSTS` and `SKILLEVALUATOR_ALLOWED_MCP_SECRETS`, are
+described in [Environment Variables](/skills/skillevaluator/environment-variables).
+They are set on the host that runs `skillevaluator`, never by the skill.
+
+## Add sidecar services
+
+A sidecar is a service that Docker Compose starts beside the agent: a mock API,
+a database or an MCP server in its own image. Put a `docker-compose.yaml` (or
+`docker-compose.yml`, but not both) in `evals/environment/`. The agent's own
+container is the service named `main`.
+
+```yaml title="evals/environment/docker-compose.yaml"
+services:
+  main:
+    depends_on:
+      tool-api:
+        condition: service_healthy
+  tool-api:
+    build: ./tool-api
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+```
+
+The `tool-api` folder next to the compose file holds the sidecar's Dockerfile and
+code. The agent reaches the sidecar at `http://tool-api:8080`, using the service
+name that the Compose network resolves, and the declaration above points at it.
+
+SkillEvaluator checks the file when it stages tasks, not in `tier3 validate`,
+and applies a strict allowlist:
+
+- `main` may set only `depends_on`. Use it to make the agent wait until a
+  sidecar's `healthcheck` passes, as above.
+- A sidecar may set a fixed list of keys, including `image` or `build` (not
+  both), `command`, `entrypoint`, `environment`, `expose`, `healthcheck`,
+  `depends_on`, `networks` and `volumes`. Any other key, such as a privileged
+  setting, is rejected.
+- A host bind mount is rejected. Use a named volume, a `tmpfs` mount or files
+  baked into the sidecar image.
+- A sidecar's `ports` entry is removed. Trials run concurrently, and a fixed
+  host port would make all but the first fail. Use `expose` and the service name.
+- A build context must stay inside `evals/environment/`.
+
+## Where an address resolves
+
+Each backend runs the agent somewhere different, so the same declaration means
+different things.
+
+| Backend | `localhost` | A sidecar's service name | A stdio `command` | A compose file |
+| --- | --- | --- | --- | --- |
+| `docker` | The `main` container itself, not your machine | Resolves through the Compose network | Runs in the `main` container; the executable must be in the image | Supported |
+| `local` | Your own machine, within the sandbox's network policy | Not available | Runs on your machine under the sandbox; the executable must be on `PATH` | Rejected |
+| `kata` | The agent's own microVM | Does not resolve: services in microVMs cannot find each other by name | Runs in the microVM; the executable must be in the image | Rejected if it declares any service besides `main` |
+| `mosaic` | The trial's own VM | Not available | Runs in the VM; the executable must be available there | Rejected; Mosaic runs one VM per trial |
+| A custom backend | Set by the backend | Only if the backend sets `supports_docker_compose` | Set by the backend | Rejected unless it sets `supports_docker_compose` |
+
+SkillEvaluator does not document compose behavior for the other Harbor-native
+modes. Read the backend's own documentation, or choose a Dockerfile-only
+environment. For the modes themselves see
+[Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes#where-trials-run).
+
+### Local mode paths
+
+A local run has no container, so SkillEvaluator maps the container paths that
+skills and tasks use onto per-trial directories on your machine. These are under
+the trial's `local-environment` folder and go with the staged jobs, which are
+deleted after collection unless you pass `--harbor-keep-jobs`.
+
+| Container path | What it holds in local mode |
+| --- | --- |
+| `/workspace` | The agent's working directory |
+| `/workspace/skills` | The staged skill, at `/workspace/skills/<skill-name>` |
+| `/workspace/input` | The case's input fixtures |
+
+The verifier, log and solution roots are mapped the same way.
+
+When SkillEvaluator runs a command for the agent, including the command that
+registers your MCP servers, it rewrites each of these roots to its host
+directory. A stdio server whose `args` name `/workspace/skills/my-skill/scripts/mcp_server.py`
+therefore finds the staged copy. Any other path in a declaration is a real path
+on your machine. Local mode is experimental and runs the agent directly on your
+host; see [Local mode](/skills/skillevaluator/agents-and-sandboxes#local-mode)
+for the sandbox policy and its variables.
+
+## Stage what the server needs
+
+- The skill is at `/workspace/skills/<skill-name>` in a with-skill run. A server
+  script that ships inside the skill is at a path below it. Both arms stage the
+  same declarations, but the without-skill arm has no skill folder, so a script
+  that lives in the skill is missing there.
+- Input fixtures a case selects with `files` are at `/workspace/input`.
+- A command server must exist in the runtime. In Docker, install it in the image
+  with `scripts/apt-packages.txt`, `scripts/requirements.txt` or a custom
+  `evals/environment/Dockerfile`. A launcher such as `npx` also needs Node.js in
+  the image; see the note in
+  [Dataset Format and Policy](/skills/skillevaluator/eval-datasets#fixtures-and-custom-environments).
+- Do not put credentials in the image, the compose file or the declaration.
+
+## Pitfalls
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| The agent cannot connect to `localhost:PORT` in Docker | `localhost` is the `main` container; the server runs in a sidecar or on your machine | Use the sidecar's service name, or start the server inside the image |
+| `Docker Compose sidecars are unsupported in Harbor local mode.` | A compose file exists and the run uses `--env-mode local` | Use a stdio server, or run in Docker |
+| `Harbor environment 'kata' cannot run task ... with Compose sidecar services` | Kata microVMs cannot resolve service names | Run the server in the `main` image, or use Docker |
+| `Harbor environment 'mosaic' runs one VM per trial and cannot run Docker Compose task` | Mosaic rejects every compose file | Use a Dockerfile-only environment |
+| `Custom Docker Compose service 'main' may set only depends_on` | `main` carries other keys | Move them to the Dockerfile or a sidecar |
+| `Custom Docker Compose service '...' cannot use a host bind mount` | A `volumes` entry names a host path | Use a named volume or bake the files into the image |
+| `Custom environment must not contain both docker-compose.yaml and docker-compose.yml` | Both files exist | Keep one |
+| `--backend nemo-gym` rejects the run | NeMo Gym does not accept MCP declarations | See [NeMo Gym Integration](/skills/skillevaluator/nemo-gym) |

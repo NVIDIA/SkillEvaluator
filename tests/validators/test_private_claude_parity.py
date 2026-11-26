@@ -96,6 +96,54 @@ def test_exact_command_env_and_agreement(tmp_path: Path, monkeypatch: pytest.Mon
     assert result.findings == []
 
 
+@pytest.mark.parametrize("select_manifest", [True, False], ids=["manifest", "root"])
+def test_combined_parity_uses_the_selected_manifest(tmp_path, monkeypatch, select_manifest):
+    from skillevaluator.tier1 import plugin_checks
+    from skillevaluator.tier1.commands import run_validation
+
+    root = _plugin(tmp_path)
+    manifest = root / ".claude-plugin/plugin.json"
+    (root / "agent_plugin.yaml").write_text(
+        "name: demo\nauthor:\n  email: dev@example.com\nskills:\n  refs: [github::org/repo::skills::demo]\n",
+        encoding="utf-8",
+    )
+    fake = FakeClaude([_json(PASSED, 0)])
+    monkeypatch.setattr(plugin_checks, "ClaudePluginValidateParity", lambda: ClaudePluginValidateParity(fake))
+
+    results = run_validation(
+        manifest if select_manifest else root, checks="schema", content_type="plugin", claude_validate=True
+    )
+
+    parity = results[-1].metadata["plugin"]["validator_parity"]
+    if select_manifest:
+        assert results[0].metadata["manifest_type"] == "claude_plugin_json"
+        assert parity["status"] == "compared"
+        assert [call["args"] for call in fake.calls] == [["plugin", "validate", str(root.absolute()), "--json"]]
+    else:
+        assert results[0].metadata["manifest_type"] == "agent_bundle_yaml"
+        assert parity["status"] == "not_applicable"
+        assert not fake.calls
+
+
+def test_combined_parity_excludes_schema_failures_for_other_clients(tmp_path, monkeypatch):
+    from skillevaluator.tier1 import plugin_checks
+    from skillevaluator.tier1.commands import run_validation
+
+    root = _plugin(tmp_path)
+    cursor = root / ".cursor-plugin/plugin.json"
+    cursor.parent.mkdir()
+    cursor.write_text('{"name":5}', encoding="utf-8")
+    fake = FakeClaude([_json(PASSED, 0)])
+    monkeypatch.setattr(plugin_checks, "ClaudePluginValidateParity", lambda: ClaudePluginValidateParity(fake))
+
+    results = run_validation(root, checks="schema", content_type="plugin", claude_validate=True)
+
+    assert not results[0].passed
+    parity = results[-1].metadata["plugin"]["validator_parity"]
+    assert parity["skillevaluator_verdict"] == "passed"
+    assert parity["agree"] is True
+
+
 def test_disagreement_is_info_and_claude_errors_are_advisory(tmp_path: Path) -> None:
     result = ClaudePluginValidateParity(FakeClaude([_json(FAILED, 1)])).validate(
         _plugin(tmp_path), skillevaluator_verdict="passed"

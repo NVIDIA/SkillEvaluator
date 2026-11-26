@@ -764,10 +764,20 @@ directs you to WSL2 or `--env-mode docker`. Only `claude-code`, `codex`,
 
 When the selected agent's CLI is missing, a local-mode run offers to install it
 under `SKILLEVALUATOR_RUNTIME_DIR`, at the release Harbor installs; without a
-terminal it prints the `npm install` command instead. Each trial checks the
-installed version against the selected model and fails before the agent starts
-when it is too old: Claude 5.5 and later models need Claude Code 2.1.280 or
-newer, and GPT-6 models need Codex 0.159.1 or newer.
+terminal it prints the `npm install` command instead. The installed version
+must also suit the selected model: Claude 5.5 and later models need Claude Code
+2.1.280 or newer, and GPT-6 models need Codex 0.159.1 or newer. The run
+preflight and `doctor --env-mode local` check each installed CLI against the
+models you selected and stop before any trial when one is too old; each trial
+repeats the check before its agent starts. Update the CLI, use
+`--env-mode docker`, or choose an older model with
+`--agent-model AGENT=MODEL`.
+
+Local mode runs OpenCode without `--dangerously-skip-permissions`, so OpenCode
+rejects each permission request that would ask for approval, which ends the
+agent's turn by default. Local OpenCode trials set
+`experimental.continue_loop_on_deny` so the agent continues after a denied tool
+call; a job's `opencode_config` can override it.
 
 The sandbox policy is controlled by environment variables:
 

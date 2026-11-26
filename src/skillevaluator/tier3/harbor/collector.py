@@ -20,7 +20,7 @@ import shutil
 import stat
 import sys
 import unicodedata
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from fractions import Fraction
@@ -147,6 +147,7 @@ GENERATED_AGENT_ARTIFACTS = (
     "security_attribution.json",
     "findings.json",
     "baseline_timeout_tolerance.json",
+    "statistics.json",
 )
 GENERATED_CONDITION_DIRS = ("with-skill", "without-skill")
 GENERATED_ROOT_ARTIFACTS = ("attempt_policy.json", "comparison.json")
@@ -7452,6 +7453,22 @@ def _read_trial_evidence(
     return raw
 
 
+def _read_trial_trajectories(trial_dir: Path) -> Iterator[dict[str, Any]]:
+    """Read bounded trajectory files from the trial root, agent, and native steps."""
+    for path in (
+        Path("trajectory.json"),
+        Path("agent") / "trajectory.json",
+        *(path.relative_to(trial_dir) for path in sorted(trial_dir.glob("steps/*/agent/trajectory.json"))),
+    ):
+        try:
+            raw = _read_trial_evidence(trial_dir, path)
+            trajectory = json.loads(raw) if raw is not None else None
+        except (SecurePathError, ValueError, OSError, RecursionError, UnicodeError):
+            continue
+        if isinstance(trajectory, dict):
+            yield trajectory
+
+
 def _trial_output_tokens(trial_dir: Path, harbor_result: Mapping[str, Any]) -> int | None:
     """Return proof that the agent produced output before a trial ended, or None.
 
@@ -7464,22 +7481,37 @@ def _trial_output_tokens(trial_dir: Path, harbor_result: Mapping[str, Any]) -> i
     tokens = _positive_token_count(agent_result.get("n_output_tokens") if isinstance(agent_result, dict) else None)
     if tokens is not None:
         return tokens
-    for path in (
-        Path("trajectory.json"),
-        Path("agent") / "trajectory.json",
-        *(path.relative_to(trial_dir) for path in sorted(trial_dir.glob("steps/*/agent/trajectory.json"))),
-    ):
-        try:
-            raw = _read_trial_evidence(trial_dir, path)
-            trajectory = json.loads(raw) if raw is not None else None
-        except (SecurePathError, ValueError, OSError, RecursionError, UnicodeError):
-            continue
-        final_metrics = trajectory.get("final_metrics") if isinstance(trajectory, dict) else None
+    for trajectory in _read_trial_trajectories(trial_dir):
+        final_metrics = trajectory.get("final_metrics")
         if isinstance(final_metrics, dict):
             tokens = _positive_token_count(final_metrics.get("total_completion_tokens"))
             if tokens is not None:
                 return tokens
     return None
+
+
+def _trial_has_model_tokens(trial_dir: Path, harbor_result: Mapping[str, Any]) -> bool:
+    """Check Harbor and ATIF for observed input or output token usage."""
+    agent_result = harbor_result.get("agent_result")
+    if isinstance(agent_result, dict) and any(
+        _positive_token_count(agent_result.get(key)) for key in ("n_input_tokens", "n_output_tokens")
+    ):
+        return True
+    for trajectory in _read_trial_trajectories(trial_dir):
+        final_metrics = trajectory.get("final_metrics")
+        if isinstance(final_metrics, dict) and any(
+            _positive_token_count(final_metrics.get(key)) for key in ("total_prompt_tokens", "total_completion_tokens")
+        ):
+            return True
+        steps = trajectory.get("steps")
+        if isinstance(steps, list):
+            for step in steps:
+                metrics = step.get("metrics") if isinstance(step, dict) else None
+                if isinstance(metrics, dict) and any(
+                    _positive_token_count(metrics.get(key)) for key in ("prompt_tokens", "completion_tokens")
+                ):
+                    return True
+    return False
 
 
 def _provider_log_rejection(trial_dir: Path) -> str | None:
@@ -8679,6 +8711,28 @@ def collect_harbor_results(
         coverage = agent_declarative_checks(with_collected_rewards, without_collected_rewards)
         if coverage:
             all_results["agents"][agent]["declarative_checks"] = coverage
+        # Report-only statistics read the arms scored above. They never change a score, lift, pass@k or status.
+        from skillevaluator.tier3.harbor import run_statistics
+
+        statistics_arms: dict[str, run_statistics.ArmInput] = {}
+        if not skip_with_skill and not with_budget_denied:
+            statistics_arms["with_skill"] = run_statistics.ArmInput(
+                with_logical_rewards, with_execution["execution_status"], with_pass
+            )
+        if not skip_baseline and not without_budget_denied:
+            statistics_arms["without_skill"] = run_statistics.ArmInput(
+                without_logical_rewards, without_execution["execution_status"], without_pass
+            )
+        run_statistics.attach(
+            all_results,
+            agent,
+            agent_dir=agent_dir,
+            output_dir=output_dir,
+            arms=statistics_arms,
+            expected_case_ids=agent_expected_case_ids,
+            stop_on_pass=stop_on_pass,
+            lift_eligible=lift_eligible,
+        )
         if (
             tolerance_on
             and without_job_dir is not None

@@ -24,6 +24,7 @@ from skillevaluator.constants import (
     SKILL_NOT_SHIPPED_DIRS,
 )
 from skillevaluator.utils.structured_data import (
+    ScalarConstructionError,
     StructuredDataError,
     StructuredDataSyntaxError,
     load_bounded_yaml,
@@ -402,7 +403,7 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
     try:
         load_bounded_yaml(fm_yaml, last_key_wins=True)
     except StructuredDataSyntaxError as exc:
-        return isinstance(exc.__cause__, yaml.YAMLError)
+        return isinstance(exc.__cause__, yaml.YAMLError) and not isinstance(exc.__cause__, ScalarConstructionError)
     except StructuredDataError:
         return False
     return False
@@ -1074,8 +1075,10 @@ def _pi_frontmatter(fm_yaml: str, *, reject_duplicate_keys: bool = False):
 
     try:
         events = list(yaml.parse(fm_yaml))
-    except (yaml.YAMLError, RecursionError):
-        return None  # unparseable frontmatter is reported by its own finding
+    except (yaml.YAMLError, RecursionError, ValueError):
+        # ValueError: PyYAML's scanner raises on an escape outside Unicode (``"\U00110000"``), which is
+        # unparseable frontmatter like any other syntax error.
+        return None
     anchors: dict[str, tuple] = {}
 
     def walk(index: int) -> tuple[tuple, int]:

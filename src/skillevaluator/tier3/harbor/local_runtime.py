@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ from subprocess import SubprocessError, TimeoutExpired
 from types import MappingProxyType
 from typing import Any
 
+from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
 from skillevaluator.tier3.harbor.local_sandbox import SandboxUnavailable
 
 LOCAL_RUNTIME_AGENTS: tuple[str, ...] = ("claude-code", "codex", "opencode", "pi")
@@ -68,6 +70,15 @@ PINNED_RUNTIME_VERSIONS: Mapping[str, str] = MappingProxyType(
     {"claude-code": "2.1.292", "codex": "0.161.0", "opencode": "1.19.5", "pi": "1.6.0"}
 )
 RUNTIME_INSTALL_TIMEOUT_SECONDS = 600
+
+# Local mode runs the CLI installed on the host, not the release Harbor installs
+# in other environments. These are the oldest releases that run the newest model
+# family of each agent; the per-trial check in ``local_agents`` reads the same
+# values, so the preflight and the trial can not disagree.
+MODEL_MIN_RUNTIME_VERSIONS: Mapping[str, tuple[int, int, int]] = MappingProxyType(
+    {"claude-code": (2, 1, 280), "codex": (0, 159, 1)}
+)
+CLI_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 # Vendor install hints shown when a CLI is missing. Local mode never runs these
 # for the user — it only prints them — so there is no download-and-exec surface.
@@ -598,8 +609,13 @@ def _probe_runtime_version(
     environ: Mapping[str, str] | None,
     sandbox: Any | None,
     strict_reads: bool,
+    models: Sequence[str] | None,
 ) -> str | None:
-    """Run a selected CLI's version command in a credential-free temp HOME."""
+    """Run a selected CLI's version command in a credential-free temp HOME.
+
+    ``models`` are the models the agent will run; an installed CLI older than
+    one of them needs is reported here instead of failing in the first trial.
+    """
     supplied = environ or {}
     safe_host_env: dict[str, str] = {}
     for key in _RUNTIME_PROBE_HOST_ENV:
@@ -678,6 +694,54 @@ def _probe_runtime_version(
             command,
             f"its --version check failed (exit {result.returncode})",
         )
+    return _runtime_version_error(agent, command, result.stdout or "", models)
+
+
+def required_runtime_version(agent: str, model: str) -> tuple[int, int, int] | None:
+    """Return the oldest ``agent`` CLI that runs ``model``, or None when no minimum is known."""
+    if agent == "claude-code" and is_claude_5_5_or_later(model):
+        return MODEL_MIN_RUNTIME_VERSIONS[agent]
+    if agent == "codex" and is_gpt6_model(model):
+        return MODEL_MIN_RUNTIME_VERSIONS[agent]
+    return None
+
+
+def parse_codex_cli_version(stdout: str) -> str:
+    """Read the first nonblank version line, matching Harbor's Codex parser."""
+    for line in stdout.splitlines():
+        if line := line.strip():
+            return line.removeprefix("codex-cli").strip()
+    return ""
+
+
+def _runtime_version_error(
+    agent: str,
+    command: str,
+    version_output: str,
+    models: Sequence[str] | None,
+) -> str | None:
+    """Check the parsed local version against the selected model's requirement.
+
+    With the selected models unknown there is nothing to compare: an old CLI
+    still runs older models chosen with ``--agent-model``. GPT-6 requires a
+    recognizable version on the first nonblank line of Codex output.
+    """
+    if agent == "codex":
+        version_output = parse_codex_cli_version(version_output)
+    found = CLI_VERSION_RE.search(version_output)
+    if found is None and agent != "codex":
+        return None
+    version = tuple(int(part) for part in found.groups()) if found is not None else None
+    for model in models or ():
+        minimum = required_runtime_version(agent, model)
+        if minimum is None or (version is not None and version >= minimum):
+            continue
+        observed = f"is version {found.group(0)}" if found is not None else "did not report a recognizable version"
+        return (
+            f"Local mode agent '{agent}' at {command} {observed}, but {model} needs "
+            f"{'.'.join(map(str, minimum))} or later. Update that CLI, use --env-mode docker, or choose an "
+            f"older model with --agent-model {agent}=<model>."
+        )
     return None
 
 
@@ -689,12 +753,15 @@ def ensure_local_runtimes(
     env: Mapping[str, str] | None = None,
     sandbox: Any | None = None,
     strict_reads: bool = False,
+    agent_models: Mapping[str, Sequence[str]] | None = None,
 ) -> list[str]:
     """Check requested local runtimes are installed and can report a version.
 
     Purely diagnostic — never installs. Probes run with a bounded timeout and a
     disposable credential-free HOME. Missing or unusable agents yield vendor
-    install guidance.
+    install guidance. ``agent_models`` maps an agent to the models it will run:
+    a CLI older than one of them needs is an error. Without models nothing is
+    compared.
     """
     _ = reporter
     errors: list[str] = []
@@ -712,6 +779,7 @@ def ensure_local_runtimes(
             environ=env,
             sandbox=sandbox,
             strict_reads=strict_reads,
+            models=(agent_models or {}).get(agent),
         ):
             errors.append(error)
     return errors

@@ -31,6 +31,7 @@ from skillevaluator.constants import (
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.publication_evidence import (
     TIER1_UNSCANNED_PATHS_KEY,
+    result_has_publication_evidence,
     stamp_publication_evidence,
     stamp_tier1_required_checks,
 )
@@ -59,7 +60,6 @@ from skillevaluator.validators.dependencies import DependencySecurityValidator
 from skillevaluator.validators.harness import HarnessValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
-from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 from skillevaluator.validators.quality_score import QualityScoreValidator
 from skillevaluator.validators.rubric_eval import RubricEvalValidator
@@ -81,9 +81,7 @@ progress_console = Console(stderr=True)
 
 ValidatorRunner = Callable[[Path], ValidationResult]
 
-_AGENT_ARTIFACT_CONTENT_TYPES = frozenset(
-    {CONTENT_TYPE_SKILL, CONTENT_TYPE_RULES, CONTENT_TYPE_WORKFLOWS, CONTENT_TYPE_PLUGIN}
-)
+_AGENT_ARTIFACT_CONTENT_TYPES = frozenset({CONTENT_TYPE_SKILL, CONTENT_TYPE_RULES, CONTENT_TYPE_WORKFLOWS})
 
 DEFAULT_CHECKS = (
     "schema",
@@ -282,7 +280,7 @@ def runs_security_scan(checks: str | None, skip: str | None) -> bool:
 def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | None):
     """Return the schema validator matching the (forced or detected) content type.
 
-    Rules, workflows, and plugins use their dedicated schema validators; skill
+    Rules and workflows use their dedicated schema validators. Skill
     content, ``None`` and an ``unknown`` folder that holds an artifact
     manifest entry fall back to the skill :class:`SchemaValidator` (the
     historical default). ``run_validation`` records the schema check as not
@@ -292,19 +290,33 @@ def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | N
         return RulesSchemaValidator()
     if content_type == CONTENT_TYPE_WORKFLOWS:
         return WorkflowsSchemaValidator()
-    if content_type == CONTENT_TYPE_PLUGIN:
-        return PluginSchemaValidator()
     return SchemaValidator(policy=policy)
 
 
-def enabled_check_lineup(checks: str | None) -> list[str]:
+def enabled_check_lineup(
+    checks: str | None,
+    *,
+    content_type: str | None = None,
+    resolve_endpoints: bool = False,
+    claude_validate: bool = False,
+) -> list[str]:
     """Return the resolved check names for a run, in canonical pipeline order.
 
     Unrecognized names are kept (sorted, at the end) so the printed lineup
     matches what ``run_validation`` was actually asked to do.
+    Plugin lineups include the mandatory manifest check and opted-in stages.
     """
     enabled = _enabled_checks(checks)
-    ordered = [check for check in (*DEFAULT_CHECKS, *OPTIONAL_CHECKS) if check in enabled]
+    order = (*DEFAULT_CHECKS, *OPTIONAL_CHECKS)
+    if content_type == CONTENT_TYPE_PLUGIN:
+        enabled.add("schema")
+        if resolve_endpoints:
+            enabled.add("endpoint-resolution")
+            order += ("endpoint-resolution",)
+        if claude_validate:
+            enabled.add("claude-validate")
+            order += ("claude-validate",)
+    ordered = [check for check in order if check in enabled]
     return ordered + sorted(enabled - set(ordered))
 
 
@@ -329,6 +341,9 @@ def run_validation(
     skillspector_baseline: Path | None = None,
     hook_waivers: Path | None = None,
     skip: str | None = None,
+    repo_root: Path | None = None,
+    resolve_endpoints: bool = False,
+    claude_validate: bool = False,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
 
@@ -341,10 +356,11 @@ def run_validation(
 
     *content_type* (``skill`` | ``rules`` | ``workflows`` | ``plugin`` |
     ``unknown`` | ``None``) selects the schema validator and gates skill-only
-    checks (``quality`` and ``lint`` are skipped for rules, workflows, and
-    plugins). For ``unknown`` (``--type auto`` found no supported artifact) the
-    manifest checks ``schema``, ``version`` and ``quality`` are recorded as not
-    applicable instead of run, and every result carries the
+    checks (``quality`` and ``lint`` are skipped for rules and workflows).
+    Plugins use the bounded manifest and component checks, and selected
+    skill checks run for each bundled skill. For ``unknown`` (``--type auto``
+    found no supported artifact) the manifest checks ``schema``, ``version``
+    and ``quality`` are recorded as not applicable, and every result carries the
     ``tier1_applicability`` record, while the content scans still run. A target
     that holds an artifact manifest entry (``SKILL.md``, ``workflow-rules.mdc``,
     ``agent_plugin.yaml``/``.yml`` or ``.claude-plugin/plugin.json``) in any
@@ -364,12 +380,38 @@ def run_validation(
     applied to the ``security`` check; it is never discovered from the target.
     *hook_waivers* names an explicitly selected file of reviewed command hook
     waivers for the ``security`` check.
+    Plugin checks use *repo_root* for dependency resolution. *resolve_endpoints*
+    and *claude_validate* opt into additional plugin checks.
     *target_root* is the folder that *target_path* belongs to when a caller
     validates that folder one skill at a time, as ``validate`` does for a
     folder of skills. The ``security`` check then accepts no SkillSpector
     missing reference in the skill, because its instructions may name a file
     elsewhere in the folder that its scan did not inspect.
     """
+    if content_type == CONTENT_TYPE_PLUGIN:
+        from skillevaluator.tier1.plugin_public import run_public_plugin_validation
+
+        return run_public_plugin_validation(
+            target_path,
+            checks=checks,
+            skip=skip,
+            use_llm=use_llm,
+            llm_verify=llm_verify,
+            min_score=min_score,
+            quality_config=quality_config,
+            pii_waivers=pii_waivers,
+            previous_version=previous_version,
+            policy=policy,
+            fail_fast=fail_fast,
+            continue_on_failure=continue_on_failure,
+            on_check=on_check,
+            skillspector_baseline=skillspector_baseline,
+            hook_waivers=hook_waivers,
+            repo_root=repo_root,
+            resolve_endpoints=resolve_endpoints,
+            claude_validate=claude_validate,
+            target_root=target_root,
+        )
     enabled = _enabled_checks(checks)
     skipped = skipped_checks(skip)
     results: list[ValidationResult] = []
@@ -427,7 +469,6 @@ def run_validation(
             use_llm=use_llm,
             verify_llm=llm_verify,
             content_type=content_type if content_type in _AGENT_ARTIFACT_CONTENT_TYPES else None,
-            skillspector_reference_root=target_path if content_type == CONTENT_TYPE_PLUGIN else None,
             skillspector_baseline=skillspector_baseline,
             hook_waivers=hook_waivers,
             target_root=target_root,
@@ -698,9 +739,20 @@ def emit_reports(
         displayed_tiers=displayed_tiers,
         expected_skill_name=expected_skill_name,
     )
+    # The static projection describes a single scanned bundle. Catalog-only
+    # runs report each comparison in the existing Tier 2 views.
+    has_static_plugin_evidence = content_label == "Plugin" and any(
+        result_has_publication_evidence(result, tier=1)
+        and isinstance(plugin := result.metadata.get("plugin"), dict)
+        and plugin
+        for result in results
+    )
+    plugin_report_options = {"plugin_static": True} if has_static_plugin_evidence else {}
     if "cli" in report_formats:
         # The CLI report previews failed Tier 3 source checks only when a file written below lists them all.
-        CLIReporter(console=console, report_formats=report_formats, presentation_context=context).print_all(results)
+        CLIReporter(console=console, report_formats=report_formats, presentation_context=context).print_all(
+            results, **plugin_report_options
+        )
     if "github" in report_formats:
         github_reporter = GitHubReporter(
             workspace_root=repository_root,
@@ -747,7 +799,7 @@ def emit_reports(
         else:
             reporter = reporter_cls(expected_skill_name=expected_skill_name)
         output_path = output_dir / f"{basename}{reporter.get_file_extension()}"
-        reporter.save(results, output_path)
+        reporter.save(results, output_path, **plugin_report_options)
         if announce_paths:
             console.print(f"[dim]{fmt} report:[/dim] [cyan]{escape_markup(str(output_path))}[/cyan]")
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Provider-independent result handling for public Tier 2 entrypoints."""
 
+from collections.abc import Callable
 from pathlib import Path
 
 from skillevaluator.models.result import ValidationResult
@@ -8,10 +9,17 @@ from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.publication_identity import finalize_publication_target, publication_target_from_path
 
 
-def guarded_results(title: str, target_path: Path, callback, *, check_id: str) -> list[ValidationResult]:
+def guarded_results(
+    title: str,
+    target_path: Path,
+    callback: Callable[[dict[str, str] | None], list[ValidationResult]],
+    *,
+    check_id: str,
+) -> list[ValidationResult]:
+    """Run a check against the initial target identity and stamp its results."""
     initial_target = publication_target_from_path(target_path)
     try:
-        results = callback()
+        results = callback(initial_target)
     except Exception as exc:
         result = ValidationResult(validator_name=title, validator_description="Tier 2 check")
         result.mark_scan_incomplete(title)

@@ -6,7 +6,9 @@ layout: reference
 
 {/* Maintenance note: this page is maintained against the Click command tree and
     `skillevaluator --help` output. Re-verify every flag table each release;
-    tests/golden/cli_surface.json also records compatibility aliases hidden in help. */}
+    tests/golden/cli_surface.json also records compatibility aliases hidden in help.
+    tests/test_cli_reference_docs.py fails when a visible command or long option is
+    missing from this page; hidden commands and options stay undocumented. */}
 
 This page lists every `skillevaluator` command with its full flag set and exact defaults. If you want task-oriented guidance instead, start from the tier guides: [Tier 1: Validation](/skills/skillevaluator/tier1-validation), [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication), and [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
@@ -22,7 +24,9 @@ commands referenced below.
 | [tier2 PATH](#direct-tier-workflows) | Run intra-skill dedup; include inter-skill comparison with `--catalog` | Chat and embeddings provider |
 | [tier3 PATH](#direct-tier-workflows) | Prepare a missing starter dataset and run live evaluation | Provider, supported agent, and sandbox |
 | [validate](#validate) | Run all three tiers for skills, including Tier 3 autopilot, with explicit scope and gating controls | Provider access, scanners, supported agent, and sandbox; `--tiers 1` selects static checks |
-| [ci init](/skills/skillevaluator/cli-onboarding) | Set up GitHub Tier 1 checks with optional hosted reports. Use `--channel stable` to opt a new setup into stable releases. | GitHub checkout and authenticated GitHub CLI for a setup PR |
+| [ci init](#ci-init) | Set up GitHub Tier 1 checks with optional hosted reports, or all-tier CI with `--tiers 1,2,3`. Use `--channel stable` to opt a new setup into stable releases. | GitHub checkout and authenticated GitHub CLI for a setup PR |
+| [ci status](#ci-status) | Read the live CI setup state without changing it | Authenticated GitHub CLI; `SKILLEVALUATOR_GITLAB_TOKEN` for GitLab |
+| [ci demo](#ci-demo) | Open one small skill-change PR to see automatic feedback | Merged setup, a clean checkout, write access, authenticated GitHub CLI or `SKILLEVALUATOR_GITLAB_TOKEN` |
 | [quality-check](#quality-check) | Score skill quality across four weighted categories | Nothing |
 | [rubric-eval](#rubric-eval) | LLM-as-judge rubric evaluation | LLM provider key |
 | [security-scan](#security-scan) | Scan for security vulnerabilities | Nothing (key only with `--llm`/`--llm-verify`) |
@@ -40,6 +44,7 @@ commands referenced below.
 | [init-custom-grader](#init-custom-grader) | Scaffold a bring-your-own-grader starter | Nothing |
 | [init-harbor-task](#init-harbor-task) | Scaffold a bring-your-own-task Harbor starter | Nothing |
 | [view](#view) | Open the latest HTML live-evaluation report | A previous `tier3 evaluate` run |
+| [tier3 report-plugin](#tier3-report-plugin) | Export saved plugin runtime evidence | A retained `plugin_runtime_report.json` snapshot |
 | [compare](#compare) | Compare live-evaluation results across agents | A previous `tier3 evaluate` run |
 | [tier3 history](#tier3-history) | Inspect retained Skill Lift over skill revisions, grouped by compatible configuration | Retained Tier 3 summaries |
 | [tier3 feedback](#tier3-feedback) | Chat about one completed live-evaluation run and possible skill changes | A completed `tier3 evaluate` run, LLM provider key |
@@ -158,6 +163,7 @@ errors, such as an option the workflow does not accept, exit `2`.
 | `--policy FILE` | none | Explicit policy overlay, including reviewed ownership-contact severity. See [Tier 1 policies](/skills/skillevaluator/tier1-reference#validation-profiles-and-policies). |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 | `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline; never discovered from the skill. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-reference#audited-skillspector-baselines). |
+| `--hook-waivers FILE` | none | Reviewed command hook waivers for eligible hooks in a packaged bundle. See [Reviewed command hook waivers](/skills/skillevaluator/tier1-reference#reviewed-command-hook-waivers). |
 
 Also accepts `-r/--report` and `-o/--output-dir` described above.
 
@@ -286,7 +292,11 @@ Applies to the whole run: target typing, policy profile, reports, tier selection
 
 The [evaluated source provenance](#evaluated-source-provenance) flags also appear in this panel.
 
-Auto-detection recognizes: a `SKILL.md` for skills, `.mdc` files for rules, `workflow-rules.mdc` for workflows, and — for plugins — a bundle-reference `agent_plugin.yaml`/`.yml` manifest or a contained `.claude-plugin/plugin.json` manifest. Plugins are validated against their public contract; quality, lint, and version checks are skill-only and skipped for plugins.
+Auto-detection recognizes `SKILL.md` for skills, `.mdc` files for rules, and `workflow-rules.mdc` for workflows. For plugins it recognizes `agent_plugin.yaml` or `.yml`, `.claude-plugin/plugin.json`, a root `plugin.json` that declares the Agent Plugins schema, `.codex-plugin/plugin.json`, `.cursor-plugin/plugin.json`, and `openclaw.plugin.json`. A recognized manifest takes precedence over bundled skills. If a supported plugin manifest path holds a dangling link or a special file, auto-detection runs plugin manifest checks and reports the unsafe path. This includes a root `plugin.json` whose schema cannot be checked safely. You can pass the root or a manifest file. Tier 1 always checks the manifest schema and component inventory, even when `--checks` selects other checks. It runs the selected scans and applies applicable quality, lint, and version checks to bundled skills. CLI, JSON, and HTML reports include the inventory.
+
+```bash title="Check a bundle and save its component report"
+skillevaluator validate ./my-plugin --tiers 1 -r cli,json,html
+```
 
 When auto-detection finds none of these, the type is `unknown`. Tier 1 then records the `schema`, `version`, and `quality` checks as not applicable (N/A) instead of failing them with `No skills found`, and still runs the content scans. Tier 1 passes when those scans pass; Tier 2 still runs on the target unless `--no-dedup` or `--tiers 1`. The JSON report adds a root `tier1_applicability` object, whichever checks the run selects. Auto-detection also reads the directory names in the target's absolute path, so a repository whose path includes a directory named `skills`, `team-skills`, `team-rules`, `workflows`, or `team-workflows` is detected as that type, not `unknown`. A target folder whose own `SKILL.md`, `workflow-rules.mdc`, `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased (such as `Skill.md`) or a dangling symlink still runs the manifest checks, and fails them. A mis-cased manifest below the target is not discovered; validate that folder directly. Pass `--type` to validate the target as a given type anyway. See [Content types](/skills/skillevaluator/tier1-reference#content-types).
 
@@ -306,9 +316,13 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 | `--llm, --tier1-llm / --no-llm, --no-tier1-llm` | `no-llm` | Enable LLM-backed security analysis (requires a configured public provider — see [Providers & Credentials](/skills/skillevaluator/configuration)). |
 | `--llm-verify` | off | Run a second LLM pass to suppress false-positive findings. |
 | `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline for the `security` check; never discovered from the skill. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-reference#audited-skillspector-baselines). |
+| `--hook-waivers FILE` | none | Reviewed command hook waivers for eligible hooks in a packaged bundle. See [Reviewed command hook waivers](/skills/skillevaluator/tier1-reference#reviewed-command-hook-waivers). |
 | `--min-score INTEGER` | `70` | Minimum quality score (0–100) required per skill when the `quality` check runs; policy severity overrides cannot waive this gate. |
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that adjusts the quality check's expected headings, error-handling rules, token budget, description length limits, and reserved name words; settings it omits keep their packaged values. See [Tier 1: Validation](/skills/skillevaluator/tier1-reference#the-checks). |
 | `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check; forwarded to each skill of a catalog run. See [PII waivers](/skills/skillevaluator/tier1-reference#pii-waivers). |
+| `--repo-root DIRECTORY` | unset | Repository root used to resolve same-repository plugin component references. |
+| `--resolve-endpoints` | off | Opt into bounded DNS and redirect checks for declared plugin endpoints. |
+| `--claude-validate` | off | Run the installed Claude Code manifest validator. Its findings are advisory by default. A crash, timeout, or unusable report leaves Tier 1 incomplete and blocks validation. A missing CLI is recorded as skipped. |
 
 ### Tier 2 · Deduplication
 
@@ -316,8 +330,12 @@ Embedding + LLM dedup; on by default, skips gracefully without a provider key.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--dedup, --tier2 / --no-dedup, --no-tier2` | `dedup` | Run Tier 2 intra-skill semantic-overlap checks. On by default; skipped gracefully without public embedding access. Use `--no-tier2` (or `--no-dedup`) to disable. |
+| `--dedup, --tier2 / --no-dedup, --no-tier2` | `dedup` | Check semantic overlap within a skill or across bundled components. Skips gracefully without public embedding access. |
 | `--block-on-dedup / --no-block-on-dedup` | blocking | Choose whether Tier 2 findings participate in the `validate` exit gate. The scan and its report entries still run with `--no-block-on-dedup`. |
+| `--plugin-context-max-chunks INTEGER` | configured limit | Cap the total context chunks across bundled skills. Also accepted by `context-optimization-check` and `dedup-scan`. |
+| `--plugin-context-max-scalar-comparisons INTEGER` | configured limit | Cap bundle context comparisons multiplied by embedding dimensions. Also accepted by `context-optimization-check` and `dedup-scan`. |
+
+Tier 2 overlap findings for plugins are advisory. Unsafe inputs can still fail the scan.
 
 ### Tier 3 · Live Agent Evaluation
 
@@ -413,6 +431,7 @@ skillevaluator security-scan ./my-skill
 | `--llm / --no-llm` | `no-llm` | Enable LLM security analysis. |
 | `--llm-verify` | off | Use LLM verification to reduce false positives. |
 | `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline; never discovered from the skill. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-reference#audited-skillspector-baselines). |
+| `--hook-waivers FILE` | none | Reviewed command hook waivers for eligible hooks in a packaged bundle. See [Reviewed command hook waivers](/skills/skillevaluator/tier1-reference#reviewed-command-hook-waivers). |
 
 Plus the standard report options.
 
@@ -469,7 +488,7 @@ This command does not take the standard report options; use `--json` for a file.
 
 ## context-optimization-check
 
-Detect redundant content within one skill (intra-skill deduplication). Needs an embeddings-capable provider plus a chat LLM for the verification stage — see [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication).
+Detect redundant content within a skill or bundled skills. Needs an embeddings-capable provider plus a chat LLM for the verification stage. [Tier 2 deduplication](/skills/skillevaluator/tier2-deduplication)
 
 ```bash title="Intra-skill redundancy check"
 skillevaluator context-optimization-check ./my-skill
@@ -477,15 +496,16 @@ skillevaluator context-optimization-check ./my-skill
 
 | Flag | Default | Effect |
 | --- | --- | --- |
+| `--type [skill\|plugin\|auto]` | `auto` | Force the content type of the target. |
 | `--threshold FLOAT` | `0.8` | Similarity threshold for clustering candidate duplicates. |
 | `--model TEXT` | provider default | Embedding model override. |
 | `--llm-model TEXT` | provider default | LLM model override for the verification stage. |
 
-Plus the standard report options.
+Also accepts the standard report options and the two bundle context limits listed under `validate`.
 
 ## dedup-scan
 
-Alias of [context-optimization-check](#context-optimization-check) — same behavior, same flags (`--threshold` default `0.8`, `--model`, `--llm-model`, plus the standard report options). Only the report basename differs: `skillevaluator-dedup` instead of `skillevaluator-context`.
+For a skill, runs the same check and accepts the same flags as [context-optimization-check](#context-optimization-check). For a plugin, also accepts `--catalog FILE` to compare against a saved catalog and `--llm` to request advisory verdicts for catalog matches. Reports use the `skillevaluator-dedup` basename.
 
 ```bash title="Same check, alias name"
 skillevaluator dedup-scan ./my-skill
@@ -501,12 +521,14 @@ skillevaluator similarity-check ./skills
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--type [skill\|rules\|workflows\|auto]` | `auto` | Content type of the target. |
+| `--type [skill\|rules\|workflows\|plugin\|auto]` | `auto` | Content type of the target. Use `--type plugin` when building a catalog from a folder of bundles. |
 | `--threshold FLOAT` | `0.75` | Minimum similarity to report. |
-| `--full-body` | off | Embed full file bodies instead of descriptions. |
+| `--full-body` | off | Embed full file bodies instead of descriptions. Plugin catalogs use descriptions only. |
 | `--model TEXT` | provider default | Embedding model override. |
-| `--catalog FILE` | none | Compare exactly one skill against a local catalog. |
-| `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection. |
+| `--catalog FILE` | none | Compare one skill or bundle against a saved local catalog. |
+| `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection. For bundle scans, choose a destination outside the scanned tree. |
+| `--llm` | off | Request advisory LLM verdicts for plugin catalog matches. |
+| `--llm-model TEXT` | provider default | Override the model used for advisory catalog verdicts. |
 | `--max-entries INTEGER` | `1024` | Maximum selected manifests for a fresh collection; range `1`–`5000`. Does not restrict loaded catalog queries. |
 | `--max-scalar-comparisons INTEGER` | `128000000` | Maximum comparisons multiplied by embedding dimensions; must be positive. Applies to pairwise scans and catalog queries. |
 
@@ -769,6 +791,22 @@ skillevaluator view ./my-skill
 | --- | --- | --- |
 | `--results-dir DIRECTORY` | unset | Results directory to read from (default resolution in [Reports & Results](/skills/skillevaluator/reports)). |
 
+## tier3 report-plugin
+
+Render a retained `plugin_runtime_report.json` snapshot from a run directory.
+The snapshot is self-contained. Replay requires only the base installation and
+reports the saved observations. Canonical scores and publication eligibility
+are unavailable in the snapshot.
+
+```bash
+skillevaluator tier3 report-plugin ./saved-run -r cli,json,html -o ./replayed-reports
+```
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `-r, --report FORMAT` | `cli` | Accepts `cli`, `json`, `html`, `markdown`, `sarif`, and `benchmark`. Separate formats with commas or spaces, or repeat the option. File reports use `plugin-report` as the basename. The benchmark card is `BENCHMARK.md`. |
+| `-o, --output-dir DIRECTORY` | `reports` | Destination for file reports, outside the saved run directory. If the default directory would be inside the saved run, file reports go to a sibling directory named `<run-name>-reports`. |
+
 ## tier3 history
 
 ```bash
@@ -964,6 +1002,109 @@ Open retained Harbor job artifacts with Harbor's trajectory browser. Takes a job
 skillevaluator harbor-view ./path/to/jobs-dir
 ```
 
+## ci
+
+Set up, inspect and try repository CI. `ci init` prepares the workflow files, `ci status` reads the live state, and `ci demo` opens one small skill-change PR to show automatic feedback. Plain `ci init` runs the GitHub Tier 1 wizard in [Set Up CI with the CLI](/skills/skillevaluator/cli-onboarding). Adding `--tiers 1,2,3` selects the separate all-tier opt-in for GitHub and GitLab, described in [Advanced CI](/skills/skillevaluator/advanced-ci).
+
+```bash title="Preview, then set up"
+skillevaluator ci init --mode preview --no-input                # GitHub Tier 1, nothing written
+skillevaluator ci init --tiers 1,2,3 --mode preview --no-input # all-tier, nothing written
+skillevaluator ci init --mode pr                                # confirm, then open the setup PR
+skillevaluator ci status
+skillevaluator ci demo
+```
+
+A preview needs no login. Setup in PR mode, `ci status` and `ci demo` use an authenticated GitHub CLI on GitHub and `SKILLEVALUATOR_GITLAB_TOKEN` on GitLab. Exit codes follow the [global contract](#global-conventions): a rejected option combination or a failed setup step exits `1`, and an unknown flag or a value outside an option's choices exits `2`.
+
+### ci init
+
+The options fall into three groups. The first two apply to every setup; the third applies only with `--tiers 1,2,3`.
+
+**Wizard options.** Each one skips the matching prompt in the default GitHub Tier 1 wizard.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--repo DIRECTORY` | current directory | Checkout to set up. Must be the root of a Git repository. |
+| `--paths TEXT` | prompted; with `--no-input`, the suggested folders | Skill folder to check (repeatable). Must be one of the folders the wizard discovers, and the selection may hold at most 100 skills. |
+| `--min-score INTEGER RANGE` | `70` | Minimum quality score, 0 to 100. Required security and schema checks still apply. |
+| `--scan-mode [auto\|all]` | `auto` | `auto` checks the skills a PR changes; `all` checks every skill in the selected folders. |
+| `--default-branch TEXT` | inferred | Branch the workflows run on and the setup PR targets. Inferred from `origin/HEAD`, then `init.defaultBranch`, then the current branch. |
+| `--full / --checks-only` | prompted; `--no-input` uses `--full` | `--full` adds hosted HTML reports and one PR comment that updates. `--checks-only` keeps the downloadable report in the Actions run. |
+| `--report-url TEXT` | the repository's GitHub Pages URL | Must match the repository's verified Pages URL; any other value is rejected. Legacy Tier 1 setup only. |
+| `--release FILE` | bundled release descriptor | Pinned CI release descriptor. Not valid with `--channel stable`, which selects the release centrally. All-tier setup needs a schema-version 2 descriptor. |
+| `--channel [stable]` | pinned release | Follow the latest stable CI release. GitHub Tier 1 only; rejected with `--tiers` or `--platform gitlab`. A new setup uses a pinned release without it. |
+
+If the repository already has a recognized scan workflow, setup keeps its settings. `--paths`, `--min-score` and `--scan-mode` are then rejected, and `--channel stable` is rejected unless that scan is already on the stable channel.
+
+**Apply options.** These choose what happens to the plan.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--mode [preview\|save\|pr]` | prompted; the default answer is `pr`, or `preview` with `--tiers` | `preview` changes nothing. `save` writes the workflow files locally. `pr` asks for confirmation, then opens the setup PR. The Tier 1 wizard also configures the GitHub settings it needs. |
+| `--no-input` | off | Use defaults instead of prompts. Requires `--mode`. With `--mode pr` it authorizes the displayed setup without asking again. |
+| `--show-files` | off | Print the rendered workflow files after the plan. |
+| `--output PATH` | none | Write the plan as JSON to a new file. The path must not exist and must be outside the checkout. |
+| `--tier3-required` | off | Deprecated and ignored with a warning. Tier 1 is the only blocking CI tier. |
+
+**All-tier options.** Pass `--tiers 1,2,3` to use these. Without it, any of them exits with a message that it applies only to all-tier onboarding. `--platform` is still accepted with `--channel stable`. All-tier setup also rejects `--report-url` and `--checks-only`, because it always includes trusted PR feedback linked to retained CI artifacts. A GitLab root `.gitlab-ci.yml` with different content is never replaced: `--mode preview` prints the rendered files and the manual merge steps, and `--mode save` and `--mode pr` refuse.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--tiers TEXT` | unset | Select all-tier onboarding. Only `1,2,3` is accepted. Omit it for the Tier 1 setup. |
+| `--platform [auto\|github\|gitlab]` | `auto` | Detected from the `origin` host: `github.com` is GitHub, any other host is GitLab. A value that does not match the origin is rejected. |
+| `--env-mode [docker\|local]` | `docker` | Tier 3 runtime the workflow uses. |
+| `--provider [openai\|anthropic\|nv_build\|openai-compatible]` | `openai` | Chat and judging provider. |
+| `--embedding-provider [openai\|nv_build\|openai-compatible]` | `openai` with `--provider anthropic`, otherwise the same as `--provider` | Embeddings provider for Tier 2. |
+| `--model TEXT`, `--embedding-model TEXT` | provider default | Chat and judging model, and embeddings model. |
+| `--tier1-llm` | off | Add protected Tier 1 LLM checks. Needs a release that declares model routing. |
+| `--tier1-provider [openai\|anthropic\|nv_build]` | unset | Provider for Tier 1 LLM checks, independent of the other tiers. |
+| `--tier1-model TEXT` | empty | Model for Tier 1 LLM checks; empty keeps the image's provider default. |
+| `--base-url TEXT`, `--embedding-base-url TEXT` | empty | Chat and embeddings API roots for the selected providers. |
+| `--tier3-provider [openai\|anthropic\|nv_build\|openai-compatible]` | unset | Provider for Tier 3 judging when it differs from `--provider`. |
+| `--tier3-model TEXT`, `--tier3-base-url TEXT` | empty | Judge model and its API root. |
+| `--agent-model AGENT=MODEL` | unset | Model for one native agent (repeatable): `claude-code`, `codex` or `opencode`. No whitespace, and one model per agent. |
+| `--gateway-secret TEXT` | `SKILL_EVAL_LLM_API_KEY` | Name of the CI secret that holds the key for an `openai-compatible` endpoint. Never pass the key itself. Letters, digits and underscores only, with no `GITHUB_` prefix. |
+| `--benchmark-pr` | off | Propose benchmark cards through a dedicated update PR after default-branch runs. GitHub only, and needs a release that declares it. |
+| `--agents TEXT` | provider-native | Comma-separated agents for Tier 3, overriding the provider's native agent. |
+| `--runner TEXT` | `ubuntu-24.04` on GitHub, `docker` on GitLab | GitHub runner label or GitLab runner tag for Tiers 2 and 3. |
+| `--n-attempts INTEGER RANGE` | `1` | Attempts per eval case, 1 to 10. |
+| `--n-concurrent INTEGER RANGE` | `1` | Concurrent eval cases, 1 to 16. |
+| `--timeout-minutes INTEGER RANGE` | `300` | Native job duration, 10 to 360. The evaluator ends 20 minutes, or a quarter of a shorter duration, earlier so setup and evidence retention fit. |
+| `--environment TEXT` | `skillevaluator` | Name of the protected execution environment that holds provider secrets. |
+
+The model-routing options (`--tier1-llm`, `--tier1-provider`, `--tier1-model`, `--base-url`, `--embedding-base-url`, `--tier3-provider`, `--tier3-model`, `--tier3-base-url`, `--agent-model`), `--gateway-secret` with a non-default name, and an `openai-compatible` provider need a release descriptor that declares `ci-model-routing-v1`. An older descriptor rejects them before any file is written. Setup reads the descriptor's pinned workflow references, so the options apply when you run `ci init`, not later in CI. See the [all-tier setup reference](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md) for provider choices, secrets and runner requirements.
+
+### ci status
+
+```bash
+skillevaluator ci status
+skillevaluator ci status --platform gitlab --tiers 1,2,3
+```
+
+Read the live setup state without changing settings or starting scans. The Tier 1 form reports whether the scan workflow, the optional publisher and GitHub Pages are configured on the default branch, whether the publisher's approval matches the scan file, and the latest scan and publication runs. The all-tier form reports the scan and trusted feedback configuration, warns about GitLab jobs that trusted feedback pipelines would also run, and shows the latest pipeline. A configured setup is not a verified scan: open a skill PR to inspect its check, comment and report.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--platform [auto\|github\|gitlab]` | `auto` | Platform of the repository's `origin`. |
+| `--tiers TEXT` | unset | Inspect an all-tier setup. Only `1,2,3` is accepted. `--platform gitlab`, or an all-tier scan or feedback file in the checkout, selects the all-tier form without it. |
+| `--repo DIRECTORY` | current directory | Root of the checkout whose `origin` identifies the project. |
+
+### ci demo
+
+```bash
+skillevaluator ci demo
+skillevaluator ci demo --tiers 1,2,3 --no-input
+```
+
+After the setup PR merges, open a small skill-change PR on a new branch to see the check, the comment and the report. It adds a Markdown comment to one configured skill's `SKILL.md`; close the PR afterward, because no merge is needed. The command needs a clean checkout, write access to the repository, and a scan workflow on the default branch. If a demo PR is already open, it prints that PR's link instead of creating another.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--platform [auto\|github\|gitlab]` | `auto` | Platform of the repository's `origin`. |
+| `--tiers TEXT` | unset | Try an all-tier setup. Only `1,2,3` is accepted. |
+| `--repo DIRECTORY` | current directory | Root of the checkout whose `origin` identifies the project. |
+| `--no-input` | off | Authorize opening the demo PR without the confirmation prompt. |
+
 ## doctor
 
 Check live-evaluation runtime readiness: the CLI install, the configured provider, the requested agents and their credentials, and the selected backend. Run it before your first `tier3 evaluate` — see [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes) for what each check means.
@@ -982,7 +1123,7 @@ skillevaluator doctor --tier 1 --json
 ```
 
 - **Tier 1** reports each external scanner the selected checks run: SkillSpector for `security`, Bandit, Semgrep and Gitleaks for `code-integrity`, and pip-audit for `dependency`. Each row shows the resolved executable, the override variable when one selected it, and the version from a bounded version probe. The probe never starts a shell. A scanner fails when it is missing, its override is malformed, or the probe exits nonzero or times out. It also fails when it is older than the release the validators parse: Bandit 1.9.4 or Gitleaks 8. An unreported version is a warning.
-- **Tier 2** checks that the embedding provider and the LLM provider used for duplicate analysis resolve, without a network request. With `--verify-models`, it also sends one embedding request and one chat request, each bounded by `--timeout` and sent without retries. Failures show only the HTTP status and a remedy, never the provider's response body.
+- **Tier 2** checks that the embedding provider and the LLM provider used for duplicate analysis resolve, without a network request. With `--verify-models`, it also sends one embedding request and one chat request, each bounded by `--timeout` and sent without retries. The chat request uses the same output ceiling as Tier 2 duplicate analysis. Failures show only the HTTP status and a remedy, never the provider's response body.
 - **all** runs Tiers 1, 2 and 3 in order. A failed tier does not stop the next, and the exit code is nonzero when any tier fails.
 
 An option for a tier that is not selected exits with a usage error before any check runs. For example, `--checks` without `--tier 1` or `all` is an error, and so is `--timeout` with `--tier 2` but no `--verify-models`, because offline Tier 2 sends no request.

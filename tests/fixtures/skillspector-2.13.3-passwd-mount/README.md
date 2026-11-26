@@ -64,3 +64,4 @@ The placeholder key makes provider availability reproducible without using
 credentials. Findings and timestamps must be regenerated and reviewed rather
 than copied across scanner releases. Partial LLM-response tests are explicitly
 synthetic mutations of these reports; they are not additional captured scans.
+For new reports, run `python scripts/layout_json.py`; only the layout changes.

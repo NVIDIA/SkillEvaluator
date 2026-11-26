@@ -2,6 +2,7 @@
 
 `report.json` is the unmodified output of SkillSpector 2.13.3 scanning the synthetic
 `SKILL.md` in this directory, on 2026-11-10. No customer content is included.
+The data is unchanged; `python scripts/layout_json.py` applied only the layout.
 
 The pinned image was
 `ghcr.io/nvidia/skillevaluator-tier1@sha256:a3baec51f48145cdf9de05a5ab054d9576f62f1de0f5276b788410f5c17747d4`.

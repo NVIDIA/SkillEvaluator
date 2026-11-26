@@ -4,3 +4,10 @@
 
 # Vendored report assets are verified by digest; never convert their newlines.
 src/skillevaluator/reporting/assets/** -text
+
+# The captured JSON layout check compares exact LF output from scripts/layout_json.py.
+tests/fixtures/skillspector-*.json text eol=lf
+tests/fixtures/skillspector-*/*.json text eol=lf
+tests/golden/cli_surface.json text eol=lf
+tests/reporting/fixtures/*.json text eol=lf
+tests/tier3/fixtures/*.json text eol=lf

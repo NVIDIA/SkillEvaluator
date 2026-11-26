@@ -338,8 +338,12 @@ model that opens the skill by itself, and an interactive session. See the
 
 ## JSON output
 
-`--json FILE` writes a `harness_compatibility` block with one entry per skill and harness.
-`validate` puts the same block in its JSON report.
+`--json FILE` writes a `harness_compatibility` block keyed by skill folder, with
+one row per harness. `validate` includes per-skill rows in its JSON report.
+When `harness-check` checks a plugin, the block also contains
+`<plugin folder> (plugin)` for the plugin panel. The key uses the resolved plugin
+folder whether you pass that folder, its manifest file, or its manifest folder.
+Any member skills have their own entries.
 
 ```json title="harness.json (one harness shown)"
 {

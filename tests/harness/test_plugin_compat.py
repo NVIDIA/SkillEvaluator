@@ -407,6 +407,27 @@ def test_harness_check_prints_no_schema_hint_for_the_plugin_entry(tmp_path: Path
     assert [key.endswith(" (plugin)") for key in block] == [True, False]  # the plugin rows stay in the JSON
 
 
+@pytest.mark.parametrize("manifest", [".claude-plugin/plugin.json", ".github/plugin/plugin.json"])
+def test_manifest_file_under_a_directory_alias_uses_the_plugin_report(tmp_path: Path, manifest: str):
+    root = _plugin(tmp_path / "demo-bundle", manifest).resolve()
+    alias = tmp_path / "manifest-folder"
+    try:
+        alias.symlink_to((root / manifest).parent, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    # Place a sibling at the synthetic report label to catch filesystem-based filtering.
+    root.with_name(f"{root.name} (plugin)").mkdir()
+    out = tmp_path / "out.json"
+    expected = _report(root, out)
+    panel, block = expected
+    assert list(block) == [f"{root} (plugin)", str(root / "skills" / "demo")]
+    assert panel.count("Tier 1 schema also fails for ") == 1
+    assert "Tier 1 schema also fails for demo: " in panel
+    assert _report(alias, out) == expected
+    assert _report(alias / "plugin.json", out) == expected
+
+
 def test_harness_check_prints_no_schema_hint_for_a_plugin_without_skills(tmp_path: Path):
     root = _plugin(tmp_path / "p", ".codex-plugin/plugin.json", components=("commands",))
     result = CliRunner().invoke(cli, ["harness-check", str(root)])

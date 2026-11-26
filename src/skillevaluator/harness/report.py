@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.harness.overlay import evaluate_profile, facts_for, load_profiles
-from skillevaluator.harness.plugin import evaluate_plugin, is_plugin_root, plugin_facts, plugin_root_for
+from skillevaluator.harness.plugin import evaluate_plugin, is_plugin_root, plugin_facts
 from skillevaluator.reporting.console_ui import AMBER, BRIGHT, FAINT, GREEN, MUTED, RED, SPIN, TEXT, WIDTH
 from skillevaluator.validators.harness import HARNESS_METADATA_KEY, HarnessValidator
 
@@ -255,9 +255,7 @@ def run_harness_check(
     verbose: bool = False,
     config: dict[str, Any] | None = None,
 ) -> Block:
-    """Evaluate each skill harness by harness, updating a live panel as each finishes."""
-    # A plugin's manifest file or manifest folder is checked as the plugin folder it belongs to.
-    target = plugin_root_for(target)
+    """Evaluate the plugin and skills in an already normalized target directory."""
     profiles = load_profiles(harness, profiles_dir)
     finder = HarnessValidator()
     skills = [target] if finder._is_skill_directory(target) else finder._find_all_skills(target)

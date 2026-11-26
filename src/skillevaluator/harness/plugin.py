@@ -131,7 +131,8 @@ def plugin_root_for(target: Path, *, resolve_path: bool = False) -> Path:
 
     So ``<plugin>/.claude-plugin/plugin.json``, ``<plugin>/.github/plugin`` and the like give ``<plugin>``,
     the same as naming the plugin folder. A manifest folder is told by its name in the path as given.
-    CLI callers can resolve the result after identifying the owner from the absolute lexical path.
+    With ``resolve_path``, check the absolute lexical path first to preserve manifest ownership,
+    then classify the resolved path to recognize conventional folders reached through aliases.
     """
     if resolve_path:
         target = target.absolute()
@@ -144,11 +145,12 @@ def plugin_root_for(target: Path, *, resolve_path: bool = False) -> Path:
             if not resolve_path:
                 return owner
             if not is_file or target == owner / manifest:
-                return owner.resolve()
+                return plugin_root_for(owner.resolve())
     if not resolve_path:
         return folder
     if is_file and target.name in ROOT_MANIFESTS and is_plugin_root(folder):
-        return folder.resolve()
+        # Follow directory aliases while keeping a linked root manifest with its plugin.
+        target = folder
     return plugin_root_for(target.resolve())
 
 

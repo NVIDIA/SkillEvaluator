@@ -37,7 +37,8 @@ All notable changes to SkillEvaluator are documented in this file.
   example `.claude-plugin/plugin.json`) as the plugin folder it belongs to. In
   `--json` output the plugin entry for such a target is now keyed by the plugin
   folder. A plugin run no longer prints a false "Tier 1 schema also fails ...
-  No skills found" line for the plugin entry.
+  No skills found" line for the plugin entry. Plugin detection continues if a
+  potential manifest cannot be inspected because its parent directory is inaccessible.
 
 ### Documentation
 

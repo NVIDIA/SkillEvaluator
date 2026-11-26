@@ -188,7 +188,7 @@ def validate_declarative_checks(value: object) -> list[str]:
         elif check_type == "output_matches":
             try:
                 re.compile(expected)
-            except re.error as exc:
+            except (re.error, RecursionError, OverflowError, ValueError) as exc:
                 errors.append(f"{where}.pattern is not a valid regular expression: {exc}")
     return errors
 

@@ -22,6 +22,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Tier 3 computes baseline task identities without loading whole staged
+  repository files into memory. Existing digests stay compatible, and a file
+  that changes size while being hashed fails before baseline reuse.
 - Tier 1 accepts automatically discovered stable SkillSpector releases
   starting at 2.13.7. Managed installs and the Tier 1 CI image pin 2.13.7.
 - Tier 1 plugin reports label the validator `Plugin Schema & Component Checks` and

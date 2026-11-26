@@ -511,9 +511,13 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
       If a quality score changes unexpectedly, inspect the finding message rather than adding keywords. The checker rewards usable instructions and evidence in their relevant context, not vocabulary alone.
     </Tip>
 
-    **Quality config file.** Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to adjust the rules below. The file has five optional sections: `expected_headers` and `error_handling` for Reliability, `efficiency` for the token budget, `discoverability` for the description length limits, and `correctness` for reserved words in the skill name. Anything you leave out keeps its packaged value from `quality-default.yaml`, and any list you set replaces the packaged list rather than merging with it.
+    **Quality config file.** Pass `--quality-config PATH` to `quality-check`, `tier1`, or `validate` to adjust the rules below. The file has five optional sections: `expected_headers` and `error_handling` for Reliability, `efficiency` for the token budget, instruction wording, and reference filenames, `discoverability` for the description length limits and the description word lists, and `correctness` for reserved names and examples, script, API, and resource documentation. Anything you leave out keeps its packaged value from `quality-default.yaml`, and any list you set replaces the packaged list rather than merging with it.
 
-    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points. Omit `expected_headers` to keep that list. A list you set replaces it, so copy any default entries you want to keep. Set `expected_headers: []` to turn heading checks off.
+    The packaged prose and heading rules include English, Russian, and Chinese alternatives. Code markers and reserved identifiers reflect the code or naming policy they check. No language detection takes place: every list applies to every skill. To grade skills in another language, set the lists you need; to grade English only, set each list to its English terms.
+
+    **Expected headings.** Reliability deducts points when `SKILL.md` lacks an expected heading. The packaged `quality-default.yaml` expects `## Prerequisites` (or `## Requirements`), `## Limitations`, and `## Troubleshooting` (or `## Common Issues` or `## FAQ`), each worth 5 points, and accepts the Russian and Chinese headings for each (`## Требования`, `## 前提条件`, `## Ограничения`, `## 限制`, `## Устранение неполадок`, `## 故障排除` and others; see the packaged file for the full list). Omit `expected_headers` to keep that list. A list you set replaces it, so copy any default entries you want to keep. Set `expected_headers: []` to turn heading checks off.
+
+    Quality heading rules compare canonically equivalent Unicode text equally. For example, `## Étapes` matches with either a composed accent or a combining accent. The configuration digest includes the heading text as supplied.
 
     ```yaml title="quality.yaml"
     expected_headers:
@@ -560,7 +564,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     | Rule | Deducts when | Packaged points | List field |
     | --- | --- | --- | --- |
-    | `mentioned` | `SKILL.md` contains none of the `terms` | `10` | `terms`: whole words, any case. `error` matches `Error` but not `errorless`. A term with spaces, such as `exit code`, also matches when its words are split by a line break or several spaces |
+    | `mentioned` | `SKILL.md` contains none of the `terms` | `10` | Whole-word `terms` in any case. `error` matches `Error` and `处理error时`. Letters, digits, and underscores remain part of a word, so `errorless` and `error_code` are distinct. Phrases such as `exit code` and `не удалось` can span several spaces or a line break. Chinese terms such as `错误` match in running text. The packaged list holds English, Russian, and Chinese terms |
     | `scripts` | A `.py` file directly in `scripts/` or `tools/` has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: case-sensitive text found anywhere in the file, such as `raise` or `if not ` |
     | `lib` | A module in the skill's Python package, for skills with no `.py` or `.sh` files directly in `scripts/` or `tools/`, has neither a `try:`/`except` pair nor any of the `markers` | `5` | `markers`: as for `scripts` |
 
@@ -607,7 +611,38 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | `message` | `Description very long (recommend 50-150 chars)` | Start of the finding message |
     | `suggestion` | `Keep descriptions concise for progressive disclosure` | Fix suggestion attached to the finding |
 
-    The length is counted in characters after leading and trailing whitespace is removed. A skill without a `description` key, or with an empty one (`description: ""`), is not reported by these rules. A `description:` key left without a value is not empty: YAML reads it as null, which is counted as the 4-character text `None` and reported as too short. Each finding appends the length and the limit to `message`, as in `Description too short (recommend 50-150 chars): 12 chars, minimum 20` and `Description very long (recommend 50-150 chars): 251 chars, maximum 200`. The two rules are checked independently, so a minimum set above the maximum makes both fire on a description between them. The other Discoverability rules are not configurable yet.
+    The length is counted in characters after leading and trailing whitespace is removed. A skill without a `description` key, or with an empty one (`description: ""`), is not reported by these rules. A `description:` key left without a value is not empty: YAML reads it as null, which is counted as the 4-character text `None` and reported as too short. Each finding appends the length and the limit to `message`, as in `Description too short (recommend 50-150 chars): 12 chars, minimum 20` and `Description very long (recommend 50-150 chars): 251 chars, maximum 200`. The two rules are checked independently, so a minimum set above the maximum makes both fire on a description between them.
+
+    **Word lists.** The remaining keyword rules read their lists from the same file. Each rule takes `points`, `message`, `suggestion` and the list fields below; an omitted key keeps its packaged value, `points: 0` turns the rule off, and a list you set replaces the packaged list. Terms match as whole words or phrases in any case, with the same rules as `error_handling.mentioned.terms`. Many phrases match across a line break. Person phrases and broad-description exclusions use literal internal spacing. Terms in scripts without spaces between words, such as Chinese, match inside running text. Those characters also delimit English or Russian terms in mixed-script text.
+
+    ```yaml title="quality.yaml"
+    discoverability:
+      trigger_words:
+        terms: [use, when, for, helps, allows, verwende, wenn, für]
+      purpose_heading:
+        headings: ["## Purpose", "## Zweck"]
+    efficiency:
+      buzzwords:
+        points: 0
+    ```
+
+    | Section | Rule | Deducts when | Packaged points | List fields |
+    | --- | --- | --- | --- | --- |
+    | `discoverability` | `trigger_words` | The description contains none of the `terms` | `10` | `terms`, such as `use`, `when`, `используй`, `когда`, `使用`, `当需要` |
+    | `discoverability` | `vague_words` | The description contains one of the `terms` | `15` | `terms`, such as `something`, `various`, `что-то`, `разное`, `一些`, `各种` |
+    | `discoverability` | `person_phrases` | The description contains one of the `terms` | `15` | `terms`, such as `i can`, `you should`, `your` |
+    | `discoverability` | `broad_description` | The description is longer than `longer_than` characters, contains one of the `terms` and none of the `negatives` | `5` | `terms`, such as `data`, `files`; `negatives`, such as `not for`, `do not use`; `longer_than`, packaged `100` |
+    | `discoverability` | `purpose_heading` | `SKILL.md` contains none of the `headings` | `5` | Single ATX `headings` matched as exact text anywhere in the file, such as `## Purpose`, `## Назначение`, `## 目的`, and `## 概述` |
+    | `efficiency` | `action_verbs` | The first configured heading present, in list order, contains none of the `terms` | `15` | `headings`, such as `## Instructions`, `## Использование`, `## 使用说明`, and `terms`, such as `run`, `запусти`, `运行` |
+    | `efficiency` | `buzzwords` | `SKILL.md` contains one of the `terms` | `5` | `terms`, such as `utilize`, `paradigm`, `синергия`, `赋能` |
+    | `correctness` | `resource_docs` | A resource-based skill's `SKILL.md` contains none of the `terms` | `10` | `terms`, such as `template`, `asset`, `шаблон`, `ресурс`, `模板`, `资源` |
+    | `correctness` | `lib_resource_docs` | A lib-based skill has resource directories and `SKILL.md` contains none of the `terms`; the finding appends the directory names to `message` | `5` | `terms`, as for `resource_docs` |
+    | `correctness` | `examples` | No recognized example heading, inline marker, or code fence | `5` | `headings` and `markers` |
+    | `correctness` | `script_docs` | A script-based or hybrid skill has no recognized script heading or table header | `10` | `headings` and `markers` |
+    | `correctness` | `api_docs` | A library skill has no API documentation term or explicit Python import | `10` | `terms` |
+    | `efficiency` | `reference_names` | A reference filename stem is numeric, matches a vague term exactly, or is shorter than the configured minimum | `5` | `terms`, `min_chars` (4), and `min_unspaced_chars` (2 for names with CJK or kana) |
+
+    See the packaged `quality-default.yaml` for every default term.
 
     **Reserved words in the name.** Correctness deducts points when the frontmatter `name` contains a reserved word, set in the `correctness` section under `reserved_name`. An omitted key keeps its packaged value. A `terms` list you set replaces the packaged list, so copy `anthropic` and `claude` if you want to keep them:
 
@@ -624,9 +659,9 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | `message` | `Name contains reserved word` | Start of the finding message |
     | `suggestion` | `Remove reserved words from skill name` | Fix suggestion attached to the finding |
 
-    The finding appends the matched terms to `message`, as in `Name contains reserved word: claude`. Several matches still deduct `points` once. This is an error-level rule: its finding is HIGH and fails the quality check whatever the score, so `points: 0` removes that failure as well as the deduction. The schema check has its own fixed list (`anthropic`, `claude`) that this file does not change, so with the default checks a name containing either word is still rejected there. The other Correctness rules are not configurable yet.
+    The finding appends the matched terms to `message`, as in `Name contains reserved word: claude`. Several matches still deduct `points` once. This is an error-level rule: its finding is HIGH and fails the quality check whatever the score, so `points: 0` removes that failure as well as the deduction. The schema check has its own fixed list (`anthropic`, `claude`) that this file does not change, so with the default checks a name containing either word is still rejected there. The same `correctness` section also configures the resource-documentation, example, script-documentation, and API-documentation rules described in **Word lists** above.
 
-    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, a `max_tokens`, `min_chars` or `max_chars` that is not a whole number from 1 to 1,000,000,000, an empty `terms` or `markers` list, a repeated entry in one of those lists, or a reserved-name term that could never match a skill name (such as `Claude Code` or `claude_code`) is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
+    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, a `max_tokens`, `min_chars`, `min_unspaced_chars`, or `max_chars` that is not a whole number from 1 to 1,000,000,000, an empty `terms`, `negatives`, `markers` or `headings` list, a repeated entry in one of those lists, a `headings` entry that is not a single ATX heading, a `longer_than` that is not a whole number from 1 to 1,000,000,000, or a reserved-name term that could never match a skill name (such as `Claude Code` or `claude_code`) is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
 
     ```text title="Example error"
     Error: Invalid value for '--quality-config': quality.yaml: unknown key(s) in expected_headers[0]: point (allowed: alternatives, heading, message, points, suggestion)

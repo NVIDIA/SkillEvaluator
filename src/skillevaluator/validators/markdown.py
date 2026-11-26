@@ -10,6 +10,7 @@ from html import escape
 from html.parser import HTMLParser
 from inspect import signature
 from pathlib import PureWindowsPath
+from unicodedata import normalize
 from urllib.parse import unquote, urlsplit
 
 from markdown_it import MarkdownIt
@@ -223,6 +224,54 @@ def _walk_tokens(tokens: Iterable[Token]) -> Iterator[Token]:
         yield token
         if token.children and token.type != "image":
             yield from _walk_tokens(token.children)
+
+
+def markdown_atx_sections(
+    content: str, headings: Iterable[str], *, literal_headings: Iterable[str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return the first parsed and literal sections keyed by the configured headings."""
+    frontmatter = FRONTMATTER_PATTERN.match(content)
+    if frontmatter:
+        content = frontmatter.group(2)
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    lines = content.split("\n")
+    tokens = _MARKDOWN_PARSER.parse(content)
+    starts = [
+        (token, tokens[index + 1].content)
+        for index, token in enumerate(tokens)
+        if token.type == "heading_open" and token.level == 0 and token.map is not None
+    ]
+    candidates: dict[str, list[str]] = {}
+    for heading in dict.fromkeys(headings):
+        candidates.setdefault(normalize("NFC", heading), []).append(heading)
+    literal_requested = set(literal_headings)
+    literal_candidates = {normalize("NFC", heading) for heading in literal_requested}
+    sections: dict[str, str] = {}
+    literal_sections: dict[str, str] = {}
+    for index, (token, label) in enumerate(starts):
+        name = normalize("NFC", f"{token.markup} {label}")
+        if name not in candidates:
+            continue
+        literal = name in literal_candidates and normalize("NFC", lines[token.map[0]]) == name
+        if name in sections and (not literal or name in literal_sections):
+            continue
+        stop = next(
+            (starts[later][0].map[0] for later in range(index + 1, len(starts)) if starts[later][0].tag <= token.tag),
+            len(lines),
+        )
+        body = "\n".join(lines[token.map[1] : stop])
+        sections.setdefault(name, body)
+        if literal:
+            literal_sections[name] = body
+    return (
+        {heading: body for name, body in sections.items() for heading in candidates[name]},
+        {
+            heading: body
+            for name, body in literal_sections.items()
+            for heading in candidates[name]
+            if heading in literal_requested
+        },
+    )
 
 
 def markdown_link_targets(content: str, *, include_images: bool = False) -> list[str]:

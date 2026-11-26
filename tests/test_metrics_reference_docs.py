@@ -548,6 +548,11 @@ def test_type_specific_table_lists_every_type_specific_deduction() -> None:
     from the page while another check of the same size keeps the size present.
     """
     source = Counter(_literal_deduct_amounts(_quality_score_functions()["_check_type_specific"]))
+    # The resource-documentation checks take their deduction from the packaged quality config.
+    correctness = load_quality_config()["correctness"]
+    source.update(
+        int(correctness[rule]["points"]) for rule in ("resource_docs", "lib_resource_docs", "script_docs", "api_docs")
+    )
 
     documented: Counter[int] = Counter()
     for cells in _table_rows("Skill type").values():

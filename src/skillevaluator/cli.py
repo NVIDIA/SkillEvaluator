@@ -2468,7 +2468,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
 )
 @click.option(
     "--min-score",
-    type=int,
+    type=click.IntRange(0, 100),
     default=QUALITY_DEFAULT_MIN_SCORE,
     show_default=True,
     cls=GroupedOption,
@@ -3589,7 +3589,7 @@ def _split_harness_version(value: str) -> tuple[str, str]:
 
 @cli.command("quality-check")
 @_target_argument
-@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
+@click.option("--min-score", type=click.IntRange(0, 100), default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -3618,7 +3618,7 @@ def quality_check(
 
 @cli.command("rubric-eval")
 @_target_argument
-@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
+@click.option("--min-score", type=click.IntRange(0, 100), default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @_report_options
 def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run LLM-as-judge rubric evaluation for a skill."""
@@ -3715,7 +3715,7 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
 @cli.command("precommit-run", hidden=True)
 @click.option(
     "--min-score",
-    type=int,
+    type=click.IntRange(0, 100),
     default=QUALITY_DEFAULT_MIN_SCORE,
     show_default=True,
     help="Minimum quality score (0-100) when the quality check runs.",

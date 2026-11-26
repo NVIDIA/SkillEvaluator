@@ -225,8 +225,10 @@ def _walk_tokens(tokens: Iterable[Token]) -> Iterator[Token]:
             yield from _walk_tokens(token.children)
 
 
-def markdown_atx_sections(content: str, headings: Iterable[str]) -> dict[str, str]:
-    """Return the bodies of the first matching top-level ATX sections."""
+def markdown_atx_sections(
+    content: str, headings: Iterable[str], *, literal_headings: Iterable[str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return the first parsed matches and first exact source-line matches for requested headings."""
     frontmatter = FRONTMATTER_PATTERN.match(content)
     if frontmatter:
         content = frontmatter.group(2)
@@ -239,17 +241,25 @@ def markdown_atx_sections(content: str, headings: Iterable[str]) -> dict[str, st
         if token.type == "heading_open" and token.level == 0 and token.map is not None
     ]
     candidates = set(headings)
+    literal_candidates = set(literal_headings)
     sections: dict[str, str] = {}
+    literal_sections: dict[str, str] = {}
     for index, (token, label) in enumerate(starts):
         name = f"{token.markup} {label}"
-        if name not in candidates or name in sections:
+        if name not in candidates:
+            continue
+        literal = name in literal_candidates and lines[token.map[0]] == name
+        if name in sections and (not literal or name in literal_sections):
             continue
         stop = next(
             (starts[later][0].map[0] for later in range(index + 1, len(starts)) if starts[later][0].tag <= token.tag),
             len(lines),
         )
-        sections[name] = "\n".join(lines[token.map[1] : stop])
-    return sections
+        body = "\n".join(lines[token.map[1] : stop])
+        sections.setdefault(name, body)
+        if literal:
+            literal_sections[name] = body
+    return sections, literal_sections
 
 
 def markdown_link_targets(content: str, *, include_images: bool = False) -> list[str]:

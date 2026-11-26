@@ -6,6 +6,7 @@
 """Tests for the language-neutral word lists of the quality score (issue #865)."""
 
 from pathlib import Path
+from unicodedata import normalize
 
 import pytest
 from tests.validators.test_quality_score import _finding_messages, _validate_with, _write_issue_skill
@@ -265,18 +266,71 @@ def test_multilingual_trigger_and_description_boundaries(tmp_path, description, 
 
 def test_instruction_rules_use_real_markdown_sections_and_keep_legacy_example_credit(tmp_path):
     body = (
-        "```markdown\n## Instructions\n- verify\n```\n\n"
-        "##  Instructions ##\n\n- Read the summary carefully.\n\n"
+        "```markdown\n## Steps\n- verify\n```\n\n"
+        "##  Steps ##\n\n- Read the summary carefully.\n\n"
         "## Examples ##\n\nA worked report explains the build order.\n"
     )
     skill = _write_localized_skill(
         tmp_path, name="marked-sections", description="Use when generating build reports.", body=body
     )
-    result = _validate_with(skill, tmp_path, "efficiency: {action_verbs: {terms: [verify]}}\n")
+    result = _validate_with(skill, tmp_path, 'efficiency: {action_verbs: {headings: ["## Steps"], terms: [verify]}}\n')
 
     assert result.metadata["quality_scores"]["metrics"]["has_instructions"] is True
     assert "Instructions lack clear action verbs" in [finding.message for finding in result.findings]
     assert "No examples provided" not in [finding.message for finding in result.findings]
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("## Instructions ##\n\nAn overview appears here.\n", set()),
+        ("## Usage ###\n\nAn overview appears here.\n", set()),
+        ("## Instructions ##\n\nAn overview appears here.\n\n## Usage\n\nAn overview appears here.\n", set()),
+        (
+            "## Instructions ##\n\n- Run the report.\n\n## Instructions\n\nAn overview appears here.\n",
+            {"Instructions lack clear action verbs", "Instructions not in list format"},
+        ),
+    ],
+)
+def test_legacy_english_instruction_scoring_uses_literal_heading_lines(tmp_path, body, expected):
+    skill = _write_localized_skill(
+        tmp_path, name="legacy-english-heading", description="Use when checking build reports.", body=body
+    )
+
+    result = _validate_with(skill, tmp_path)
+
+    assert result.metadata["quality_scores"]["metrics"]["has_instructions"] is True
+    assert {finding.message for finding in result.findings if finding.check_name == "quality_efficiency"} == expected
+
+
+@pytest.mark.parametrize("form", ["NFC", "NFD"])
+@pytest.mark.parametrize("decomposed_config", [False, True])
+def test_localized_action_verb_matches_canonical_equivalent_text(tmp_path, form, decomposed_config):
+    body = "## Инструкции\n\n- " + normalize(form, "Используй отчёт.") + "\n"
+    skill = _write_localized_skill(
+        tmp_path, name="localized-action", description="Use when checking build reports.", body=body
+    )
+    term = normalize("NFD", "используй")
+    custom = f"efficiency: {{action_verbs: {{terms: [{term}]}}}}\n" if decomposed_config else None
+
+    result = _validate_with(skill, tmp_path, custom)
+
+    assert "Instructions lack clear action verbs" not in [finding.message for finding in result.findings]
+
+
+@pytest.mark.parametrize("form", ["NFC", "NFD"])
+def test_localized_error_handling_matches_canonical_equivalent_text(tmp_path, form):
+    skill = _write_localized_skill(
+        tmp_path,
+        name="localized-format",
+        description="Use when checking build reports.",
+        body="## Устранение неполадок\n\n" + normalize(form, "Формат невалидный.") + "\n",
+    )
+
+    result = _validate_with(skill, tmp_path)
+
+    assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
+    assert "No mention of error handling or validation" not in [finding.message for finding in result.findings]
 
 
 @pytest.mark.parametrize("heading", ["Instructions", "Инструкции", "使用说明"])

@@ -22,6 +22,7 @@ import posixpath
 import re
 from collections.abc import Iterable
 from pathlib import Path
+from unicodedata import normalize
 from urllib.parse import unquote, urlsplit
 
 from skillevaluator.constants import (
@@ -54,6 +55,8 @@ from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_atx_sections, markdown_link_targets
 
 logger = get_logger(__name__)
+
+_LEGACY_ENGLISH_INSTRUCTION_HEADINGS = ("## Instructions", "## Usage")
 
 # Scripts written without spaces between words: CJK ideographs (with their extensions and
 # compatibility forms), kana, and the CJK radicals. A term that starts or ends with one of
@@ -204,10 +207,12 @@ def _contains_term(text: str, term: str) -> bool:
 
 def _contains_any_term(text: str, terms: Iterable[str], *, flexible_spacing: bool = True) -> bool:
     """Return whether the text contains any of the terms (whole word or phrase, any case)."""
-    patterns = [_term_pattern(term, flexible_spacing=flexible_spacing) for term in terms if term.strip()]
+    patterns = [
+        _term_pattern(normalize("NFC", term), flexible_spacing=flexible_spacing) for term in terms if term.strip()
+    ]
     if not patterns:
         return False
-    return re.search("|".join(patterns), text, re.IGNORECASE) is not None
+    return re.search("|".join(patterns), normalize("NFC", text), re.IGNORECASE) is not None
 
 
 def _has_api_documentation(content: str, terms: Iterable[str]) -> bool:
@@ -455,12 +460,27 @@ class QualityScoreValidator(ValidatorBase):
 
         instruction_headings = self.quality_config["efficiency"]["action_verbs"]["headings"]
         example_headings = self.quality_config["correctness"]["examples"]["headings"]
-        sections = markdown_atx_sections(
-            content, (*instruction_headings, *self._list_format_headings, *example_headings)
+        sections, literal_sections = markdown_atx_sections(
+            content,
+            (*instruction_headings, *self._list_format_headings, *example_headings),
+            literal_headings=_LEGACY_ENGLISH_INSTRUCTION_HEADINGS,
         )
-        instructions = next((sections[heading] for heading in instruction_headings if heading in sections), None)
+        instruction_sections = sections.copy()
+        for heading in _LEGACY_ENGLISH_INSTRUCTION_HEADINGS:
+            # A decorated legacy heading still counts as present and keeps its priority,
+            # but deductions use the body of the first literal heading line.
+            if heading in instruction_sections:
+                instruction_sections[heading] = literal_sections.get(heading, "")
+        instructions = next(
+            (instruction_sections[heading] for heading in instruction_headings if heading in instruction_sections), None
+        )
         list_instructions = next(
-            (sections[heading] for heading in self._list_format_headings if heading in sections), None
+            (
+                instruction_sections[heading]
+                for heading in self._list_format_headings
+                if heading in instruction_sections
+            ),
+            None,
         )
         self._check_correctness(qs, content, skill_path, frontmatter_data, instructions, sections)
         self._check_discoverability(qs, content, frontmatter_data)

@@ -12,10 +12,22 @@ from __future__ import annotations
 
 import json
 import stat
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
+import json5
+
+from skillevaluator.constants import PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule, version_finding
+from skillevaluator.plugin_format_schema import _claude_name_refused_by_path
+from skillevaluator.plugin_paths import PluginRootReader
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    _reject_json_constant,
+    load_bounded_json,
+)
 
 MANIFESTS = {
     "claude": ".claude-plugin/plugin.json",
@@ -27,16 +39,34 @@ MANIFESTS = {
     "hermes_native": "plugin.yaml",
 }
 AGENT_PLUGINS_SCHEMA = "https://agent-plugins.org/schemas/"
+# OpenClaw v2026.10.9 selects the first present client manifest before reading it.
+OPENCLAW_CLIENT_MANIFESTS = tuple(MANIFESTS[fmt] for fmt in ("codex", "cursor", "claude"))
+OPENCLAW_AGENT_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+OPENCLAW_NATIVE_MANIFEST = "openclaw.plugin.json"
+OPENCLAW_PACKAGE_FILE = "package.json"
+OPENCLAW_PACKAGE_EXTENSIONS = f"{OPENCLAW_PACKAGE_FILE}#openclaw.extensions"
+OPENCLAW_NATIVE_ENTRIES = ("index.ts", "index.js", "index.mjs", "index.cjs")
+OPENCLAW_DEFAULT_MARKERS = (
+    "skills",
+    "commands",
+    "agents",
+    "hooks/hooks.json",
+    ".mcp.json",
+    ".lsp.json",
+    "settings.json",
+)
 COMPONENTS = {
     "skills": lambda r: len(_skill_sizes(r)),
-    "commands": lambda r: len(list((r / "commands").rglob("*.md"))) if (r / "commands").is_dir() else 0,
-    "agents": lambda r: len(list((r / "agents").rglob("*.md"))) if (r / "agents").is_dir() else 0,
+    "commands": lambda r: len(list((r / "commands").rglob("*.md"))) if _is_dir(r / "commands") else 0,
+    "agents": lambda r: len(list((r / "agents").rglob("*.md"))) if _is_dir(r / "agents") else 0,
     "hooks": lambda r: _json_keys(r / "hooks" / "hooks.json", "hooks") or _json_keys(r / "hooks.json", "hooks"),
     "mcp": lambda r: _json_keys(r / ".mcp.json", "mcpServers") or _json_keys(r / "mcp.json", "mcpServers"),
     "lsp": lambda r: _json_keys(r / ".lsp.json"),
 }
 # Folders a harness can pick up without any manifest (Claude Code inline plugins).
 DEFAULT_DIRS = ("skills", "commands", "agents", "hooks")
+# Root files that, with the folders above, make up the default Claude Code layout.
+DEFAULT_FILES = (".mcp.json", ".lsp.json")
 DECLARED_COMPONENT_KEYS = ("skills", "commands", "agents", "hooks", "mcpServers", "lspServers")
 # What a component outcome means for the plugin's status. Outcomes come from canary probes.
 OUTCOME_EFFECT = {
@@ -63,7 +93,7 @@ def _skill_sizes(root: Path) -> dict[Path, int]:
     regular file is ever opened: opening a named pipe with no writer would block forever.
     """
     sizes: dict[Path, int] = {}
-    for path in (root / "skills").rglob("SKILL.md") if (root / "skills").is_dir() else []:
+    for path in (root / "skills").rglob("SKILL.md") if _is_dir(root / "skills") else []:
         try:
             info = path.stat()
             if not stat.S_ISREG(info.st_mode):
@@ -75,8 +105,32 @@ def _skill_sizes(root: Path) -> dict[Path, int]:
     return sizes
 
 
+def _is_file(path: Path) -> bool:
+    """``path.is_file()``, with a path that cannot be examined (no permission, name too long) read as absent."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _is_dir(path: Path) -> bool:
+    """``path.is_dir()``, with a path that cannot be examined read as absent."""
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _exists(path: Path) -> bool:
+    """Keep existing nonregular paths eligible for OpenClaw's format selection."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
 def _json_keys(path: Path, key: str | None = None) -> int:
-    if not path.is_file():
+    if not _is_file(path):
         return 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -86,36 +140,206 @@ def _json_keys(path: Path, key: str | None = None) -> int:
     return len(section) if isinstance(section, (dict, list)) else 1
 
 
+_UNPARSED = object()
+_PARSE_LIMIT = object()
+
+
+def _name(data: Any) -> str:
+    """The manifest's ``name`` when it is a non-empty string, else ``""``."""
+    name = data.get("name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) else ""
+
+
+def _declares_components(data: Any) -> bool:
+    return isinstance(data, dict) and any(data.get(key) for key in DECLARED_COMPONENT_KEYS)
+
+
+def _claude_name_invalid(data: Any) -> bool:
+    name = _name(data)
+    return not name or _claude_name_refused_by_path(name)
+
+
+def _claude_lenient(path: Path) -> Any:
+    """A Claude manifest the strict read rejected, parsed the way Claude Code reads it, or ``_UNPARSED``.
+
+    Claude Code drops a byte order mark and does not stop at bytes that are not UTF-8, so only a
+    syntax error or a file that cannot be opened is a manifest it cannot read.
+    """
+    try:
+        source = path.read_bytes().decode("utf-8", "replace").removeprefix("\ufeff")
+        return json.loads(source, parse_constant=_reject_json_constant)
+    except (OSError, ValueError, RecursionError):
+        return _UNPARSED
+
+
+def _openclaw_manifest(path: Path, *, strict_json: bool = False) -> Any:
+    """Read a manifest with OpenClaw's 256 KiB cap and format-specific parser."""
+    try:
+        if not _is_file(path):
+            return _UNPARSED
+        with path.open("rb") as handle:
+            raw = handle.read(PLUGIN_CONFIG_MAX_BYTES + 1)
+        if len(raw) > PLUGIN_CONFIG_MAX_BYTES:
+            return _UNPARSED
+        source = raw.decode("utf-8", "replace")
+        if strict_json:
+            return json.loads(source, parse_int=float, parse_constant=_reject_json_constant)
+        # JSON5 also accepts the nonstandard constants that json.loads accepts by default.
+        try:
+            return json.loads(source, parse_int=float)
+        except json.JSONDecodeError:
+            return json5.loads(source)
+    except (OSError, ValueError):
+        return _UNPARSED
+    except RecursionError:
+        # Python's recursion limit does not establish whether the upstream parser accepts it.
+        return _PARSE_LIMIT
+
+
+def _openclaw_package_extensions(reader: PluginRootReader) -> Literal["absent", "declared", "invalid", "unchecked"]:
+    """Classify the package declaration that OpenClaw checks before bundle discovery."""
+    if reader.kind(PurePosixPath(OPENCLAW_PACKAGE_FILE)) != "file":
+        return "absent"
+    try:
+        with SecureRoot(reader.root) as secure_root:
+            raw, _ = secure_root.read_bytes(Path(OPENCLAW_PACKAGE_FILE), PLUGIN_CONFIG_MAX_BYTES)
+        package = load_bounded_json(raw.decode("utf-8", "replace"))
+    except (OSError, SecurePathError, StructuredDataLimitError):
+        return "unchecked"
+    except StructuredDataSyntaxError:
+        return "absent"
+
+    metadata = package.get("openclaw") if isinstance(package, dict) else None
+    if metadata is None:
+        return "absent"
+    if not isinstance(metadata, dict):
+        return "invalid"
+    entries = metadata.get("extensions")
+    if entries is None:
+        return "absent"
+    if (
+        not isinstance(entries, list)
+        or not entries
+        or any(not isinstance(entry, str) or not entry.strip() for entry in entries)
+    ):
+        return "invalid"
+    # This branch consumes the directory even if no declared entry resolves.
+    return "declared"
+
+
+def _openclaw_native_fallback_is_file(reader: PluginRootReader, entry: str) -> bool:
+    """Recognize a regular root entrypoint or an alias to a file within the plugin."""
+    kind = reader.kind(PurePosixPath(entry))
+    if kind != "link":
+        return kind == "file"
+    try:
+        root = reader.root.resolve(strict=True)
+        target = (root / entry).resolve(strict=True).relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return PluginRootReader(root).kind(PurePosixPath(*target.parts)) == "file"
+
+
 def is_plugin_root(path: Path) -> bool:
-    return any((path / rel).is_file() for rel in MANIFESTS.values())
+    return _is_file(path / OPENCLAW_NATIVE_MANIFEST) or any(_is_file(path / rel) for rel in MANIFESTS.values())
 
 
 def plugin_facts(root: Path) -> dict[str, Any]:
-    """Facts about a plugin folder: manifest formats, manifest validity, name and component counts."""
+    """Facts about a plugin folder: manifest formats, manifest validity, name and component counts.
+
+    ``invalid_<fmt>`` says that this format's JSON manifest is there but could not be read or parsed as
+    strict UTF-8 JSON: a syntax error, a byte order mark, bytes that are not UTF-8, or a file that cannot be
+    opened. Such a manifest file also clears its own ``fmt_<fmt>``. ``unparsed_claude`` is narrower: the
+    Claude manifest also fails the more lenient read Claude Code does. ``nameless_claude`` covers missing
+    names and names refused by Claude Code's path loader.
+    ``default_dirs`` is any default component folder; ``default_layout`` also counts a root ``.mcp.json``
+    or ``.lsp.json``. OpenClaw uses separate facts for its selected manifest and default markers.
+    """
     facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
+    facts.update({f"invalid_{fmt}": False for fmt, rel in MANIFESTS.items() if rel.endswith(".json")})
+    facts["nameless_claude"] = facts["unparsed_claude"] = facts["claude_declares_components"] = False
     for fmt, rel in MANIFESTS.items():
         path = root / rel
-        facts[f"fmt_{fmt}"] = path.is_file()
-        if not path.is_file() or path.suffix != ".json":
+        facts[f"fmt_{fmt}"] = _is_file(path)
+        if not facts[f"fmt_{fmt}"] or path.suffix != ".json":
             continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+            data = json.loads(path.read_text(encoding="utf-8"), parse_constant=_reject_json_constant)
+        except (OSError, ValueError, RecursionError):
             facts["manifest_invalid"] = True
+            facts[f"invalid_{fmt}"] = True
             facts[f"fmt_{fmt}"] = False
+            if fmt == "claude":
+                lenient = _claude_lenient(path)
+                facts["unparsed_claude"] = lenient is _UNPARSED
+                facts["nameless_claude"] = lenient is not _UNPARSED and _claude_name_invalid(lenient)
+                facts["claude_declares_components"] = _declares_components(lenient)
             continue
-        if isinstance(data, dict) and isinstance(data.get("name"), str) and data["name"]:
-            facts["plugin_name"] = data["name"]
-        if isinstance(data, dict) and any(data.get(key) for key in DECLARED_COMPONENT_KEYS):
+        if name := _name(data):
+            facts["plugin_name"] = name
+        if fmt == "claude":
+            facts["nameless_claude"] = _claude_name_invalid(data)
+        if _declares_components(data):
             facts["declares_components"] = True
         if fmt == "root_json":
             facts["fmt_agent_v1"] = isinstance(data, dict) and str(data.get("$schema", "")).startswith(
                 AGENT_PLUGINS_SCHEMA
             )
     facts["fmt_copilot"] = facts["fmt_copilot"] or facts.pop("fmt_copilot_alt")
+    facts["invalid_copilot"] = facts.pop("invalid_copilot_alt") or facts["invalid_copilot"]
     facts.setdefault("fmt_agent_v1", False)
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
-    facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
+    facts["default_dirs"] = any(_is_dir(root / d) for d in DEFAULT_DIRS)
+    facts["default_layout"] = facts["default_dirs"] or any(_is_file(root / f) for f in DEFAULT_FILES)
+    reader = PluginRootReader(root)
+    package_extensions = _openclaw_package_extensions(reader)
+    check_bundle = package_extensions == "absent"
+    selected = next((rel for rel in OPENCLAW_CLIENT_MANIFESTS if _exists(root / rel)), "") if check_bundle else ""
+    manifest = _openclaw_manifest(root / selected) if selected else None
+    has_native_manifest = _exists(root / OPENCLAW_NATIVE_MANIFEST)
+    native_manifest = check_bundle and not selected and has_native_manifest
+    agent_path = MANIFESTS["root_json"]
+    agent_manifest = (
+        _openclaw_manifest(root / agent_path, strict_json=True)
+        if check_bundle and not selected and not native_manifest
+        else None
+    )
+    agent_selected = isinstance(agent_manifest, dict) and agent_manifest.get("$schema") == OPENCLAW_AGENT_SCHEMA
+    facts["openclaw_agent_manifest"] = agent_selected
+    facts["openclaw_agent_name_invalid"] = agent_selected and not _name(agent_manifest).strip()
+    facts["openclaw_selected_manifest"] = selected
+    facts["openclaw_manifest_invalid"] = (
+        bool(selected) and manifest is not _PARSE_LIMIT and not isinstance(manifest, dict)
+    )
+    unchecked_manifest = ""
+    if package_extensions == "unchecked":
+        unchecked_manifest = OPENCLAW_PACKAGE_FILE
+    elif manifest is _PARSE_LIMIT or agent_manifest is _PARSE_LIMIT:
+        unchecked_manifest = selected or agent_path
+    facts["openclaw_manifest_unchecked"] = bool(unchecked_manifest)
+    facts["openclaw_unchecked_manifest"] = unchecked_manifest
+    facts["openclaw_package_invalid"] = package_extensions == "invalid"
+
+    native_path = OPENCLAW_NATIVE_MANIFEST if native_manifest else ""
+    if package_extensions == "declared":
+        native_path = OPENCLAW_PACKAGE_EXTENSIONS
+    elif (
+        check_bundle
+        and not (native_manifest or agent_selected or unchecked_manifest)
+        and (not selected or facts["openclaw_manifest_invalid"])
+    ):
+        default_entry = next((rel for rel in OPENCLAW_NATIVE_ENTRIES if _exists(root / rel)), "")
+        if not selected or (default_entry and _openclaw_native_fallback_is_file(reader, default_entry)):
+            native_path = default_entry
+    facts["openclaw_native_path"] = native_path
+    facts["openclaw_native_manifest_missing"] = bool(native_path) and not has_native_manifest
+    facts["openclaw_default_layout"] = (
+        check_bundle and not native_path and any(_exists(root / marker) for marker in OPENCLAW_DEFAULT_MARKERS)
+    )
+    claude_layout = selected == MANIFESTS["claude"] or not (selected or agent_selected or native_path)
+    facts["openclaw_declares_components"] = _declares_components(manifest) or (
+        claude_layout and _is_file(root / "settings.json")
+    )
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
     facts["max_skill_bytes"] = max(_skill_sizes(root).values(), default=0)
     return facts
@@ -137,7 +361,10 @@ def evaluate_plugin(
                 finding[key] = _fill(rule[key], facts)
         findings.append(finding)
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
-    if worst < 2:
+    openclaw_bundle_unconfirmed = profile["harness"] == "openclaw" and (
+        facts.get("openclaw_native_path") or facts.get("openclaw_unchecked_manifest") == OPENCLAW_PACKAGE_FILE
+    )
+    if worst < 2 and not openclaw_bundle_unconfirmed:
         for kind, outcome in (section.get("components") or {}).items():
             n = facts["components"].get(kind, 0)
             effect = OUTCOME_EFFECT[outcome]
@@ -153,7 +380,12 @@ def evaluate_plugin(
                 }
             )
             worst = max(worst, _EFFECT_RANK[effect])
-        if facts.get("any_manifest") and not facts["declares_components"] and not any(facts["components"].values()):
+        declares_components = facts["declares_components"]
+        if profile["harness"] == "claude-code":
+            declares_components = declares_components or facts.get("claude_declares_components", False)
+        elif profile["harness"] == "openclaw":
+            declares_components = declares_components or facts.get("openclaw_declares_components", False)
+        if facts.get("any_manifest") and not declares_components and not any(facts["components"].values()):
             prefix = str(profile["rules"][0]["id"]).split("-")[0]
             findings.append(
                 {

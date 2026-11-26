@@ -47,6 +47,16 @@ All notable changes to SkillEvaluator are documented in this file.
   model they name. Claude 4.7 and later on those profiles no longer receive a
   `temperature` the provider rejects, and the Tier 3 Bedrock refusal fallback
   keeps the request's geography prefix.
+- The `harness-check` plugin panel distinguishes broken Claude Code manifests
+  from missing manifests, checks plugin names, and recognizes declared
+  components in manifests with a UTF-8 byte order mark. For OpenClaw, the
+  panel checks declared native package extensions before client bundles, checks
+  the first present Codex, Cursor, or Claude manifest as JSON5, and accounts
+  for native root entrypoint fallback when that bundle fails, including
+  symlinks to in-plugin regular files with a single hard link. The panel
+  recognizes the native OpenClaw manifest on its own and reports native
+  compatibility as unchecked. MCP notes apply across OpenClaw bundle
+  formats. The panel requires a recognized plugin manifest.
 
 ### Documentation
 

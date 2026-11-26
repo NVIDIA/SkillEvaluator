@@ -99,6 +99,69 @@ class TestLanguageNeutralWordLists:
         assert _dimension_scores(result)["discoverability"] == 100.0
         assert _dimension_scores(result)["reliability"] == 100.0
 
+    @pytest.mark.parametrize(
+        ("headings", "description"),
+        [
+            (
+                ("概述", "使用方法", "使用示例", "前置条件", "注意事项", "常见问题"),
+                "当需要分析构建日志时使用此技能，用于查找多余的步骤。",
+            ),
+            (
+                ("概述", "使用方法", "使用範例", "前置條件", "注意事項", "常見問題"),
+                "當需要分析建置日誌時使用此技能，用於找出多餘的步驟。",
+            ),
+        ],
+    )
+    def test_common_chinese_section_headings_and_prose_examples(
+        self, tmp_path: Path, headings: tuple[str, ...], description: str
+    ):
+        purpose, instructions, examples, prerequisites, limitations, troubleshooting = headings
+        body = (
+            f"## {purpose}\n\n測量建置時間。\n\n"
+            f"## {instructions}\n\n- 執行探針。\n- 查看報告。\n\n"
+            f"## {examples}\n\n報告顯示每個步驟所花的時間。\n\n"
+            f"## {prerequisites}\n\n需要先取得建置記錄。\n\n"
+            f"## {limitations}\n\n無法分析尚未完成的建置。\n\n"
+            f"## {troubleshooting}\n\n遇到錯誤時檢查診斷記錄。\n"
+        )
+        result = _validate_with(
+            _write_localized_skill(tmp_path, name="build-probe-zh", description=description, body=body),
+            tmp_path,
+        )
+
+        assert result.findings == []
+        metrics = result.metadata["quality_scores"]["metrics"]
+        assert metrics["has_instructions"] and metrics["has_examples"]
+        assert result.metadata["quality_scores"]["overall_score"] == 100.0
+
+    @pytest.mark.parametrize(
+        ("action", "troubleshooting"),
+        [
+            ("Запустить пробу.", "Скрипт может вернуть ошибку."),
+            ("Использовать форматтер.", "При ошибках смотреть журнал."),
+            ("Откройте журнал.", "Повторить запрос после сбоя."),
+            ("Запускай пробу.", "Сохранить сведения об исключении."),
+            ("Открыть отчёт.", "Изучить файл с исключениями."),
+        ],
+    )
+    def test_russian_procedures_and_inflected_error_terms(self, tmp_path: Path, action: str, troubleshooting: str):
+        body = RUSSIAN_BODY.replace("- Запусти пробу.", f"- {action}").replace(
+            "Если возникает ошибка, прочитай вывод диагностики.", troubleshooting
+        )
+        result = _validate_with(
+            _write_localized_skill(
+                tmp_path,
+                name="proba-sborki",
+                description="Используй для анализа журналов сборки и поиска лишних шагов.",
+                body=body,
+            ),
+            tmp_path,
+        )
+
+        assert result.findings == []
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
+        assert _dimension_scores(result)["efficiency"] == 100.0
+
     def test_chinese_terms_match_inside_a_run_of_characters(self, tmp_path: Path):
         """Chinese has no spaces between words, so a term matches without a word boundary."""
         skill_dir = _write_issue_skill(tmp_path, troubleshooting="探针会报告错误信息并停止。")

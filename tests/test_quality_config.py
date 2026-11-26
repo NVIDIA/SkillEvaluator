@@ -27,6 +27,10 @@ def test_packaged_default_quality_config_is_available() -> None:
                 "## 先决条件",
                 "## 前提條件",
                 "## 先決條件",
+                "## 前置条件",
+                "## 前置條件",
+                "## 环境要求",
+                "## 環境要求",
             ],
             "points": 5,
             "message": "No prerequisites/requirements documented",
@@ -34,7 +38,7 @@ def test_packaged_default_quality_config_is_available() -> None:
         },
         {
             "heading": "## Limitations",
-            "alternatives": ["## Ограничения", "## 限制"],
+            "alternatives": ["## Ограничения", "## 限制", "## 局限性", "## 已知限制", "## 注意事项", "## 注意事項"],
             "points": 5,
             "message": "No limitations documented",
             "suggestion": "Add '## Limitations' section with known issues/constraints",
@@ -50,6 +54,9 @@ def test_packaged_default_quality_config_is_available() -> None:
                 "## 疑难解答",
                 "## 疑難解答",
                 "## 疑難排解",
+                "## 故障排查",
+                "## 常见问题",
+                "## 常見問題",
             ],
             "points": 5,
             "message": "No troubleshooting section documented",
@@ -288,11 +295,27 @@ PACKAGED_ERROR_HANDLING = {
             "ошибок",
             "ошибке",
             "ошибкой",
+            "ошибку",
+            "ошибкам",
+            "ошибками",
+            "ошибках",
             "ошибочно",
             "исключение",
+            "исключения",
+            "исключению",
+            "исключением",
+            "исключении",
+            "исключений",
+            "исключениями",
             "невалидный",
+            "невалидная",
+            "невалидное",
+            "невалидные",
             "сбой",
             "сбои",
+            "сбоя",
+            "сбое",  # noqa: RUF001 -- intentional Cyrillic vocabulary
+            "сбоев",
             "не удалось",
             "не удался",
             "валидация",
@@ -334,7 +357,7 @@ def _write_config(tmp_path: Path, body: str) -> Path:
     return config_path
 
 
-def test_packaged_error_handling_rules_match_former_hard_coded_values() -> None:
+def test_packaged_error_handling_rules_match_expected_defaults() -> None:
     error_handling = load_quality_config()["error_handling"]
 
     assert error_handling == PACKAGED_ERROR_HANDLING

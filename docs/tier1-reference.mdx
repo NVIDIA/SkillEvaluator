@@ -630,7 +630,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | `discoverability` | `vague_words` | The description contains one of the `terms` | `15` | `terms`, such as `something`, `various`, `что-то`, `разное`, `一些`, `各种` |
     | `discoverability` | `person_phrases` | The description contains one of the `terms` | `15` | `terms`, such as `i can`, `you should`, `your` |
     | `discoverability` | `broad_description` | The description is longer than `longer_than` characters, contains one of the `terms` and none of the `negatives` | `5` | `terms`, such as `data`, `files`; `negatives`, such as `not for`, `do not use`; `longer_than`, packaged `100` |
-    | `discoverability` | `purpose_heading` | `SKILL.md` contains none of the `headings` | `5` | `headings`: single ATX headings matched as exact text anywhere in the file, packaged `## Purpose`, `## Назначение`, `## Цель`, `## 目的`, `## 用途` |
+    | `discoverability` | `purpose_heading` | `SKILL.md` contains none of the `headings` | `5` | Single ATX `headings` matched as exact text anywhere in the file, such as `## Purpose`, `## Назначение`, `## 目的`, and `## 概述` |
     | `efficiency` | `action_verbs` | The first configured heading present, in list order, contains none of the `terms` | `15` | `headings`, such as `## Instructions`, `## Использование`, `## 使用说明`, and `terms`, such as `run`, `запусти`, `运行` |
     | `efficiency` | `buzzwords` | `SKILL.md` contains one of the `terms` | `5` | `terms`, such as `utilize`, `paradigm`, `синергия`, `赋能` |
     | `correctness` | `resource_docs` | A resource-based skill's `SKILL.md` contains none of the `terms` | `10` | `terms`, such as `template`, `asset`, `шаблон`, `ресурс`, `模板`, `资源` |

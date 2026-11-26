@@ -38,9 +38,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - `quality-check` recognizes English, Russian, and Chinese vocabulary for
   triggers, instructions, examples, error handling, expected headings, and
-  documentation for scripts, APIs, and resources. Set `--quality-config` to replace the packaged lists.
-  Chinese terms match in running text. English and Russian terms retain word
-  boundaries.
+  documentation for scripts, APIs, and resources. Common Chinese headings and
+  Russian inflected error terms and procedural verbs are included. Instruction
+  and example detection uses Markdown sections and can change the
+  `has_instructions` and `has_examples` metrics. Chinese terms match in running
+  text. English and Russian terms retain word boundaries. The packaged
+  `quality_config` digest changes. Set `--quality-config` to replace packaged
+  lists, including the new vocabulary and section rules.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

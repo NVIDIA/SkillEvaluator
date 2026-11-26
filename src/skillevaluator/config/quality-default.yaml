@@ -18,6 +18,10 @@ expected_headers:
       - "## 先决条件"
       - "## 前提條件"
       - "## 先決條件"
+      - "## 前置条件"
+      - "## 前置條件"
+      - "## 环境要求"
+      - "## 環境要求"
     points: 5
     message: "No prerequisites/requirements documented"
     suggestion: "Document dependencies, API keys, or setup needed"
@@ -25,6 +29,10 @@ expected_headers:
     alternatives:
       - "## Ограничения"
       - "## 限制"
+      - "## 局限性"
+      - "## 已知限制"
+      - "## 注意事项"
+      - "## 注意事項"
     points: 5
     message: "No limitations documented"
     suggestion: "Add '## Limitations' section with known issues/constraints"
@@ -38,6 +46,9 @@ expected_headers:
       - "## 疑难解答"
       - "## 疑難解答"
       - "## 疑難排解"
+      - "## 故障排查"
+      - "## 常见问题"
+      - "## 常見問題"
     points: 5
     message: "No troubleshooting section documented"
     suggestion: "Add '## Troubleshooting' with Error/Cause/Solution patterns"
@@ -53,7 +64,9 @@ error_handling:
     suggestion: "Document expected errors and how to handle them"
     terms: [error, errors, exception, exceptions, invalid, fail, fails, failed, failure, failures, failing,
             validate, validates, validated, validating, validation, validations,
-            ошибка, ошибки, ошибок, ошибке, ошибкой, ошибочно, исключение, невалидный, сбой, сбои, не удалось, не удался,
+            ошибка, ошибки, ошибок, ошибке, ошибкой, ошибку, ошибкам, ошибками, ошибках, ошибочно,
+            исключение, исключения, исключению, исключением, исключении, исключений, исключениями,
+            невалидный, невалидная, невалидное, невалидные, сбой, сбои, сбоя, сбое, сбоев, не удалось, не удался,
             валидация, валидирует, не найден, недоступен,
             错误, 异常, 失败, 无效, 验证, 校验, 錯誤, 異常, 失敗, 無效, 驗證, 校驗]
   # A script has neither try/except nor any marker (case-sensitive substring).
@@ -85,10 +98,12 @@ efficiency:
     points: 15
     message: "Instructions lack clear action verbs"
     suggestion: "Use imperative: 'Use run_script with...', 'Call activate_skill...'"
-    headings: ["## Instructions", "## Usage", "## Инструкции", "## Использование", "## 使用说明", "## 使用說明", "## 用法"]
+    headings: ["## Instructions", "## Usage", "## Инструкции", "## Использование", "## 使用说明", "## 使用說明", "## 用法", "## 使用方法"]
     terms: [use, call, run, execute, pass, set, add, mark, update, keep,
             используй, используйте, вызови, вызовите, запусти, запустите, выполни, выполните,
             передай, передайте, установи, установите, добавь, добавьте, обнови, обновите,
+            использовать, вызвать, запустить, выполнить, передать, установить, добавить, обновить,
+            запускай, запускайте, выполняй, выполняйте, открой, откройте, открыть,
             使用, 调用, 运行, 执行, 传入, 设置, 添加, 标记, 更新, 保留, 調用, 運行, 執行, 傳入, 設置, 標記, 新增]
   # SKILL.md contains one of the terms (whole word, any case).
   buzzwords:
@@ -163,7 +178,7 @@ discoverability:
     points: 5
     message: "No '## Purpose' section"
     suggestion: "Add purpose section to clarify use cases"
-    headings: ["## Purpose", "## Назначение", "## Цель", "## 目的", "## 用途"]
+    headings: ["## Purpose", "## Назначение", "## Цель", "## 目的", "## 用途", "## 概述", "## 简介", "## 簡介"]
 
 # Correctness rules. They overlay the same way as the sections above.
 correctness:
@@ -182,7 +197,7 @@ correctness:
     points: 5
     message: "No examples provided"
     suggestion: "Add example usage with code blocks"
-    headings: ["## Examples", "## Примеры", "## 示例", "## 例子", "## 範例"]
+    headings: ["## Examples", "## Примеры", "## 示例", "## 例子", "## 範例", "## 使用示例", "## 使用範例"]
     markers: ["Example:", "Пример:", "示例：", "例子：", "範例："]
   script_docs:
     points: 10

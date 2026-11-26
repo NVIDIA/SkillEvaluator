@@ -121,6 +121,52 @@ def test_harness_check_prints_plugin_panel(tmp_path: Path):
     assert "Plugin compatibility" in result.output and "opencode" in result.output
 
 
+@pytest.mark.parametrize("harnesses", ["openclaw", "openclaw,copilot-cli"])
+def test_harness_check_reports_a_native_only_openclaw_plugin(tmp_path: Path, harnesses: str):
+    root = _plugin(
+        tmp_path / "demo",
+        "openclaw.plugin.json",
+        {"id": "demo", "configSchema": {"type": "object", "properties": {}}},
+        components=(),
+    )
+    _manifest(
+        root,
+        "package.json",
+        json.dumps({"name": "demo", "version": "1.0.0", "openclaw": {"extensions": ["./index.js"]}}),
+    )
+    _manifest(root, "index.js", "module.exports = function register() {};")
+    report = tmp_path / "report.json"
+    result = CliRunner().invoke(cli, ["harness-check", str(root), "--harness", harnesses, "--json", str(report)])
+
+    assert result.exit_code == 0, result.output
+    assert "Plugin compatibility" in result.output
+    assert "Tier 1 schema also fails" not in result.output
+    block = json.loads(report.read_text(encoding="utf-8"))["harness_compatibility"]
+    assert set(block) == {f"{root} (plugin)"}
+    rows = {row["harness"]: row for row in block[f"{root} (plugin)"]}
+    assert set(rows) == set(harnesses.split(","))
+    assert rows["openclaw"]["status"] == "degraded"
+    assert [finding["id"] for finding in rows["openclaw"]["findings"]] == ["OW-PLUGIN-NATIVE-UNCHECKED"]
+
+
+def test_harness_check_reports_schema_warnings_for_real_skills(tmp_path: Path):
+    root = _plugin(tmp_path / "demo", ".claude-plugin/plugin.json")
+    (root / "skills/demo/SKILL.md").write_text("# Missing frontmatter\n", encoding="utf-8")
+    result = CliRunner().invoke(cli, ["harness-check", str(root), "--harness", "openclaw"])
+
+    assert result.exit_code == 0, result.output
+    assert "Tier 1 schema also fails for demo:" in result.output
+    assert "Tier 1 schema also fails for demo (plugin)" not in result.output
+
+
+def test_default_only_skill_folder_still_has_no_plugin_panel(tmp_path: Path):
+    root = _plugin(tmp_path / "workspace", None)
+    result = CliRunner().invoke(cli, ["harness-check", str(root), "--harness", "openclaw"])
+    assert result.exit_code == 0, result.output
+    assert "Harness compatibility" in result.output
+    assert "Plugin compatibility" not in result.output
+
+
 def test_codex_agent_plugins_cap_and_hooks(tmp_path: Path):
     def bundle(name: str, manifest: str, data: dict) -> Path:
         root = _plugin(tmp_path / name, manifest, data)

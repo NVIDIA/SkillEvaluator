@@ -188,7 +188,7 @@ def _openclaw_manifest(path: Path, *, strict_json: bool = False) -> Any:
 
 
 def is_plugin_root(path: Path) -> bool:
-    return any(_is_file(path / rel) for rel in MANIFESTS.values())
+    return _is_file(path / OPENCLAW_NATIVE_MANIFEST) or any(_is_file(path / rel) for rel in MANIFESTS.values())
 
 
 def plugin_facts(root: Path) -> dict[str, Any]:

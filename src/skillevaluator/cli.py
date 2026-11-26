@@ -3447,7 +3447,11 @@ def harness_check(
         raise click.ClickException(f"No skills found in {target_path}")
     from skillevaluator.validators.schema import SchemaValidator
 
+    plugin_root = target_path.parent if target_path.is_file() else target_path
+    plugin_key = f"{plugin_root} (plugin)"
     for skill in block:
+        if skill == plugin_key:
+            continue
         schema = SchemaValidator().validate(Path(skill))
         if not schema.passed and schema.errors:
             click.echo(

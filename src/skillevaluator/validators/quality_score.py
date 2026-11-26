@@ -430,7 +430,9 @@ class QualityScoreValidator(ValidatorBase):
         try:
             content = manifest.read_text(encoding="utf-8-sig")
         except (OSError, UnicodeError) as exc:
-            result.fail_gate(f"Cannot compute quality score for {manifest}: could not read the UTF-8 manifest ({exc})")
+            result.fail_gate(
+                f"Cannot compute quality score for {manifest}: could not read the manifest as UTF-8 text ({exc})"
+            )
             return result
         lines = content.split("\n")
 

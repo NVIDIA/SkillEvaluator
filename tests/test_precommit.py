@@ -343,7 +343,7 @@ def test_precommit_reports_unreadable_manifest_and_checks_the_rest(tmp_path: Pat
     assert len(lines) == 2
     assert lines[0].startswith(
         f"FAIL  latin1-skill  quality  Cannot compute quality score for {broken / 'SKILL.md'}: "
-        "could not read the UTF-8 manifest ("
+        "could not read the manifest as UTF-8 text ("
     )
     assert "'utf-8' codec can't decode byte 0xe9" in lines[0]
     assert "/100" not in lines[0]

@@ -36,6 +36,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Parallel catalog validation records worker exceptions, abrupt worker exits,
+  and rejected jobs as failed members in the catalog summary. Completed
+  members keep their reports, and the command still fails the validation gate.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

@@ -270,6 +270,91 @@ def test_deep_expression_keeps_actual_control_flow_depth():
     assert _calculate_nesting_depth(ast.parse(source)) == 7
 
 
+@pytest.mark.parametrize("directory", ["scripts", "tools"])
+@pytest.mark.parametrize(
+    "expression",
+    [" + ".join(["value"] * 10_000), "value" + ".next" * 10_000],
+    ids=["binary-expression", "attribute-chain"],
+)
+def test_parser_limit_keeps_findings_for_healthy_scripts(tmp_path, directory, expression):
+    (tmp_path / "SKILL.md").write_text("# Example\n", encoding="utf-8")
+    scripts = tmp_path / directory
+    scripts.mkdir()
+    source = "def calculate(value):\n    return " + expression + "\n"
+    for name, content in [("a.py", "print(42)\n"), ("b.py", source), ("c.py", "print(42)\n")]:
+        (scripts / name).write_text(content, encoding="utf-8")
+    try:
+        ast.parse(source)
+    except RecursionError:
+        parser_limited = True
+    else:
+        parser_limited = False
+
+    result = ScriptLintValidator().validate(tmp_path)
+
+    for name in ["a.py", "c.py"]:
+        assert {f.check_name for f in result.findings if Path(f.file_path).name == name} == {
+            "flat_script",
+            "magic_numbers",
+            "missing_shebang",
+            "no_input_validation",
+        }
+    limited = [f for f in result.findings if f.check_name == "parser_limit"]
+    assert len(limited) == int(parser_limited)
+    if parser_limited:
+        assert limited[0].file_path == str(scripts / "b.py")
+        assert limited[0].severity == Severity.MEDIUM
+        assert limited[0].message == "Cannot lint file: Python parser recursion limit exceeded"
+    else:
+        assert any(f.check_name == "missing_shebang" and Path(f.file_path).name == "b.py" for f in result.findings)
+    assert result.passed
+    assert not result.success_details
+
+
+@pytest.mark.parametrize("folder", [False, True], ids=["skill", "folder"])
+def test_parser_recursion_is_isolated_to_one_file(skill_with_scripts, monkeypatch, folder):
+    scripts = skill_with_scripts / "scripts"
+    for name in ["a.py", "b.py", "c.py"]:
+        (scripts / name).write_text("print(42)\n", encoding="utf-8")
+    original_parse = ast.parse
+    attempted = []
+
+    def parse_script(source, filename="<unknown>", *args, **kwargs):
+        if filename in {"a.py", "b.py", "c.py"}:
+            attempted.append(filename)
+        if filename == "b.py":
+            raise RecursionError("parser recursion ceiling")
+        return original_parse(source, filename, *args, **kwargs)
+
+    monkeypatch.setattr(ast, "parse", parse_script)
+
+    result = ScriptLintValidator().validate(skill_with_scripts.parent if folder else skill_with_scripts)
+
+    assert attempted == ["a.py", "b.py", "c.py"]
+    limited = [f for f in result.findings if f.check_name == "parser_limit"]
+    assert len(limited) == 1
+    assert limited[0].severity == Severity.MEDIUM
+    assert limited[0].message == "Cannot lint file: Python parser recursion limit exceeded"
+    assert limited[0].file_path == ("[scripted-skill] " if folder else "") + str(scripts / "b.py")
+    assert {Path(f.file_path).name for f in result.findings if f.check_name == "flat_script"} == {"a.py", "c.py"}
+    assert result.passed
+    assert not result.success_details
+
+
+def test_unexpected_parser_failure_is_not_hidden(skill_with_scripts, monkeypatch):
+    (skill_with_scripts / "scripts" / "example.py").write_text("print(42)\n", encoding="utf-8")
+    original_parse = ast.parse
+
+    def broken_parser(source, filename="<unknown>", *args, **kwargs):
+        if filename == "example.py":
+            raise RuntimeError("unexpected parser failure")
+        return original_parse(source, filename, *args, **kwargs)
+
+    monkeypatch.setattr(ast, "parse", broken_parser)
+    with pytest.raises(RuntimeError, match="unexpected parser failure"):
+        ScriptLintValidator().validate(skill_with_scripts)
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [

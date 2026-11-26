@@ -190,6 +190,18 @@ class ScriptLintValidator(ValidatorBase):
             tree = ast.parse(content.removeprefix("\ufeff"), filename=script.name)
         except SyntaxError:
             return
+        except RecursionError:
+            result.add_finding(
+                Finding(
+                    category="SCRIPT_LINT",
+                    severity=Severity.MEDIUM,
+                    check_name="parser_limit",
+                    message="Cannot lint file: Python parser recursion limit exceeded",
+                    file_path=str(script),
+                    suggestion="Split complex expressions into smaller intermediate values",
+                )
+            )
+            return
 
         fname = script.name
 

@@ -68,6 +68,7 @@ def test_concurrent_first_calls_construct_one_sdk_client(provider) -> None:
 
 
 def test_failed_initialization_can_be_retried(provider) -> None:
+    # Existing retry behavior must survive the initialization synchronization.
     module, sdk_name, _model = provider
     sdk_class = getattr(module, sdk_name)
     client = LLMClient()

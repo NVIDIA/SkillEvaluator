@@ -196,6 +196,70 @@ export OPENAI_API_KEY='sk-...'
 ```
 </Note>
 
+## Provider recipes
+
+Use the `openai-compatible` provider for a gateway that supports OpenAI Chat Completions. Tier 2 also needs an OpenAI-compatible embeddings endpoint, which can be on the same gateway or a separate service. Set the base URL, key, and model IDs for the operations you use. The same-gateway examples clear inherited embedding overrides, chat headers, and OpenAI organization and project settings before configuring the new endpoint.
+
+<Tabs>
+  <Tab title="AI/ML API" language="aimlapi">
+    ```bash title="AI/ML API through openai-compatible"
+    unset SKILL_EVAL_EMBEDDING_PROVIDER SKILL_EVAL_EMBEDDING_BASE_URL \
+      SKILL_EVAL_EMBEDDING_API_KEY SKILL_EVAL_LLM_EXTRA_HEADERS \
+      OPENAI_ORG_ID OPENAI_PROJECT_ID
+    export SKILL_EVAL_LLM_PROVIDER=openai-compatible
+    export SKILL_EVAL_LLM_BASE_URL=https://api.aimlapi.com/v1
+    export SKILL_EVAL_LLM_API_KEY='your-aimlapi-key'
+    export SKILL_EVAL_LLM_MODEL=openai/gpt-6.1-sol
+    export SKILL_EVAL_EMBEDDING_MODEL=text-embedding-3-small
+    ```
+
+    Use the exact IDs from the [AI/ML API chat model card](https://aimlapi.com/models/openai-gpt-6-1-sol) and the [embeddings API reference](https://docs.aimlapi.com/api-references/embedding-models/openai/text-embedding-3-small). `skillevaluator models` lists a filtered view of the gateway catalog. Check the vendor's Chat Completions support before choosing another model.
+  </Tab>
+  <Tab title="Self-hosted or other gateway" language="gateway">
+    ```bash title="Generic OpenAI-compatible gateway"
+    unset SKILL_EVAL_EMBEDDING_PROVIDER SKILL_EVAL_EMBEDDING_BASE_URL \
+      SKILL_EVAL_EMBEDDING_API_KEY SKILL_EVAL_LLM_EXTRA_HEADERS \
+      OPENAI_ORG_ID OPENAI_PROJECT_ID
+    export SKILL_EVAL_LLM_PROVIDER=openai-compatible
+    export SKILL_EVAL_LLM_BASE_URL='https://gateway.example.com/v1'
+    export SKILL_EVAL_LLM_API_KEY='your-gateway-key'
+    export SKILL_EVAL_LLM_MODEL='exact-catalog-id'
+    export SKILL_EVAL_EMBEDDING_MODEL='exact-embedding-id'
+    ```
+
+    For routing headers on host-side chat requests, set `SKILL_EVAL_LLM_EXTRA_HEADERS` for the current gateway after running the recipe. Embeddings and Tier 3 runtimes use their own provider configuration. See [Environment variables](/skills/skillevaluator/environment-variables).
+
+    If embeddings use a separate OpenAI-compatible service, set its provider, URL, model ID, and credential together.
+
+    ```bash title="Separate OpenAI-compatible embedding service"
+    export SKILL_EVAL_EMBEDDING_PROVIDER=openai-compatible
+    export SKILL_EVAL_EMBEDDING_BASE_URL='https://embeddings.example.com/v1'
+    export SKILL_EVAL_EMBEDDING_MODEL='exact-embedding-id'
+    export SKILL_EVAL_EMBEDDING_API_KEY='your-embedding-service-key'
+    ```
+
+    Supply the embedding service's own key because the compatible embedding provider defaults to the chat key when its key is unset.
+  </Tab>
+</Tabs>
+
+The Tier 2 probe requires the OpenAI SDK, which is included in `skillevaluator[tier2]` and `skillevaluator[all]`. See [Installation options](/skills/skillevaluator/installation-options). Run `skillevaluator doctor --tier 2 --verify-models` to test the configured chat and embedding models.
+
+For Tier 3, verify that the gateway serves the API and tool-call behavior your agent needs. See the OpenAI-compatible tab above for the APIs each agent uses.
+
+To use Claude Code through the gateway or an Anthropic Messages endpoint, run `unset CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK` to clear inherited cloud routing. Then choose the Claude route.
+
+<Tabs>
+  <Tab title="Shared gateway" language="shared-claude-gateway">
+    Run `unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY` so Claude Code uses the gateway URL and key. If the gateway does not serve the default Claude model, pass `--agent-model claude-code=MODEL` with a model ID that supports Anthropic Messages on that gateway.
+  </Tab>
+  <Tab title="Native Anthropic" language="native-claude-anthropic">
+    Export your Anthropic key as `ANTHROPIC_API_KEY` and run `unset ANTHROPIC_BASE_URL`. Claude Code then uses Anthropic's endpoint and the native model default.
+  </Tab>
+  <Tab title="Separate custom endpoint" language="custom-claude-endpoint">
+    Set `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` with that endpoint's own URL and key. Pass `--agent-model claude-code=MODEL` with a model ID served by that endpoint.
+  </Tab>
+</Tabs>
+
 ## Fully local setup
 
 The `openai-compatible` provider accepts any local OpenAI-compatible server (Ollama, vLLM, llama.cpp, NVIDIA NIM), so Tier 2 can run with no external calls at all. Example recipe using Ollama in Docker:

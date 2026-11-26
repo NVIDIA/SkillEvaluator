@@ -50,6 +50,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- Configuration docs show how to use AI/ML API and other OpenAI-compatible
+  gateways through the `openai-compatible` provider.
 - Added a guide to MCP servers and Docker Compose sidecars that explains where `localhost`,
   service names and commands resolve in Docker and local runs, and a cookbook for evaluating
   a CLI skill that needs a short-lived login using the configured provider's default agent.

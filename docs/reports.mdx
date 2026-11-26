@@ -342,9 +342,12 @@ Report filenames follow two patterns, both under the output directory:
 
 The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`, `.junit.xml`); the `cli` and `github` formats
 print to the terminal and never write a file. `github` has no file extension and no catalog-collision check, because it does not create a report path. A full `validate` run's
-timestamp is `YYYYMMDDHHMMSS`, so
-`-r json` produces something like `skillevaluator-output-20260709141530.json`
-and never clobbers the previous run.
+basename includes a UTC timestamp (`YYYYMMDDHHMMSSffffff`) and a random run identifier, so
+`-r json` produces something like
+`skillevaluator-output-20260709141530123456-5e4a1670b53b4ea7b30ae2d74dad7c70.json`.
+The identifier keeps simultaneous runs distinct even when their clock readings match.
+All formats from one run share the same basename. Existing
+`skillevaluator-output-*.json` glob patterns still find these reports.
 
 ## JUnit report
 

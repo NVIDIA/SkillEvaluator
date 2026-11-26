@@ -9,6 +9,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
+from uuid import uuid4
 
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_FILE, SKILL_MANIFEST_VARIANTS
 from skillevaluator.utils.path_security import matches_filesystem_name
@@ -16,15 +17,16 @@ from skillevaluator.utils.tier2_paths import is_link_or_reparse
 
 
 def make_timestamped_basename(prefix: str, suffix: str = "") -> str:
-    """Return ``<prefix>-YYYYMMDDHHMMSS<suffix>`` for report artifacts.
+    """Return a sortable UTC timestamp and random run identifier for report artifacts.
 
     Used so each combined ``validate`` run writes a distinct, sortable report
     file rather than overwriting the previous one (SkillEvaluator parity). ``suffix``
     is the optional file extension (e.g. ``".html"``); omit it to get the bare
     timestamped basename.
     """
-    stamp = datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S")
-    return f"{prefix}-{stamp}{suffix}"
+    stamp = datetime.now(tz=UTC).strftime("%Y%m%d%H%M%S%f")
+    # A finer clock alone still collides across processes or repeated clock readings.
+    return f"{prefix}-{stamp}-{uuid4().hex}{suffix}"
 
 
 def _linked_directory_contains_skill(directory: Path) -> bool:

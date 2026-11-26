@@ -1332,6 +1332,40 @@ def _is_native_openai_chat_url(provider, request_url):
     )
 
 
+# Azure OpenAI's reasoning deployments enforce the same max_completion_tokens requirement as native OpenAI.
+_AZURE_OPENAI_HOST_SUFFIXES = (".openai.azure.com", ".cognitiveservices.azure.com")
+
+
+def _is_azure_openai_chat_url(provider, request_url):
+    if str(provider or "").strip().casefold() != "openai-compatible":
+        return False
+
+    raw_url = str(request_url or "")
+    if raw_url != raw_url.strip() or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw_url):
+        return False
+    try:
+        parsed = urlparse(raw_url)
+        port = parsed.port
+    except ValueError:
+        return False
+
+    return (
+        parsed.scheme.casefold() == "https"
+        and parsed.hostname is not None
+        and parsed.hostname.casefold().endswith(_AZURE_OPENAI_HOST_SUFFIXES)
+        and port in {None, 443}
+        and parsed.path in {"/openai/v1/chat/completions", "/openai/v1/chat/completions/"}
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and ";" not in raw_url
+        and "?" not in raw_url
+        and "#" not in raw_url
+    )
+
+
 def _is_vertex_openapi_url(request_url):
     """Return whether a request URL targets a Vertex AI OpenAPI endpoint."""
     if not isinstance(request_url, str) or not request_url.strip():
@@ -1445,7 +1479,11 @@ def _chat_completion_payload(
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
     token_key = (
         "max_completion_tokens"
-        if _is_openai_reasoning_model(model) and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
+        if _is_openai_reasoning_model(model)
+        and (
+            _is_native_openai_chat_url(resolved_provider, resolved_request_url)
+            or _is_azure_openai_chat_url(resolved_provider, resolved_request_url)
+        )
         else "max_tokens"
     )
     payload = {

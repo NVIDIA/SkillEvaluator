@@ -25,7 +25,11 @@ from skillevaluator.inference import (
     LLMVerdict,
 )
 from skillevaluator.inference import client as client_mod
-from skillevaluator.inference.client import _is_native_openai_endpoint, _token_limit_kwargs
+from skillevaluator.inference.client import (
+    _is_azure_openai_endpoint,
+    _is_native_openai_endpoint,
+    _token_limit_kwargs,
+)
 from skillevaluator.inference.json_span import MAX_JSON_NESTING
 from skillevaluator.provider_config import (
     ANTHROPIC_REFUSAL_FALLBACK_MODEL,
@@ -362,6 +366,67 @@ class TestNativeOpenAIEndpoint:
 
         assert _is_native_openai_endpoint(config) is False
         assert _token_limit_kwargs(config, 512) == {"max_tokens": REASONING_MAX_COMPLETION_TOKENS}
+
+
+class TestAzureOpenAIEndpoint:
+    """Azure OpenAI deployments of GPT-5/6-class reasoning models reject ``max_tokens``
+    the same way native OpenAI does -- https://github.com/NVIDIA/SkillEvaluator/issues/NNNN."""
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://my-resource.openai.azure.com/openai/v1",
+            "https://my-resource.openai.azure.com/openai/v1/",
+            "https://my-resource.cognitiveservices.azure.com/openai/v1",
+            "https://my-resource.cognitiveservices.azure.com/openai/v1/",
+            "HTTPS://MY-RESOURCE.OPENAI.AZURE.COM/openai/v1",
+        ],
+    )
+    def test_accepts_openai_compatible_azure_url_forms(self, base_url: str) -> None:
+        config = _gpt5_config(provider="openai-compatible", base_url=base_url)
+
+        assert _is_azure_openai_endpoint(config) is True
+        assert _token_limit_kwargs(config, 512) == {"max_completion_tokens": REASONING_MAX_COMPLETION_TOKENS}
+
+    @pytest.mark.parametrize("provider", ["openai", "nv_build", "anthropic", "bedrock", " openai-compatible"])
+    def test_requires_openai_compatible_provider_intent(self, provider: str) -> None:
+        config = _gpt5_config(
+            provider=provider,
+            base_url="https://my-resource.openai.azure.com/openai/v1",
+        )
+
+        assert _is_azure_openai_endpoint(config) is False
+        assert _token_limit_kwargs(config, 512) == {"max_tokens": REASONING_MAX_COMPLETION_TOKENS}
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            pytest.param("https://my-resource.openai.azure.com/openai/v1?route=proxy", id="query"),
+            pytest.param("https://my-resource.openai.azure.com/openai/v1#fragment", id="fragment"),
+            pytest.param("https://my-resource.openai.azure.com/openai/v1;transport=proxy", id="params"),
+            pytest.param("https://my-resource.openai.azure.com/openai/v1/chat/completions", id="other-path"),
+            pytest.param("https://my-resource.openai.azure.com.evil.test/openai/v1", id="suffix-host"),
+            pytest.param("https://user:pass@my-resource.openai.azure.com/openai/v1", id="userinfo"),
+            pytest.param("http://my-resource.openai.azure.com/openai/v1", id="http"),
+            pytest.param("https://my-resource.openai.azure.com:444/openai/v1", id="other-port"),
+            pytest.param("https://evil.test/openai/v1", id="non-azure-host"),
+            pytest.param("https://api.openai.com/v1", id="native-openai-not-azure"),
+        ],
+    )
+    def test_noncanonical_raw_url_is_not_classified_as_azure_openai(self, base_url: str) -> None:
+        config = _gpt5_config(provider="openai-compatible", base_url=base_url)
+
+        assert _is_azure_openai_endpoint(config) is False
+        assert _token_limit_kwargs(config, 512) == {"max_tokens": REASONING_MAX_COMPLETION_TOKENS}
+
+    def test_non_reasoning_model_on_azure_stays_on_max_tokens(self) -> None:
+        config = _gpt5_config(
+            provider="openai-compatible",
+            base_url="https://my-resource.openai.azure.com/openai/v1",
+            model="gpt-4o-mini",
+        )
+
+        assert _token_limit_kwargs(config, 512) == {"max_tokens": 512}
 
 
 class TestCompletions:

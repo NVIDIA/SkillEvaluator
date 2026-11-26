@@ -231,6 +231,42 @@ def _is_native_openai_endpoint(config: ProviderConfig) -> bool:
     return config.provider.casefold() == "openai" and _is_canonical_openai_base_url(config.base_url)
 
 
+# Azure OpenAI's reasoning deployments enforce the same max_completion_tokens requirement as native OpenAI.
+_AZURE_OPENAI_HOST_SUFFIXES = (".openai.azure.com", ".cognitiveservices.azure.com")
+
+
+def _is_azure_openai_base_url(base_url: str | None) -> bool:
+    if (
+        not isinstance(base_url, str)
+        or base_url != base_url.strip()
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in base_url)
+        or any(delimiter in base_url for delimiter in ("?", "#", ";", "\\"))
+    ):
+        return False
+
+    try:
+        endpoint = urlsplit(base_url)
+        endpoint_port = endpoint.port
+    except (TypeError, ValueError):
+        return False
+
+    return (
+        endpoint.scheme.casefold() == "https"
+        and endpoint.hostname is not None
+        and endpoint.hostname.casefold().endswith(_AZURE_OPENAI_HOST_SUFFIXES)
+        and endpoint_port in {None, 443}
+        and endpoint.path.rstrip("/") == "/openai/v1"
+        and endpoint.username is None
+        and endpoint.password is None
+        and not endpoint.query
+        and not endpoint.fragment
+    )
+
+
+def _is_azure_openai_endpoint(config: ProviderConfig) -> bool:
+    return config.provider.casefold() == "openai-compatible" and _is_azure_openai_base_url(config.base_url)
+
+
 def _sdk_targets_native_openai(client: Any) -> bool:
     try:
         request_url = str(client.base_url.join("chat/completions"))
@@ -250,7 +286,9 @@ def _token_limit_kwargs(config: ProviderConfig, max_tokens: int | None) -> dict[
     if max_tokens is None:
         return {}
     max_tokens = completion_token_limit(config.model, max_tokens)
-    if _is_native_openai_endpoint(config) and is_openai_reasoning_model(config.model):
+    if is_openai_reasoning_model(config.model) and (
+        _is_native_openai_endpoint(config) or _is_azure_openai_endpoint(config)
+    ):
         return {"max_completion_tokens": max_tokens}
     return {"max_tokens": max_tokens}
 

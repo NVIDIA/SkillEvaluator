@@ -47,7 +47,9 @@ def test_streaming_preserves_existing_binary_and_metadata_identity(tmp_path: Pat
         task = tmp_path / f"case-001-{arm}-skill"
         (task / "repo").mkdir(parents=True)
         (task / "environment").mkdir()
-        (task / "task.toml").write_text(f'[task]\nname = "case-001-{arm}-skill" # retained comment\n', encoding="utf-8")
+        (task / "task.toml").write_text(
+            f'[task]\nname = "case-001-{arm}-skill" # retained comment\n', encoding="utf-8", newline="\n"
+        )
         (task / "environment" / "repo-context.json").write_text(f'{{"staged_path":"{arm}"}}', encoding="utf-8")
         (task / "repo" / "repo-context.json").write_text('{"fixture":"authored"}', encoding="utf-8")
         (task / "repo" / "assets.dat").write_bytes((bytes(range(256)) * 257)[:size])

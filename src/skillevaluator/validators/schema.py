@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from markdown_it import MarkdownIt
 from pydantic import ValidationError
 
 from skillevaluator.constants import (
@@ -227,6 +228,26 @@ def _duplicate_frontmatter_keys(frontmatter_yaml: str) -> list[tuple[str, int]]:
         elif isinstance(node, yaml.SequenceNode):
             stack.extend((item, prefix) for item in node.value)
     return sorted(duplicates, key=lambda item: item[1])
+
+
+_BODY_PARSER = MarkdownIt("commonmark")
+
+
+def _has_atx_title(body: str) -> bool:
+    """Return whether the body has a non-empty ``# Title`` heading.
+
+    Parsing the Markdown keeps a ``# comment`` line inside a fenced code
+    block or an HTML comment from counting as the skill's title.
+    """
+    tokens = _BODY_PARSER.parse(body)
+    return any(
+        token.type == "heading_open"
+        and token.tag == "h1"
+        and token.markup == "#"
+        and index + 1 < len(tokens)
+        and tokens[index + 1].content.strip()
+        for index, token in enumerate(tokens)
+    )
 
 
 class SchemaValidator(ValidatorBase):
@@ -926,7 +947,7 @@ class SchemaValidator(ValidatorBase):
         match = FRONTMATTER_PATTERN.match(content)
         body = match.group(2) if match else content
 
-        if not re.search(r"^# .+", body, re.MULTILINE):
+        if not _has_atx_title(body):
             result.add_finding(
                 Finding(
                     category="SCHEMA",

@@ -671,6 +671,47 @@ Example.
         assert not result.passed
         assert any("heading" in err.lower() for err in result.errors)
 
+    @pytest.mark.parametrize(
+        "hidden_title",
+        [
+            "```bash\n# install dependencies\npip install foo\n```",
+            "~~~python\n# configure the client\nclient = Client()\n~~~",
+            "    # indented code comment\n    run --fast",
+            "<!--\n# Draft Title\n-->",
+        ],
+        ids=["backtick-fence", "tilde-fence", "indented-code", "html-comment"],
+    )
+    def test_hash_line_outside_markdown_heading_is_not_a_title(self, tmp_path: Path, hidden_title: str):
+        """A '# ...' line inside code or an HTML comment is not the body's top-level heading."""
+        skill_dir = tmp_path / "code-comment"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: code-comment\ndescription: A skill whose only hash line is not a heading\n---\n\n"
+            f"This body has no heading at all.\n\n{hidden_title}\n\n"
+            "## Instructions\n\n1. Do things\n\n## Examples\n\nExample.\n"
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        headings = [f for f in result.findings if f.check_name == "body_heading"]
+        assert len(headings) == 1
+        assert headings[0].severity == Severity.HIGH
+        assert not result.passed
+
+    def test_title_after_code_with_hash_comments_is_accepted(self, tmp_path: Path):
+        """A real '# Title' is still found when code blocks also contain '#' comments."""
+        skill_dir = tmp_path / "titled"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: titled\ndescription: A skill with a title and commented code\n---\n\n"
+            "```bash\n# install dependencies\n```\n\n# Titled Skill\n\n"
+            "## Instructions\n\n1. Do things\n\n## Examples\n\nExample.\n"
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert not [f for f in result.findings if f.check_name == "body_heading"]
+
     def test_missing_examples_section_is_medium(self, tmp_path: Path):
         """Missing ## Examples produces a MEDIUM finding (recommended, not required)."""
         from skillevaluator.models.result import Severity

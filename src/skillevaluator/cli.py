@@ -2155,14 +2155,14 @@ def _validate_catalog_parallel(
             try:
                 futures[executor.submit(_run_catalog_skill_worker, job)] = job["skill_name"]
             except Exception as exc:
-                failures.append((job["skill_name"], f"Catalog worker could not start ({type(exc).__name__})"))
+                failures.append((job["skill_name"], f"worker could not start ({type(exc).__name__}: {exc})"))
                 execution_failures.add(job["skill_name"])
         for future in as_completed(futures):
             try:
                 skill_name, reason, execution_failed, json_report_name, annotations = future.result()
             except Exception as exc:
                 skill_name = futures[future]
-                failures.append((skill_name, f"Catalog worker returned no validation result ({type(exc).__name__})"))
+                failures.append((skill_name, f"worker returned no result ({type(exc).__name__}: {exc})"))
                 execution_failures.add(skill_name)
                 continue
             worker_reports[skill_name] = json_report_name

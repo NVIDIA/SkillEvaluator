@@ -98,6 +98,10 @@ def test_parallel_catalog_records_worker_failures(
         assert entry["passed"] is (name not in failed)
         if name in failed:
             assert error_type in entry["reason"]
+            if error_type == "FileNotFoundError":
+                assert "missing-workdir" in entry["reason"]
+            else:
+                assert "process" in entry["reason"].lower()
             assert "json_report" not in entry
         else:
             report = reports / entry["report_dir"] / entry["json_report"]

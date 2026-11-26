@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -217,8 +218,12 @@ class FindingVerifier(LLMClient):
             if resolved is None:
                 continue
             try:
-                lines = resolved.read_text(encoding="utf-8", errors="ignore").split("\n")[:100]
-                return "\n".join(lines)
+                with resolved.open(encoding="utf-8", errors="ignore") as stream:
+                    lines = list(islice(stream, 100))
+                context = "".join(lines)
+                # split("\n")[:100] kept a short file's final newline, but
+                # excluded the separator after the hundredth preview line.
+                return context.removesuffix("\n") if len(lines) == 100 else context
             except (OSError, ValueError):
                 continue
         return None

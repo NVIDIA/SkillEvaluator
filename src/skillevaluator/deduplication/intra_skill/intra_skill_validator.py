@@ -35,7 +35,7 @@ from skillevaluator.deduplication.intra_skill.llm_analyzer import (
     verdict_to_severity,
 )
 from skillevaluator.deduplication.intra_skill.semantic_clustering import ContentCluster, build_clusters
-from skillevaluator.deduplication.utils.chunker import ContentChunk, chunk_file
+from skillevaluator.deduplication.utils.chunker import ChunkCountLimitError, ContentChunk, chunk_file
 from skillevaluator.deduplication.utils.skill_collector import CollectedFile, SkillCollectionError, collect_files
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
 from skillevaluator.inference import LLMClient, LLMClientError, LLMClientRefusedError
@@ -243,9 +243,9 @@ class IntraSkillValidator(ValidatorBase):
         logger.info("Chunking %d file(s)...", len(collected))
         all_chunks: list[ContentChunk] = []
         for f in collected:
-            file_chunks = chunk_file(f)
-            prospective_count = len(all_chunks) + len(file_chunks)
-            if prospective_count > CONTENT_DEDUP_MAX_CHUNKS:
+            try:
+                file_chunks = chunk_file(f, max_chunks=CONTENT_DEDUP_MAX_CHUNKS - len(all_chunks))
+            except ChunkCountLimitError as exc:
                 _mark_work_limit_incomplete(
                     result,
                     "chunk_count_limit",
@@ -253,7 +253,7 @@ class IntraSkillValidator(ValidatorBase):
                     f"(the limit was reached in {f.rel_path}).",
                     "Reduce or split the skill content before running Tier 2.",
                     file_path=f.rel_path,
-                    actual=prospective_count,
+                    actual=len(all_chunks) + exc.actual,
                     limit=CONTENT_DEDUP_MAX_CHUNKS,
                 )
                 return result

@@ -9,7 +9,7 @@ import copy
 from pathlib import Path
 
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
-from skillevaluator.deduplication.utils.chunker import chunk_file
+from skillevaluator.deduplication.utils.chunker import ChunkCountLimitError, chunk_file
 from skillevaluator.deduplication.utils.skill_collector import SkillCollectionError, collect_files
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError
 from skillevaluator.inference.diagnostics import llm_failure_diagnostic
@@ -158,7 +158,11 @@ def run_plugin_skill_context_dedup(
             return _budget_results([_advisory(result)], budget)
         total_files += len(collected)
         total_text_bytes += sum(len(file.content.encode("utf-8")) for file in collected)
-        total_chunks += sum(len(chunk_file(file)) for file in collected)
+        try:
+            for file in collected:
+                total_chunks += len(chunk_file(file, max_chunks=budget.chunk_limit - total_chunks))
+        except ChunkCountLimitError as exc:
+            total_chunks += exc.actual
         budget.chunks_collected = total_chunks
         if (
             total_chunks > budget.chunk_limit

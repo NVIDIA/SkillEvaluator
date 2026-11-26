@@ -104,6 +104,11 @@ class TestContentChunk:
 
 
 class TestChunkFile:
+    @pytest.mark.parametrize("max_chunks", [True, -1])
+    def test_rejects_invalid_chunk_limit(self, max_chunks) -> None:
+        with pytest.raises(ValueError, match="max_chunks must be a non-negative integer or None"):
+            chunk_file(_cf("content"), max_chunks=max_chunks)
+
     def test_routes_md(self, make_collected_file) -> None:
         cf = make_collected_file(extension=".md", content="## Heading\n" + "a" * 100)
         chunks = chunk_file(cf)

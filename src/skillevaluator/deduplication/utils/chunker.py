@@ -27,6 +27,8 @@ from skillevaluator.constants import CONTENT_DEDUP_MAX_CHUNK_CHARS, CONTENT_DEDU
 from skillevaluator.spdx import is_spdx_only_html_comment
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Iterator
+
     from skillevaluator.deduplication.utils.skill_collector import CollectedFile
 
 logger = logging.getLogger(__name__)
@@ -54,21 +56,41 @@ class ContentChunk:
         return len(self.text)
 
 
+class ChunkCountLimitError(ValueError):
+    """Chunking stopped after observing more pieces than the caller can accept."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"Content chunk limit exceeded ({limit})")
+        # The first observed excess piece, not an eagerly computed file total.
+        self.actual = limit + 1
+
+
 def chunk_file(
     collected: CollectedFile,
     min_chars: int = CONTENT_DEDUP_MIN_CHUNK_CHARS,
+    *,
+    max_chunks: int | None = None,
 ) -> list[ContentChunk]:
-    """Route to the appropriate chunker based on file extension."""
+    """Chunk one file, raising on excess pieces instead of returning partial content."""
+    if max_chunks is not None and (type(max_chunks) is not int or max_chunks < 0):
+        raise ValueError("max_chunks must be a non-negative integer or None")
+    chunks: Iterable[ContentChunk]
     ext = collected.extension
     if ext in {".md", ".mdc"}:
         chunks = chunk_markdown(collected, min_chars)
     elif ext == ".py":
         chunks = chunk_python(collected, min_chars)
     elif ext == ".sh":
-        chunks = chunk_shell(collected, min_chars)
+        chunks = _iter_shell_chunks(collected, min_chars)
     else:
         return []
-    return [piece for chunk in chunks for piece in _bounded_pieces(chunk)]
+    pieces: list[ContentChunk] = []
+    for chunk in chunks:
+        for piece in _bounded_pieces(chunk):
+            if max_chunks is not None and len(pieces) >= max_chunks:
+                raise ChunkCountLimitError(max_chunks)
+            pieces.append(piece)
+    return pieces
 
 
 def _bounded_pieces(chunk: ContentChunk) -> list[ContentChunk]:
@@ -351,8 +373,12 @@ def chunk_shell(
     min_chars: int,
 ) -> list[ContentChunk]:
     """Extract function bodies and comment blocks from shell scripts."""
+    return list(_iter_shell_chunks(collected, min_chars))
+
+
+def _iter_shell_chunks(collected: CollectedFile, min_chars: int) -> Iterator[ContentChunk]:
+    """Yield bodies on demand so nested functions cannot bypass the piece budget."""
     lines = collected.content.splitlines()
-    chunks: list[ContentChunk] = []
 
     comment_start = None
     comment_lines: list[str] = []
@@ -367,15 +393,13 @@ def chunk_shell(
             if comment_start is not None and len(comment_lines) >= 3:
                 text = "\n".join(comment_lines)
                 if len(text) >= min_chars:
-                    chunks.append(
-                        ContentChunk(
-                            source_file=collected.rel_path,
-                            heading="(comment)",
-                            start_line=comment_start + 1,
-                            end_line=i,
-                            text=text,
-                            source_format="shell",
-                        )
+                    yield ContentChunk(
+                        source_file=collected.rel_path,
+                        heading="(comment)",
+                        start_line=comment_start + 1,
+                        end_line=i,
+                        text=text,
+                        source_format="shell",
                     )
             comment_start = None
             comment_lines = []
@@ -401,15 +425,11 @@ def chunk_shell(
             start_line = bisect.bisect_left(newline_positions, match.start()) + 1
             end_line = bisect.bisect_left(newline_positions, pos) + 1
             if len(func_text) >= min_chars:
-                chunks.append(
-                    ContentChunk(
-                        source_file=collected.rel_path,
-                        heading=f"{func_name}()",
-                        start_line=start_line,
-                        end_line=end_line,
-                        text=func_text,
-                        source_format="shell",
-                    )
+                yield ContentChunk(
+                    source_file=collected.rel_path,
+                    heading=f"{func_name}()",
+                    start_line=start_line,
+                    end_line=end_line,
+                    text=func_text,
+                    source_format="shell",
                 )
-
-    return chunks

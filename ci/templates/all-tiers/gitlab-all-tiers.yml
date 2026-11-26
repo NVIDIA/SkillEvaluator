@@ -16,6 +16,8 @@ variables:
   SKILL_EVAL_IMAGE: ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST
   SKILL_EVAL_TOOLS_REPOSITORY: NVIDIA/SkillEvaluator
   SKILL_EVAL_TOOLS_REF: RELEASE_WORKFLOW_SHA
+  # Optional on a Docker executor. Pin the Tier 2 image built from SKILL_EVAL_TOOLS_REF.
+  # SKILL_EVAL_TIER2_IMAGE: ghcr.io/nvidia/skillevaluator-tier2@sha256:YOUR_TIER2_IMAGE_DIGEST
   SKILL_EVAL_PATHS: skills
   SKILL_EVAL_SECURITY_BASELINES: 'false'
   SKILL_EVAL_TIERS: '1,2,3'

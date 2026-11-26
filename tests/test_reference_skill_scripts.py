@@ -113,9 +113,37 @@ def test_task_status_words_survive_persistence(
         "content": content,
         "status": status,
     }
-    if status != "cancelled":
-        assert content in listed.stdout
+    assert content in listed.stdout
     assert f"- [{checkbox}] task_1: {content} ({status})" in state_path.read_text(encoding="utf-8")
+
+
+def test_task_list_shows_cancelled_tasks(tmp_path: Path) -> None:
+    env = {"TASK_LIST_STATE_PATH": str(tmp_path / "todo.md")}
+
+    added = _run_script("tasks", "add_multiple", "--content", "Write docs; Ship; Announce", env=env)
+    completed = _run_script("tasks", "complete", "--task_id", "task_2", env=env)
+    cancelled = _run_script("tasks", "cancel", "--task_id", "task_3", env=env)
+    listed = _run_script("tasks", "list", env=env)
+
+    assert added.returncode == completed.returncode == cancelled.returncode == listed.returncode == 0
+    assert listed.stderr == ""
+    assert listed.stdout == (
+        "Task List (1/3 completed)\n"
+        "\nPending:\n  - [task_1] Write docs\n"
+        "\nCompleted:\n  - [task_2] Ship\n"
+        "\nCancelled:\n  - [task_3] Announce\n"
+    )
+
+
+def test_task_list_with_only_cancelled_tasks_shows_them(tmp_path: Path) -> None:
+    env = {"TASK_LIST_STATE_PATH": str(tmp_path / "todo.md")}
+
+    _run_script("tasks", "add", "--content", "Write docs", env=env)
+    _run_script("tasks", "cancel", "--task_id", "task_1", env=env)
+    listed = _run_script("tasks", "list", env=env)
+
+    assert listed.returncode == 0
+    assert listed.stdout == "Task List (0/1 completed)\n\nCancelled:\n  - [task_1] Write docs\n"
 
 
 @pytest.mark.parametrize(
@@ -216,3 +244,35 @@ def test_call_api_omits_body_only_when_data_is_absent(monkeypatch: pytest.Monkey
     assert result["success"] is True
     assert len(requests) == 1
     assert requests[0].data is None
+
+
+@pytest.mark.parametrize(
+    ("headers", "content_type"),
+    [
+        (None, "application/json"),
+        ({"Authorization": "Bearer TOKEN"}, "application/json"),
+        ({"Content-Type": "application/merge-patch+json"}, "application/merge-patch+json"),
+        ({"content-type": "application/vnd.api+json"}, "application/vnd.api+json"),
+    ],
+    ids=["default", "other-headers", "custom", "lowercase-name"],
+)
+def test_call_api_keeps_caller_content_type_for_json_bodies(
+    headers: dict[str, str] | None,
+    content_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script("call_api")
+    requests: list[object] = []
+
+    def fake_urlopen(request: object, *, timeout: int):
+        requests.append(request)
+        return _SuccessfulResponse()
+
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+
+    result = module.make_request("https://example.invalid", method="PATCH", data={"name": "test"}, headers=headers)
+
+    assert result["success"] is True
+    assert len(requests) == 1
+    assert requests[0].get_header("Content-type") == content_type
+    assert requests[0].data == b'{"name": "test"}'

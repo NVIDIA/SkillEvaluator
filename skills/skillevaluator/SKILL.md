@@ -87,6 +87,7 @@ Never print, echo, or commit API keys; keep them in the host environment.
 | Everything, with one exit code | `skillevaluator validate <skill-dir>` | all of the above |
 | CI-safe keyless gate | `skillevaluator validate <skills-dir> --profile default --tiers 1 -r json,markdown,sarif -o reports` | scanners |
 | CI test report (JUnit XML) | add `junit` to `-r`, for example `-r json,sarif,junit` | same as the gate |
+| GitHub Actions annotations | add `github` to `-r`, for example `-r cli,github` | same as the gate |
 | Set up repo CI | `skillevaluator ci init` | GitHub checkout |
 
 Full flag tables: [Tier 1](references/commands-tier1.md),
@@ -186,8 +187,9 @@ do. Report no score, lift or verdict for that tier.
    and an `evals` array; each case has `id`, `prompt`, `expected_output`, and
    `expected_skill` (optional `assertions`, `files`). Validate with
    `skillevaluator tier3 validate <skill-dir> --strict`. Format:
-   [references/tier3-datasets.md](references/tier3-datasets.md); run policy and
-   scoring: [references/tier3-running.md](references/tier3-running.md).
+   [references/tier3-datasets.md](references/tier3-datasets.md); generation and
+   refinement: [references/tier3-dataset-generation.md](references/tier3-dataset-generation.md);
+   run policy and scoring: [references/tier3-running.md](references/tier3-running.md).
 7. **Run live evaluation.** `skillevaluator tier3 <skill-dir>` (or
    `skillevaluator tier3 evaluate <skill-dir> -a opencode --env-mode docker --n-attempts 3`).
    Use `--max-cases 1` for a cheap smoke run first; such runs are never

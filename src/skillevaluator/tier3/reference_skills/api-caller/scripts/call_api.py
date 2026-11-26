@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from url_safety import validate_http_url
+from url_safety import join_url_path, resolve_openapi_server_url, validate_http_url
 
 _UNSET = object()
 
@@ -20,7 +20,16 @@ def make_request(
     url: str, method: str = "GET", data: object = _UNSET, headers: dict | None = None, timeout: int = 30
 ) -> dict:
     """Make an HTTP request and return the response."""
+    result, _final_url = _request_with_final_url(url, method, data, headers, timeout)
+    return result
 
+
+def _request_with_final_url(
+    url: str, method: str = "GET", data: object = _UNSET, headers: dict | None = None, timeout: int = 30
+) -> tuple[dict, str | None]:
+    """Make an HTTP request and return the result plus the final URL after redirects (None on failure)."""
+
+    final_url = None
     result = {
         "success": False,
         "status_code": None,
@@ -45,7 +54,8 @@ def make_request(
         body = None
         if data is not _UNSET:
             body = json.dumps(data).encode("utf-8")
-            req_headers["Content-Type"] = "application/json"
+            if not any(name.lower() == "content-type" for name in req_headers):
+                req_headers["Content-Type"] = "application/json"
 
         # Create request
         req = Request(url, data=body, headers=req_headers, method=method)
@@ -54,6 +64,7 @@ def make_request(
         # validate_http_url() rejects non-HTTP schemes before this request.
         with urlopen(req, timeout=timeout) as response:  # nosec B310
             result["status_code"] = response.status
+            final_url = getattr(response, "url", None) or url
             result["headers"] = dict(response.headers)
 
             # Read and parse response
@@ -89,15 +100,18 @@ def make_request(
     except Exception as e:
         result["error"] = f"Error: {e!s}"
 
-    return result
+    return result, final_url
 
 
-def fetch_openapi_spec(spec_url: str) -> dict:
-    """Fetch and parse an OpenAPI spec."""
-    result = make_request(spec_url)
+def fetch_openapi_spec(spec_url: str) -> tuple[dict | None, str]:
+    """Fetch and parse an OpenAPI spec. Returns the spec and its final URL after redirects."""
+    result, final_url = _request_with_final_url(spec_url)
     if result["success"] and isinstance(result["data"], dict):
-        return result["data"]
-    return None
+        return result["data"], final_url or spec_url
+    return None, spec_url
+
+
+_HTTP_METHODS = ("get", "post", "put", "delete", "patch")
 
 
 def find_operation(spec: dict, operation_id: str) -> tuple:
@@ -105,17 +119,39 @@ def find_operation(spec: dict, operation_id: str) -> tuple:
     paths = spec.get("paths", {})
 
     for path, methods in paths.items():
+        if not isinstance(methods, dict):
+            continue
         for method, details in methods.items():
-            if method in ("get", "post", "put", "delete", "patch") and details.get("operationId") == operation_id:
+            if method in _HTTP_METHODS and isinstance(details, dict) and details.get("operationId") == operation_id:
                 return path, method.upper(), details
 
     return None, None, None
 
 
-def build_url_from_spec(spec: dict, path: str, params: dict) -> str:
+def build_url_from_spec(
+    spec: dict,
+    path: str,
+    params: dict,
+    spec_url: str | None = None,
+    *,
+    operation: dict | None = None,
+    path_item: dict | None = None,
+) -> str:
     """Build a URL from OpenAPI spec and parameters."""
-    servers = spec.get("servers", [])
-    base_url = servers[0]["url"] if servers else ""
+    if path_item is None:
+        paths = spec.get("paths")
+        if isinstance(paths, dict) and isinstance(paths.get(path), dict):
+            path_item = paths[path]
+    if operation is None and isinstance(path_item, dict):
+        candidates = [
+            details
+            for method, details in path_item.items()
+            if method in (*_HTTP_METHODS, "head", "options", "trace") and isinstance(details, dict)
+        ]
+        if len(candidates) == 1:
+            operation = candidates[0]
+
+    base_url = resolve_openapi_server_url(spec, spec_url, path_item=path_item, operation=operation)
 
     # Replace path parameters
     url_path = path
@@ -131,12 +167,13 @@ def build_url_from_spec(spec: dict, path: str, params: dict) -> str:
         else:
             query_params[key] = value
 
-    url = base_url + url_path
+    leftover = url_path.find("{")
+    if leftover != -1:
+        closing = url_path.find("}", leftover)
+        name = url_path[leftover + 1 : closing] if closing != -1 else url_path[leftover + 1 :]
+        raise ValueError(f"missing path parameter '{name}'")
 
-    if query_params:
-        url += "?" + urlencode(query_params)
-
-    return url
+    return join_url_path(base_url, url_path, query=urlencode(query_params))
 
 
 def _parse_json_argument(value: str | None, label: str, expected_type: type | None = None) -> object | None:
@@ -195,18 +232,20 @@ def main():
 
     # If using OpenAPI spec
     if args.spec and args.operation:
-        spec = fetch_openapi_spec(args.spec)
+        spec, spec_final_url = fetch_openapi_spec(args.spec)
         if not spec:
             _print_json({"success": False, "error": f"Failed to fetch OpenAPI spec from {args.spec}"}, file=sys.stderr)
             sys.exit(1)
 
-        path, spec_method, _operation = find_operation(spec, args.operation)
+        path, spec_method, operation = find_operation(spec, args.operation)
         if not path:
             # List available operations
             available = []
             for p, methods in spec.get("paths", {}).items():
+                if not isinstance(methods, dict):
+                    continue
                 for m, details in methods.items():
-                    if "operationId" in details:
+                    if m in _HTTP_METHODS and isinstance(details, dict) and "operationId" in details:
                         available.append(f"{m.upper()} {p} ({details['operationId']})")
 
             _print_json(
@@ -220,7 +259,7 @@ def main():
             sys.exit(1)
 
         try:
-            url = build_url_from_spec(spec, path, params)
+            url = build_url_from_spec(spec, path, params, spec_url=spec_final_url, operation=operation)
         except ValueError as exc:
             _print_json({"success": False, "error": f"Invalid input: {exc}"}, file=sys.stderr)
             sys.exit(1)

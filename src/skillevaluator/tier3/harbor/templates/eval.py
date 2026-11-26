@@ -1257,7 +1257,7 @@ def _should_try_fallback(error):
 def _model_leaf(model):
     leaf = str(model or "").strip().casefold().rsplit("/", 1)[-1]
     leaf = re.sub(r"^(?:[a-z]+-)+?(?=(?:claude|gpt)-)", "", leaf, count=1)
-    return re.sub(r"^(?:(?:[a-z]{2}|global)\.)?anthropic\.", "", leaf, count=1)
+    return _BEDROCK_ANTHROPIC_PREFIX_RE.sub("", leaf, count=1)
 
 
 def _claude_version(model):
@@ -2096,7 +2096,7 @@ def _classify_bedrock_retry_error(error):
     return is_network, type_name, None
 
 
-_BEDROCK_ANTHROPIC_PREFIX_RE = re.compile(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+_BEDROCK_ANTHROPIC_PREFIX_RE = re.compile(r"^(?:(?:[a-z]{2}(?:-gov)?|apac|global)\.)?anthropic\.")
 
 
 def _bedrock_refusal_fallback_model(model):

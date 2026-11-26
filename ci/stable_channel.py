@@ -23,13 +23,16 @@ ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "ci/templates/stable"
 GITHUB_OUTPUT = ROOT / ".github/workflows"
 GITLAB_INCLUDE = "stable-tier1.yml"
-WORKFLOWS = ("skill-checks-stable.yml", "publish-skill-reports-stable.yml")
+COMMENTS_WORKFLOW = "comment-skill-checks-stable.yml"
+WORKFLOWS = ("skill-checks-stable.yml", "publish-skill-reports-stable.yml", COMMENTS_WORKFLOW)
 RELEASE_HEADER = "# SkillEvaluator release: "
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 OFFICIAL_IMAGE = re.compile(r"ghcr\.io/nvidia/skillevaluator-tier1@sha256:[a-f0-9]{64}")
 
 
-def render(bundle: Path, *, templates: Path = TEMPLATES, include_gitlab: bool = True) -> dict[str, str]:
+def render(
+    bundle: Path, *, templates: Path = TEMPLATES, include_gitlab: bool = True, include_comments: bool = True
+) -> dict[str, str]:
     if not VERSION.fullmatch(bundle.name):
         raise ValueError("A stable channel bundle must have a numeric major.minor.patch version.")
     release = github_api.strict_json((bundle / "release.json").read_bytes())
@@ -53,7 +56,9 @@ def render(bundle: Path, *, templates: Path = TEMPLATES, include_gitlab: bool = 
     ):
         raise ValueError("The image must match the release's public verification receipt.")
 
-    names = (*WORKFLOWS, GITLAB_INCLUDE) if include_gitlab else WORKFLOWS
+    names = tuple(name for name in WORKFLOWS if include_comments or name != COMMENTS_WORKFLOW)
+    if include_gitlab:
+        names = (*names, GITLAB_INCLUDE)
     return {
         name: (
             (templates / name)
@@ -77,6 +82,7 @@ def verify_publication(
     zip_size: int,
     *,
     include_gitlab: bool = False,
+    include_comments: bool = False,
 ) -> None:
     """Tie the verified CI bundle and its runtime refs to the immutable GitHub release."""
     raw = manifest_path.read_bytes()
@@ -127,6 +133,8 @@ def verify_publication(
     ]
     if include_gitlab:
         sources.append((release["workflow_ref"], "ci/gitlab/skill-evaluation.yml"))
+    if include_comments:
+        sources.append((release["publisher_ref"], ".github/workflows/comment-skill-checks.yml"))
     for ref, path in sources:
         try:
             git("merge-base", "--is-ancestor", ref, release_commit)
@@ -150,15 +158,24 @@ def main() -> None:
     args = parser.parse_args()
     gitlab_dir = ROOT / "ci/gitlab" if args.output == GITHUB_OUTPUT else args.output
     gitlab_output = args.gitlab_output or gitlab_dir / GITLAB_INCLUDE
-    gitlab_template = (args.templates / GITLAB_INCLUDE).is_file()
-    # Historical published releases can predate GitLab support. Verify both files
-    # when either is present, and require both in normal release preparation.
-    historical = args.check and args.publication is not None and not (gitlab_template or gitlab_output.is_file())
-    include_gitlab = not historical
+    # A historical release can omit an entry point it predates. A partially
+    # present entry point is invalid, and new bundles must include both files.
+    historical = args.check and args.publication is not None
+    gitlab_files = ((args.templates / GITLAB_INCLUDE).is_file(), gitlab_output.is_file())
+    comment_files = (
+        (args.templates / COMMENTS_WORKFLOW).is_file(),
+        (args.output / COMMENTS_WORKFLOW).is_file(),
+    )
+    include_gitlab = not historical or any(gitlab_files)
+    include_comments = not historical or any(comment_files)
     try:
-        if include_gitlab and args.check and not (gitlab_template and gitlab_output.is_file()):
+        if args.check and include_gitlab and not all(gitlab_files):
             raise ValueError("The GitLab stable template and generated include are both required.")
-        workflows = render(args.bundle, templates=args.templates, include_gitlab=include_gitlab)
+        if args.check and include_comments and not all(comment_files):
+            raise ValueError("The stable comments template and generated workflow are both required.")
+        workflows = render(
+            args.bundle, templates=args.templates, include_gitlab=include_gitlab, include_comments=include_comments
+        )
         if args.publication:
             manifest, commit, digest, size, zip_digest, zip_size = args.publication
             verify_publication(
@@ -170,6 +187,7 @@ def main() -> None:
                 zip_digest,
                 int(zip_size),
                 include_gitlab=include_gitlab,
+                include_comments=include_comments,
             )
         for name, content in workflows.items():
             target = gitlab_output if name == GITLAB_INCLUDE else args.output / name

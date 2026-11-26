@@ -3,11 +3,10 @@
 
 """Pinned, checksum-verified provisioning of the external Tier 1 scanners.
 
-SkillSpector is not on PyPI, so when it is not installed its pinned release
-wheel is downloaded once into SkillEvaluator's runtime directory and run with
-``uv tool run`` in uv's own cached environment. uv is a base dependency, so
-this works after a plain ``pip install``. Gitleaks is a native binary,
-downloaded once from its official release into the same directory.
+Managed SkillSpector provisioning downloads the pinned wheel from its GitHub
+release into SkillEvaluator's runtime directory. ``uv tool run`` runs it in a
+separate cached environment, including after a plain ``pip install`` of
+SkillEvaluator. The runtime directory also holds the pinned Gitleaks binary.
 """
 
 from __future__ import annotations
@@ -24,12 +23,12 @@ import urllib.request
 from pathlib import Path
 from types import MappingProxyType
 
-SKILLSPECTOR_VERSION = "2.13.6"
+SKILLSPECTOR_VERSION = "2.13.7"
 SKILLSPECTOR_WHEEL = f"skillspector-{SKILLSPECTOR_VERSION}-py3-none-any.whl"
 SKILLSPECTOR_WHEEL_URL = (
     f"https://github.com/NVIDIA/SkillSpector/releases/download/v{SKILLSPECTOR_VERSION}/{SKILLSPECTOR_WHEEL}"
 )
-SKILLSPECTOR_WHEEL_SHA256 = "e7b46c55e726405b2a068d375d1ee8e799e15d86f3fc05f84feb5ba962198b15"
+SKILLSPECTOR_WHEEL_SHA256 = "e2356aa11f0d484f789543f25da6208fe2408641c8b16e7b59bc6600c5c39ffb"
 # SkillSpector needs Python 3.12+, and its yara-python dependency publishes wheels only
 # through CPython 3.13. Left unpinned, uv picks its newest Python and has to compile
 # yara-python, which fails on hosts without a C toolchain such as a default Windows install.

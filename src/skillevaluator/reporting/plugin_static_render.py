@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Explicit private adapters; ordinary reporter entrypoints keep their behavior."""
+"""Static evidence adapters over the standard report formats."""
 
 from __future__ import annotations
 
@@ -125,7 +125,7 @@ def _augment(
             if component is not None:
                 row.setdefault("properties", {})["pluginComponent"] = component
         return json.dumps(data, indent=reporter.indent, ensure_ascii=True, allow_nan=False)
-    if reporter.name == "junit":
+    if reporter.name in {"junit", "github"}:
         return document
     if reporter.name == "html":
         return reporter.render_all(results, plugin_static=payload)
@@ -139,11 +139,10 @@ def _augment(
 def render_plugin_static_reports(
     results: list[ValidationResult], *, reporters: Iterable[ReporterBase]
 ) -> dict[str, str]:
-    """Render a private static bundle through existing reporters with one reduction.
+    """Render static evidence alongside the existing reports with one reduction.
 
-    This function is deliberately absent from CLI dispatch and the public
-    reporting package exports. No reporter instance or validation result is
-    mutated, and a bundle without plugin evidence uses existing output exactly.
+    Reporter instances and validation results are preserved. A bundle without
+    plugin evidence uses the existing output exactly.
     """
     projection = project_plugin_static(results)
     payload = projection.payload() if projection is not None else None

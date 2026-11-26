@@ -1314,6 +1314,10 @@ def render_evaluation_result(
 
         _render_dimensions(console=console, agents=agents, safe=safe)
 
+        from skillevaluator.reporting.tier3_statistics import render_statistics_tables
+
+        render_statistics_tables(console, agents, text=safe)
+
         _render_token_usage(console, result, safe)
 
         # The per-evaluator findings report — evaluator reasonings, evidence

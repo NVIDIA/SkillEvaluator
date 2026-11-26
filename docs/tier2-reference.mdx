@@ -563,6 +563,7 @@ you intend to skip Tier 2 entirely.
 | Intra-skill cluster members | 1,024 | Same as the chunk ceiling, so it never stops a scan on its own; the review prompt limits decide |
 | Intra-skill review prompt | 64,000 characters | One cluster's request, system prompt included; exactly repeated text (a Markdown section's body after its heading line) is listed once before this limit applies, when that shortens the request |
 | Intra-skill verdict text | 8,192 characters | Longest rationale or suggestion accepted in one chat-LLM verdict; a longer one fails that cluster's analysis |
+| Intra-skill verdict reply | 16,384 output tokens (32,768 for GPT-5 and GPT-6 reasoning models) | Output ceiling sent with each cluster request; a reply cut off at it fails that cluster's analysis |
 | Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
 
 Intra-skill clustering compares every pair of chunks, so its work is

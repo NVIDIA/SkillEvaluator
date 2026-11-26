@@ -83,6 +83,9 @@ navigation:
       - page: Custom Graders & Tasks
         path: ../docs/custom-graders.mdx
         slug: custom-graders
+      - page: CLI Skill That Needs Login
+        path: ../docs/cookbook-authenticated-cli.mdx
+        slug: cookbook-authenticated-cli
       - page: Reproducible Terminal Demo
         path: ../docs/starter-demo.mdx
         slug: starter-demo
@@ -143,6 +146,9 @@ navigation:
           - page: Runtime and Backends
             path: ../docs/tier3-runtime.mdx
             slug: tier3-runtime
+          - page: MCP Servers and Sidecars
+            path: ../docs/mcp-servers.mdx
+            slug: mcp-servers
           - page: Interaction and Activation
             path: ../docs/tier3-experiments.mdx
             slug: tier3-experiments

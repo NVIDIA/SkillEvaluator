@@ -21,8 +21,10 @@ import click
 
 from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
+from skillevaluator.cli_plugin_reporting import build_report_plugin_command
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
+    CONTENT_TYPE_PLUGIN,
     QUALITY_DEFAULT_MIN_SCORE,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
@@ -53,6 +55,11 @@ from skillevaluator.reporting.console_ui import (
     summarize_tier1,
     summarize_tier2,
     summarize_tier3,
+)
+from skillevaluator.reporting.github_reporter import (
+    catalog_annotation,
+    collect_annotations,
+    print_collected_annotations,
 )
 from skillevaluator.reporting.naming import report_basename
 
@@ -409,9 +416,49 @@ def _tier2_skill_argument(func):
     return click.argument("skill_path", type=click.Path(exists=True, resolve_path=False, path_type=Path))(func)
 
 
+def _plugin_context_options(*, grouped=False):
+    from skillevaluator.deduplication.plugin.context_budget import (
+        PLUGIN_CONTEXT_CHUNK_CEILING,
+        PLUGIN_CONTEXT_SCALAR_CEILING,
+    )
+
+    attrs = {"cls": GroupedOption, "help_group": _TIER2_GROUP} if grouped else {}
+
+    def decorate(func):
+        func = click.option(
+            "--plugin-context-max-chunks",
+            "max_chunks",
+            type=click.IntRange(1, PLUGIN_CONTEXT_CHUNK_CEILING),
+            help="Maximum context chunks across bundled skills.",
+            **attrs,
+        )(func)
+        return click.option(
+            "--plugin-context-max-scalar-comparisons",
+            "max_scalar_comparisons",
+            type=click.IntRange(1, PLUGIN_CONTEXT_SCALAR_CEILING),
+            help="Maximum context comparisons multiplied by embedding dimensions across bundled skills.",
+            **attrs,
+        )(func)
+
+    return decorate
+
+
 def _reject_linked_tier2_root(path: Path) -> None:
     if is_link_or_reparse(path):
         raise click.UsageError(f"Tier 2 target root is a symlink or reparse point: {path.name or '.'}")
+
+
+def _tier2_report_target(path: Path, content_type: str) -> tuple[Path, bool]:
+    from skillevaluator.cli_core import resolve_plugin_path
+    from skillevaluator.tier2.plugin_commands import plugin_target
+
+    _reject_linked_tier2_root(path)
+    plugin = plugin_target(path, content_type)
+    if plugin is None:
+        return path, False
+    root = resolve_plugin_path(plugin)
+    _reject_linked_tier2_root(root)
+    return root, True
 
 
 def _require_hook_review_target(path: Path) -> None:
@@ -525,7 +572,7 @@ def _report_options(func):
         "report_formats",
         cls=_MultiValueOption,
         multiple=True,
-        type=click.Choice(["cli", "json", "html", "markdown", "sarif", "junit"]),
+        type=click.Choice(["cli", "json", "html", "markdown", "sarif", "junit", "github"]),
         default=("cli",),
         show_default=True,
         help="Report format(s). Accepts comma- or space-separated values "
@@ -647,7 +694,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
 
 
 def _report_roots(target_path: Path) -> dict[str, Path]:
-    """Return the scan and repository roots SARIF and JUnit paths are made relative to.
+    """Return the scan and repository roots SARIF, JUnit, and GitHub paths are made relative to.
 
     The repository root is the Git root containing *target_path*, so a finding
     reads the same repository-relative ``file`` from every command; outside Git
@@ -765,7 +812,7 @@ def _report_formats_explicit() -> bool:
     return False
 
 
-def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
+def _run_dedup_or_skip(target_path: Path, **options) -> list[ValidationResult]:
     """Run Tier 2 dedup when possible, else return a non-failing skipped result.
 
     Dedup is on by default for ``validate`` but needs the ``tier2`` extra and an
@@ -775,6 +822,7 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
     import importlib.util
 
     def _skip(message: str) -> list[ValidationResult]:
+        from skillevaluator.cli_core import resolve_plugin_path
         from skillevaluator.publication_identity import stamp_publication_target
 
         result = ValidationResult(
@@ -783,7 +831,8 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
         )
         result.add_warning(message)
         result.metadata["skipped"] = True
-        stamp_publication_target([result], target_path)
+        root = resolve_plugin_path(target_path) if options.get("content_type") == CONTENT_TYPE_PLUGIN else target_path
+        stamp_publication_target([result], root)
         return [result]
 
     def _available(module: str) -> bool:
@@ -806,7 +855,7 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
         resolve_embedding_provider()
     except ProviderConfigurationError as exc:
         return _skip(f"Tier 2 skipped: embedding setup is required.\n\n{exc}\n\nTo skip Tier 2, pass --no-dedup.")
-    return run_dedup_scan(target_path)
+    return run_dedup_scan(target_path, **options)
 
 
 def _partial_agent_eval_result(
@@ -1426,7 +1475,7 @@ def _catalog_child_argv_from_ctx(
 ) -> list[str]:
     """Rebuild ``validate`` argv from the active Click context (pytest-safe)."""
     params = ctx.params
-    argv: list[str] = ["validate", str(skill_dir)]
+    argv: list[str] = ["validate", str(skill_dir), "--type", "skill"]
 
     if params.get("verbose"):
         argv.append("--verbose")
@@ -1573,8 +1622,16 @@ def _catalog_child_argv_from_ctx(
     return argv
 
 
-def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str | None]:
-    """Run one catalog skill validation in a child process."""
+class _ValidationGateFailure(click.ClickException):
+    """Validation completed and reported its results, but the required checks did not pass."""
+
+
+def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, str | None, bool, str | None, list[dict]]:
+    """Run one catalog skill validation in a child process.
+
+    The child's output is captured, so its GitHub annotations are collected and
+    returned for the parent to print as one stream for the whole catalog.
+    """
     import os
 
     from click.testing import CliRunner
@@ -1584,18 +1641,22 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str 
         os.chdir(workdir)
 
     skill_name = str(job["skill_name"])
-    result = CliRunner().invoke(cli, job["argv"])
+    raw_workspace_root = job.get("workspace_root")
+    workspace_root = Path(raw_workspace_root) if isinstance(raw_workspace_root, str) and raw_workspace_root else None
+    with collect_annotations(workspace_root=workspace_root) as annotations:
+        result = CliRunner().invoke(cli, job["argv"], standalone_mode=False)
     json_report_name = _consume_validate_json_report()
     if result.exit_code == 0:
-        return skill_name, True, "", json_report_name
+        return skill_name, None, False, json_report_name, annotations
     exc = result.exception
-    if isinstance(exc, SystemExit):
-        return skill_name, False, "validation failed", json_report_name
-    if exc is not None:
-        if isinstance(exc, click.ClickException):
-            return skill_name, False, str(getattr(exc, "message", exc)), json_report_name
-        return skill_name, False, f"unexpected error: {exc}", json_report_name
-    return skill_name, False, "validation failed", json_report_name
+    if isinstance(exc, click.ClickException):
+        reason = exc.format_message()
+    elif exc is None or isinstance(exc, SystemExit):
+        reason = "validation failed"
+    else:
+        reason = f"unexpected error: {exc}"
+    execution_failed = not isinstance(exc, _ValidationGateFailure)
+    return skill_name, reason, execution_failed, json_report_name, annotations
 
 
 def _catalog_skill_entry(
@@ -1803,6 +1864,128 @@ def _record_metadata_id_failures(
     return [*failures, *((name, reason) for name, reason in id_failures if name not in failed)]
 
 
+def _print_catalog_github_annotations(
+    ctx: click.Context,
+    *,
+    catalog_root: Path,
+    workspace_root: Path | None = None,
+    skill_dirs: list[Path],
+    skill_annotations: dict[str, list[dict]],
+    failures: list[tuple[str, str]],
+    execution_failures: set[str],
+    id_conflicts: list[dict[str, object]],
+    id_failures: list[tuple[str, str]],
+    discovery_problems: dict[Path, str],
+) -> None:
+    """Print the catalog's one GitHub annotation stream from its final outcomes.
+
+    Skills render before the catalog checks ``metadata.id`` uniqueness, so the
+    per-skill counts would miss those failures. The summary is counted from the
+    catalog's failures instead, and catalog-level findings join the same capped
+    stream with a file on the affected skill's manifest. A discovery failure
+    points at the directory itself, without probing it: a linked directory is
+    tracked as the link, and Git has no files beneath it.
+    """
+    report_formats = ctx.params.get("report_formats") or ()
+    if "github" not in report_formats:
+        return
+    from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
+
+    resolved_workspace_root = workspace_root or _report_roots(catalog_root)["repository_root"]
+    names = {skill_dir.relative_to(catalog_root).as_posix(): skill_dir for skill_dir in skill_dirs}
+
+    def manifest(name: str) -> Path | None:
+        skill_dir = names.get(name)
+        if skill_dir is None:
+            return None
+        for variant in SKILL_MANIFEST_VARIANTS:
+            if (skill_dir / variant).is_file():
+                return skill_dir / variant
+        return skill_dir
+
+    def annotation(
+        name: str,
+        *,
+        check: str,
+        message: str,
+        severity: str,
+        blocking: bool,
+        file_path: Path | None = None,
+        follow_links: bool = True,
+    ) -> dict:
+        return catalog_annotation(
+            check=check,
+            message=message,
+            severity=severity,
+            blocking=blocking,
+            file_path=file_path or manifest(name),
+            workspace_root=resolved_workspace_root,
+            scan_root=catalog_root,
+            follow_links=follow_links,
+        )
+
+    extra: list[dict] = []
+    for skill_dir, reason in discovery_problems.items():
+        name = skill_dir.relative_to(catalog_root).as_posix()
+        # The link itself, never its target, even when the target is inside the repository.
+        extra.append(
+            annotation(
+                name,
+                check="discovery",
+                message=f"{name}: {reason}",
+                severity="high",
+                blocking=True,
+                file_path=Path(name),
+                follow_links=False,
+            )
+        )
+    for conflict in id_conflicts:
+        members = conflict.get("skills")
+        if not isinstance(members, list):
+            continue
+        for member in map(str, members):
+            others = ", ".join(str(other) for other in members if str(other) != member)
+            extra.append(
+                annotation(
+                    member,
+                    check="metadata_id_duplicate",
+                    message=f"{member}: metadata.id '{conflict.get('metadata_id')}' is also declared by {others}",
+                    severity=str(conflict.get("severity") or ""),
+                    blocking=bool(conflict.get("blocking")),
+                )
+            )
+    catalog_level = {name for name, _reason in id_failures} | {
+        path.relative_to(catalog_root).as_posix() for path in discovery_problems
+    }
+    for name, reason in failures:
+        if name not in execution_failures:
+            if name in catalog_level:
+                continue
+            entries = skill_annotations.get(name, [])
+            if any(item["level"] == "error" for entry in entries for item in entry["annotations"]):
+                continue
+            # A member that only had incomplete checks keeps its warnings.
+            failed_count = sum(entry["counts"][2] for entry in entries)
+            if not failed_count and sum(entry["counts"][3] for entry in entries):
+                continue
+        extra.append(
+            annotation(
+                name,
+                check="catalog_failure",
+                message=f"{name}: {reason or 'validation failed'}",
+                severity="high",
+                blocking=True,
+            )
+        )
+    print_collected_annotations(
+        {name: skill_annotations.get(name, []) for name in names},
+        failed={name for name, _reason in failures},
+        catalog_failed=catalog_level | execution_failures,
+        catalog_annotations=extra,
+        report_formats=report_formats,
+    )
+
+
 def _validate_catalog(
     ctx: click.Context,
     *,
@@ -1827,11 +2010,13 @@ def _validate_catalog(
         )
 
     discovery_problems = discovery_problems or {}
+    catalog_workspace_root = _report_roots(resolved_target)["repository_root"]
     if workers > 1:
         _validate_catalog_parallel(
             ctx,
             skill_dirs=skill_dirs,
             catalog_root=resolved_target,
+            workspace_root=catalog_workspace_root,
             output_dir=output_dir,
             workers=workers,
             discovery_problems=discovery_problems,
@@ -1840,10 +2025,12 @@ def _validate_catalog(
         return
 
     failures = [(path.relative_to(resolved_target).as_posix(), reason) for path, reason in discovery_problems.items()]
+    execution_failures: set[str] = set()
     meta_key = "skillevaluator_catalog_report_root"
     previous_catalog_root = ctx.meta.get(meta_key)
     ctx.meta[meta_key] = output_dir
     skill_reports: dict[str, str | None] = {}
+    github_annotations: dict[str, list[dict]] = {}
     try:
         for index, skill_dir in enumerate(skill_dirs, start=1):
             skill_name = skill_dir.relative_to(resolved_target).as_posix()
@@ -1859,15 +2046,19 @@ def _validate_catalog(
                 "results_dir": _catalog_results_dir(ctx, skill_dir, resolved_target),
                 "catalog_root": resolved_target,
             }
-            reason = ""
             try:
-                ctx.invoke(validate, **overrides)
+                with collect_annotations(workspace_root=catalog_workspace_root) as skill_annotations:
+                    try:
+                        ctx.invoke(validate, **overrides)
+                    finally:
+                        github_annotations[skill_name] = skill_annotations
             except click.ClickException as exc:
-                reason = str(getattr(exc, "message", exc))
-                failures.append((skill_name, reason))
+                failures.append((skill_name, exc.format_message()))
+                if not isinstance(exc, _ValidationGateFailure):
+                    execution_failures.add(skill_name)
             except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
-                reason = f"unexpected error: {exc}"
-                failures.append((skill_name, reason))
+                failures.append((skill_name, f"unexpected error: {exc}"))
+                execution_failures.add(skill_name)
             skill_reports[skill_name] = _consume_validate_json_report()
     finally:
         if previous_catalog_root is None:
@@ -1894,6 +2085,18 @@ def _validate_catalog(
         for skill_name in (skill_dir.relative_to(resolved_target).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
+    _print_catalog_github_annotations(
+        ctx,
+        catalog_root=resolved_target,
+        workspace_root=catalog_workspace_root,
+        skill_dirs=skill_dirs,
+        skill_annotations=github_annotations,
+        failures=failures,
+        execution_failures=execution_failures,
+        id_conflicts=id_conflicts,
+        id_failures=id_failures,
+        discovery_problems=discovery_problems,
+    )
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     _print_metadata_id_conflicts(id_conflicts)
     if failures:
@@ -1908,6 +2111,7 @@ def _validate_catalog_parallel(
     *,
     skill_dirs: list[Path],
     catalog_root: Path,
+    workspace_root: Path | None = None,
     output_dir: Path,
     workers: int,
     discovery_problems: dict[Path, str] | None = None,
@@ -1922,6 +2126,7 @@ def _validate_catalog_parallel(
         _print_catalog_summary(0, [], output_dir)
         return
 
+    catalog_workspace_root = workspace_root or _report_roots(catalog_root)["repository_root"]
     workdir = str(Path.cwd())
     make_view_console().print(
         f"[dim]Validating {len(skill_dirs)} skills with {workers} worker"
@@ -1934,20 +2139,26 @@ def _validate_catalog_parallel(
             "argv": _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir / skill_name, catalog_root=catalog_root),
             "cwd": workdir,
             "output_dir": str(output_dir / skill_name),
+            "workspace_root": str(catalog_workspace_root),
         }
         for skill_dir in skill_dirs
         if skill_dir not in discovery_problems
         for skill_name in [skill_dir.relative_to(catalog_root).as_posix()]
     ]
     failures = [(path.relative_to(catalog_root).as_posix(), reason) for path, reason in discovery_problems.items()]
+    execution_failures: set[str] = set()
     worker_reports: dict[str, str | None] = {}
+    worker_annotations: dict[str, list[dict]] = {}
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(_run_catalog_skill_worker, job) for job in jobs]
         for future in as_completed(futures):
-            skill_name, passed, reason, json_report_name = future.result()
+            skill_name, reason, execution_failed, json_report_name, annotations = future.result()
             worker_reports[skill_name] = json_report_name
-            if not passed:
+            worker_annotations[skill_name] = annotations
+            if reason is not None:
                 failures.append((skill_name, reason))
+            if execution_failed:
+                execution_failures.add(skill_name)
 
     id_conflicts, id_failures = _catalog_metadata_id_conflicts(
         policy,
@@ -1970,6 +2181,18 @@ def _validate_catalog_parallel(
         for skill_name in (skill_dir.relative_to(catalog_root).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
+    _print_catalog_github_annotations(
+        ctx,
+        catalog_root=catalog_root,
+        workspace_root=catalog_workspace_root,
+        skill_dirs=skill_dirs,
+        skill_annotations=worker_annotations,
+        failures=failures,
+        execution_failures=execution_failures,
+        id_conflicts=id_conflicts,
+        id_failures=id_failures,
+        discovery_problems=discovery_problems,
+    )
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     _print_metadata_id_conflicts(id_conflicts)
     if failures:
@@ -2053,8 +2276,11 @@ def _finish_pipeline_view(
     if len(failed) == 1:
         only = failed[0]
         tier_no = (only.metadata.get("gating") or {}).get("tier")
-        ran = all(scan.removesuffix("-llm") in only.scanners for scan in only.incomplete_scans)
-        state = ("was incomplete" if ran else "didn't run") if only.is_incomplete else "failed"
+        from skillevaluator.reporting.console_ui import _scanner_setup_issue
+
+        state = "failed"
+        if context.result_statuses[id(only)] == "incomplete":
+            state = "didn't run" if _scanner_setup_issue(only) else "was incomplete"
         headline = f"{only.validator_name or 'validation'} {state}" + (
             f" in Tier {tier_no}" if tier_no is not None else ""
         )
@@ -2064,10 +2290,10 @@ def _finish_pipeline_view(
             by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
         parts = []
         for tier_no, results in by_tier.items():
-            broken = sum(1 for r in results if not r.is_incomplete)
+            broken = sum(1 for r in results if context.result_statuses[id(r)] != "incomplete")
             counts = [
                 f"{broken} failed" if broken else "",
-                f"{len(results) - broken} didn't run" if broken < len(results) else "",
+                f"{len(results) - broken} incomplete" if broken < len(results) else "",
             ]
             parts.append((f"Tier {tier_no}: " if tier_no is not None else "") + ", ".join(c for c in counts if c))
         headline = " · ".join(parts) or "validation failed"
@@ -2554,6 +2780,28 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help_group=_RUN_GROUP,
     help="Digest-pinned evaluator image reference recorded beside the evaluated source.",
 )
+@click.option(
+    "--repo-root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Repository root for same-repository component references.",
+)
+@click.option(
+    "--resolve-endpoints",
+    is_flag=True,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Opt into bounded DNS and redirect checks on declared endpoints.",
+)
+@click.option(
+    "--claude-validate",
+    is_flag=True,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help="Also run the installed Claude Code manifest validator.",
+)
+@_plugin_context_options(grouped=True)
 @_report_options
 def validate(
     target_path: Path,
@@ -2615,6 +2863,11 @@ def validate(
     output_dir: Path,
     harness: str | None = None,
     harness_profiles: Path | None = None,
+    repo_root: Path | None = None,
+    resolve_endpoints: bool = False,
+    claude_validate: bool = False,
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> None:
     """Validate a skill through all three tiers, with automatic dataset preparation.
 
@@ -2627,10 +2880,7 @@ def validate(
     Rules, workflows, and plugins retain Tier 1/2 by default; their Tier 3
     evaluation requires an explicit --tier3, --autopilot, or --full request.
 
-    A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest or a
-    contained ``.claude-plugin/plugin.json`` manifest) is auto-detected and
-    validated against its public contract. Quality/lint/version checks are
-    skill-only and skipped for plugins.
+    Supported plugin manifests select component and bundled-skill checks.
     """
     _record_validate_json_report(None)
     requested_path = target_path
@@ -2643,8 +2893,6 @@ def validate(
             raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if dedup:
         _reject_linked_tier2_root(target_path)
-    if hook_waivers is not None:
-        _require_hook_review_target(target_path)
     target_path = target_path.resolve()
     from skillevaluator.publication_identity import publication_target_name
 
@@ -2658,9 +2906,8 @@ def validate(
         evaluator_container_revision,
     )
 
-    from skillevaluator.cli_core import detect_content_type
+    from skillevaluator.cli_core import detect_content_type, resolve_plugin_path
     from skillevaluator.constants import (
-        CONTENT_TYPE_PLUGIN,
         CONTENT_TYPE_RULES,
         CONTENT_TYPE_SKILL,
         CONTENT_TYPE_WORKFLOWS,
@@ -2692,7 +2939,36 @@ def validate(
             manifest_type = CONTENT_TYPE_SKILL
         elif requested_path.name == WORKFLOWS_MANIFEST_FILE:
             manifest_type = CONTENT_TYPE_WORKFLOWS
-    resolved_type = content_type if content_type != "auto" else manifest_type or detect_content_type(target_path)
+    if content_type != "auto":
+        resolved_type = content_type
+    elif manifest_type is not None:
+        resolved_type = manifest_type
+    else:
+        resolved_type = detect_content_type(requested_path.absolute())
+        if requested_path.is_symlink() and resolved_type != CONTENT_TYPE_PLUGIN:
+            resolved_type = detect_content_type(target_path)
+
+    plugin_scan = resolved_type == CONTENT_TYPE_PLUGIN
+    if hook_waivers is not None:
+        review_target = requested_path
+        if plugin_scan and not requested_path.is_dir():
+            from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest
+
+            try:
+                selected_manifest = locate_plugin_manifest(requested_path)
+            except PluginManifestPathError as exc:
+                raise click.UsageError(f"--hook-waivers requires a secure packaged plugin: {exc}") from exc
+            if selected_manifest is not None:
+                review_target = selected_manifest.root
+        _require_hook_review_target(review_target)
+    if not plugin_scan and (
+        repo_root is not None
+        or resolve_endpoints
+        or claude_validate
+        or max_chunks is not None
+        or max_scalar_comparisons is not None
+    ):
+        raise click.UsageError("Component and bundle context controls require a plugin target (--type plugin).")
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
     preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
@@ -2706,6 +2982,28 @@ def validate(
             _reject_linked_tier2_root(requested_path.absolute().parent)
         target_path = requested_path.absolute().parent.resolve()
         publication_name = publication_target_name(target_path) or target_path.name
+    scan_source = target_path
+    tier3_target = target_path
+    static_options = {}
+    tier2_options = {}
+    if plugin_scan:
+        scan_source = requested_path.absolute()
+        target_path = resolve_plugin_path(scan_source)
+        if dedup:
+            _reject_linked_tier2_root(target_path)
+        publication_name = publication_target_name(target_path) or target_path.name
+        static_options = {
+            "repo_root": repo_root,
+            "resolve_endpoints": resolve_endpoints,
+            "claude_validate": claude_validate,
+        }
+        tier2_options = {
+            "content_type": CONTENT_TYPE_PLUGIN,
+            "max_chunks": max_chunks,
+            "max_scalar_comparisons": max_scalar_comparisons,
+        }
+    elif content_type != "auto":
+        tier2_options = {"content_type": content_type}
 
     # Skill validation is the complete workflow. Keep the old flags as aliases,
     # while explicit disable flags and the authoritative --tiers selector still
@@ -2726,7 +3024,7 @@ def validate(
         # turns Tier 3 off even when --full/--autopilot/--tier3 turned it on.
         agent_eval = "3" in selected
     autopilot = autopilot and agent_eval
-    tier3_path = target_path.parent if preflight_tier3_source and target_path.is_file() else target_path
+    tier3_path = tier3_target.parent if preflight_tier3_source and tier3_target.is_file() else tier3_target
 
     from skillevaluator.constants import CONTENT_TYPE_UNKNOWN, SKILL_MANIFEST_VARIANTS
     from skillevaluator.utils.helpers import find_skills_in_directory
@@ -2833,7 +3131,12 @@ def validate(
                 click.echo(f"Warning: {autopilot_error}", err=True)
 
     view.tier_start(0)
-    check_lineup = enabled_check_lineup(checks)
+    check_lineup = enabled_check_lineup(
+        checks,
+        content_type=resolved_type,
+        resolve_endpoints=plugin_scan and (resolve_endpoints or bool(policy and policy.resolve_endpoints)),
+        claude_validate=claude_validate,
+    )
     checks_done: list[str] = []
 
     def _on_check(name: str) -> None:
@@ -2841,7 +3144,7 @@ def validate(
         checks_done.append(name)
 
     results = run_validation(
-        target_path,
+        scan_source,
         checks=checks,
         use_llm=llm,
         llm_verify=llm_verify,
@@ -2860,6 +3163,7 @@ def validate(
         harness=harness,
         harness_profiles=harness_profiles,
         skip=skip,
+        **static_options,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
@@ -2885,7 +3189,7 @@ def validate(
             _print_tier_banner(_TIER_BANNERS["tier2"])
         view.tier_start(tier2_index)
         view.tier_progress(tier2_index, [stage_hint_row("stages", "chunk · embed · cluster · llm-judge")])
-        tier2_results = _run_dedup_or_skip(target_path)
+        tier2_results = _run_dedup_or_skip(scan_source, **tier2_options)
         results.extend(tier2_results)
         tier2_gate_results.extend(tier2_results)
         if quiet:
@@ -3162,7 +3466,7 @@ def validate(
     if harness_rows and not quiet:
         console.print(harness_panel(harness_rows, verbose=True))
     if gate_failed:
-        raise click.ClickException("validation failed")
+        raise _ValidationGateFailure("validation failed")
 
 
 # Intro text shown under the grouped Tier 3 options in ``validate --help``.
@@ -3436,7 +3740,9 @@ def precommit_run(min_score: int, quality_config: Path | None, check: str, paths
 
 @cli.command("similarity-check")
 @click.argument("content_path", type=click.Path(exists=True, path_type=Path))
-@click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "rules", "workflows", "auto"]))
+@click.option(
+    "--type", "content_type", default="auto", type=click.Choice(["skill", "rules", "workflows", "plugin", "auto"])
+)
 @click.option("--threshold", type=float, default=0.75, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--full-body", is_flag=True, help="Embed full file bodies instead of descriptions.")
 @click.option("--model", default=None, help="Embedding model override.")
@@ -3458,7 +3764,7 @@ def precommit_run(min_score: int, quality_config: Path | None, check: str, paths
     "--catalog",
     type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Compare exactly one skill against a local catalog.",
+    help="Compare one target against a local catalog.",
 )
 @click.option(
     "--save-catalog",
@@ -3468,6 +3774,8 @@ def precommit_run(min_score: int, quality_config: Path | None, check: str, paths
 )
 @click.option("--cache", type=click.Path(path_type=Path), default=None, hidden=True)
 @click.option("--save-cache", type=click.Path(path_type=Path), default=None, hidden=True)
+@click.option("--llm", "llm_verdict", is_flag=True, help="Request advisory LLM verdicts for plugin catalog matches.")
+@click.option("--llm-model", default=None, help="Model override for advisory catalog verdicts.")
 @_report_options
 def similarity_check(
     content_path: Path,
@@ -3483,6 +3791,8 @@ def similarity_check(
     save_cache: Path | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    llm_verdict: bool = False,
+    llm_model: str | None = None,
 ) -> None:
     """Detect duplicate content with embedding similarity."""
     from skillevaluator.tier2.commands import run_similarity_check
@@ -3496,8 +3806,10 @@ def similarity_check(
     if resolved_catalog and resolved_save_catalog:
         raise click.UsageError("--catalog and --save-catalog cannot be used together")
 
-    _reject_linked_tier2_root(content_path)
-    output_dir = _resolve_file_report_output_location(content_path.resolve(), output_dir, report_formats)
+    report_target, plugin_scan = _tier2_report_target(content_path, content_type)
+    if (llm_verdict or llm_model is not None) and not plugin_scan:
+        raise click.UsageError("Catalog verdict controls require a plugin target (--type plugin).")
+    output_dir = _resolve_file_report_output_location(report_target.resolve(), output_dir, report_formats)
     similarity_basename = report_basename("similarity")
     _reject_catalog_report_collisions(
         resolved_catalog,
@@ -3522,24 +3834,28 @@ def similarity_check(
         max_scalar_comparisons=max_scalar_comparisons,
         catalog=resolved_catalog,
         save_catalog=resolved_save_catalog,
+        **({"llm_verdict": llm_verdict, "llm_model": llm_model} if plugin_scan else {}),
     )
-    sanitize_tier2_results(results, content_path, resolved_catalog, resolved_save_catalog)
+    sanitize_tier2_results(results, report_target, content_path, resolved_catalog, resolved_save_catalog)
 
     if not emit_reports(
         results,
         report_formats=report_formats,
         output_dir=output_dir,
         basename=similarity_basename,
-        **_report_roots(content_path),
+        **({"content_label": "Plugin"} if plugin_scan else {}),
+        **_report_roots(report_target),
     ):
         raise click.ClickException("similarity check failed")
 
 
 @cli.command("context-optimization-check")
 @_tier2_skill_argument
+@click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "plugin", "auto"]))
 @click.option("--threshold", type=float, default=0.80, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--model", default=None, help="Embedding model override.")
 @click.option("--llm-model", default=None, help="LLM model override.")
+@_plugin_context_options()
 @_report_options
 def context_optimization_check(
     skill_path: Path,
@@ -3548,30 +3864,52 @@ def context_optimization_check(
     llm_model: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    content_type: str = "auto",
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> None:
-    """Detect redundant content within one skill."""
+    """Detect redundant content within a skill or bundled skills."""
     from skillevaluator.tier2.commands import run_context_optimization_check
 
-    _reject_linked_tier2_root(skill_path)
-    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
-    results = run_context_optimization_check(skill_path, threshold=threshold, model=model, llm_model=llm_model)
-    sanitize_tier2_results(results, skill_path)
+    report_target, plugin_scan = _tier2_report_target(skill_path, content_type)
+    if not plugin_scan and (max_chunks is not None or max_scalar_comparisons is not None):
+        raise click.UsageError("Bundle context controls require a plugin target (--type plugin).")
+    output_dir = _resolve_file_report_output_location(report_target.resolve(), output_dir, report_formats)
+    results = run_context_optimization_check(
+        skill_path,
+        threshold=threshold,
+        model=model,
+        llm_model=llm_model,
+        **({"content_type": content_type} if content_type != "auto" else {}),
+        **({"max_chunks": max_chunks, "max_scalar_comparisons": max_scalar_comparisons} if plugin_scan else {}),
+    )
+    sanitize_tier2_results(results, report_target, skill_path)
     if not emit_reports(
         results,
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("context"),
-        explicit_skill_name=skill_path.resolve().name,
-        **_report_roots(skill_path),
+        explicit_skill_name=None if plugin_scan else skill_path.resolve().name,
+        **({"content_label": "Plugin"} if plugin_scan else {}),
+        **_report_roots(report_target),
     ):
         raise click.ClickException("context optimization check failed")
 
 
 @cli.command("dedup-scan")
 @_tier2_skill_argument
+@click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "plugin", "auto"]))
 @click.option("--threshold", type=float, default=0.80, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--llm-model", default=None, help="LLM model override.")
 @click.option("--model", default=None, help="Embedding model override.")
+@click.option(
+    "--catalog",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Compare bundled components against a local catalog.",
+)
+@click.option("--llm", "llm_verdict", is_flag=True, help="Request advisory LLM verdicts for plugin catalog matches.")
+@_plugin_context_options()
 @_report_options
 def dedup_scan(
     skill_path: Path,
@@ -3580,26 +3918,51 @@ def dedup_scan(
     model: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    content_type: str = "auto",
+    catalog: Path | None = None,
+    llm_verdict: bool = False,
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> None:
-    """Detect semantically redundant content within one skill."""
+    """Detect semantically redundant content within a skill or bundle."""
     from skillevaluator.tier2.commands import run_dedup_scan
 
-    _reject_linked_tier2_root(skill_path)
-    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
+    report_target, plugin_scan = _tier2_report_target(skill_path, content_type)
+    if not plugin_scan and (
+        catalog is not None or llm_verdict or max_chunks is not None or max_scalar_comparisons is not None
+    ):
+        raise click.UsageError("Bundle context and catalog controls require a plugin target (--type plugin).")
+    output_dir = _resolve_file_report_output_location(report_target.resolve(), output_dir, report_formats)
+    dedup_basename = report_basename("dedup")
+    _reject_catalog_report_collisions(
+        catalog, report_formats=report_formats, output_dir=output_dir, basename=dedup_basename
+    )
     results = run_dedup_scan(
         skill_path,
         threshold=threshold,
         llm_model=llm_model,
         model=model,
+        **({"content_type": content_type} if content_type != "auto" else {}),
+        **(
+            {
+                "catalog": catalog,
+                "llm_verdict": llm_verdict,
+                "max_chunks": max_chunks,
+                "max_scalar_comparisons": max_scalar_comparisons,
+            }
+            if plugin_scan
+            else {}
+        ),
     )
-    sanitize_tier2_results(results, skill_path)
+    sanitize_tier2_results(results, report_target, skill_path, catalog)
     if not emit_reports(
         results,
         report_formats=report_formats,
         output_dir=output_dir,
-        basename=report_basename("dedup"),
-        explicit_skill_name=skill_path.resolve().name,
-        **_report_roots(skill_path),
+        basename=dedup_basename,
+        explicit_skill_name=None if plugin_scan else skill_path.resolve().name,
+        **({"content_label": "Plugin"} if plugin_scan else {}),
+        **_report_roots(report_target),
     ):
         raise click.ClickException("dedup scan failed")
 
@@ -4767,6 +5130,15 @@ tier3.add_command(init_harbor_task, "init-harbor-task")
 tier3.add_command(compare, "compare")
 tier3.add_command(view, "view")
 tier3.add_command(tier3_doctor_command, "doctor")
+tier3.add_command(
+    build_report_plugin_command(
+        report_options=_report_options,
+        console=console,
+        resolve_output_dir=_resolve_report_output_location,
+        command_class=tier3.command_class,
+        context_settings=CONTEXT_SETTINGS,
+    )
+)
 
 from skillevaluator.tier3.decoy_commands import select_decoys_command
 from skillevaluator.tier3.grader_validation import validate_grader

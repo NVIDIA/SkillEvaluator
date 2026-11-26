@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Private static views share facts without enabling public plugin workflows."""
+"""Static evidence keeps the same facts across report formats."""
 
 from __future__ import annotations
 
 import html
 import importlib
+import io
 import json
 from copy import deepcopy
 
 import pytest
+from rich.console import Console
 
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.reporting import (
     BenchmarkReporter,
     CLIReporter,
@@ -272,6 +275,62 @@ def test_absent_empty_and_malformed_blocks_leave_generic_reports_unchanged():
         assert renderers().render_plugin_static_reports([result], reporters=report_list) == before
 
 
+def test_public_static_file_report_includes_opt_in_evidence(tmp_path):
+    results = bundle()
+    reporter = JSONReporter(include_timestamp=False)
+    output_path = tmp_path / "report.json"
+    reporter.save(results, output_path)
+    assert output_path.read_text(encoding="utf-8") == reporter.render_all(results)
+
+    reporter.save(results, output_path, plugin_static=True)
+    document = json.loads(output_path.read_text(encoding="utf-8"))
+    assert document.pop("plugin_static")["name"] == "report-demo"
+    assert document == json.loads(reporter.render_all(results))
+
+
+def test_public_static_cli_report_keeps_its_summary_and_prints_evidence():
+    output = io.StringIO()
+    reporter = CLIReporter(console=Console(file=output, width=120))
+    reporter.print_all(bundle(), plugin_static=True)
+
+    assert "Private Manifest and Component Checks" in output.getvalue()
+    assert "Plugin static evidence" in output.getvalue()
+    assert "startup-hook" in output.getvalue()
+
+
+def test_emit_reports_adds_static_evidence_only_for_plugin_scans(tmp_path):
+    from skillevaluator.tier1.commands import emit_reports
+
+    results = bundle()
+    stamp_publication_evidence([results[0]], tier=1, check_id="schema")
+    emit_reports(
+        results, report_formats=("json", "html"), output_dir=tmp_path, basename="plugin", content_label="Plugin"
+    )
+    evidence = json.loads((tmp_path / "plugin.json").read_text(encoding="utf-8"))["plugin_static"]
+    assert evidence["name"] == "report-demo"
+    assert any(section["key"] == "catalog_skills" for section in evidence["sections"])
+    assert 'id="plugin-static-evidence"' in (tmp_path / "plugin.html").read_text(encoding="utf-8")
+
+    emit_reports(results, report_formats=("json",), output_dir=tmp_path, basename="skill")
+    assert "plugin_static" not in json.loads((tmp_path / "skill.json").read_text(encoding="utf-8"))
+
+
+def test_emit_reports_preserves_all_catalog_targets_without_a_static_scan(tmp_path):
+    from skillevaluator.tier1.commands import emit_reports
+
+    results = []
+    for name in ("one", "two"):
+        catalog = bundle()[-1]
+        catalog.metadata["plugin_catalog_target"] = {"name": name, "path": name}
+        results.append(catalog)
+    stamp_publication_evidence(results, tier=2, check_id="similarity")
+
+    emit_reports(results, report_formats=("json",), output_dir=tmp_path, basename="catalog", content_label="Plugin")
+    report = json.loads((tmp_path / "catalog.json").read_text(encoding="utf-8"))
+    assert "plugin_static" not in report
+    assert [result["plugin_catalog_target"]["path"] for result in report["results"]] == ["one", "two"]
+
+
 def test_projection_reduction_happens_once_for_six_adapters(monkeypatch):
     module = renderers()
     project = module.project_plugin_static
@@ -468,6 +527,37 @@ def test_conflicting_source_identity_is_explicit_and_never_a_static_pass():
     payload = api().project_plugin_static([*results, other]).payload()
     assert payload["status"] == "incomplete"
     assert "conflicting source" in json.dumps(payload).lower()
+
+
+@pytest.mark.parametrize("block", [None, "high", "critical", "medium-policy", "minimum-score"])
+def test_incomplete_only_gates_share_the_canonical_status_without_hiding_real_failures(block):
+    schema = ValidationResult(validator_name="Plugin Schema", metadata={"plugin": {"name": "partial-demo"}})
+    security = ValidationResult(validator_name="Security Scan")
+    security.mark_scan_incomplete("skillspector")
+    security.fail_gate("skillspector reports incomplete analysis: reference_unresolved at SKILL.md:4")
+    security.add_finding(Finding("SECURITY", Severity.MEDIUM, "rug-pull", "Retained advisory", "SKILL.md"))
+    results = [schema, security]
+    if block == "minimum-score":
+        quality = ValidationResult(validator_name="Quality Score")
+        quality.fail_gate("Quality score 50.0/100 is below the required 70/100 in SKILL.md")
+        results.append(quality)
+    elif block is not None:
+        security.add_structured_finding(
+            Finding("SECURITY", "medium" if block == "medium-policy" else block, "known-risk", "Known risk", "run.py"),
+            is_error=True,
+        )
+
+    output = renderers().render_plugin_static_reports(results, reporters=reporters())
+    report = json.loads(output["json"])
+
+    expected = "incomplete" if block is None else "failed"
+    assert report["overall_status"] == expected
+    assert report["plugin_static"]["status"] == expected
+    assert report["results"][1]["findings"][0]["message"] == "Retained advisory"
+    if block == "minimum-score":
+        assert "Quality score 50.0/100 is below the required 70/100" in output["html"]
+    elif block is not None:
+        assert "Known risk" in output["html"]
 
 
 def test_private_metadata_is_read_once_per_result_for_the_six_outputs():

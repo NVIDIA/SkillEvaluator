@@ -48,6 +48,7 @@ import yaml
 
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES, SCANNABLE_EXTENSIONS
 from skillevaluator.utils.structured_data import (
+    ScalarConstructionError,
     StructuredDataLimitError,
     StructuredDataSyntaxError,
     load_bounded_yaml,
@@ -794,6 +795,8 @@ def _manifest_reference_text(raw_text: str) -> str | None:
         except StructuredDataLimitError:
             return None
         except StructuredDataSyntaxError as exc:
+            if isinstance(exc.__cause__, ScalarConstructionError):
+                return None
             return raw_text if isinstance(exc.__cause__, yaml.YAMLError) else None
         except (RecursionError, TypeError, ValueError):
             return None

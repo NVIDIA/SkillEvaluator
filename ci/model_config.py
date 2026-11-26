@@ -7,13 +7,6 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from skillevaluator.provider_config import (
-    ProviderConfigurationError,
-    _normalize_anthropic_base_url,
-    resolve_embedding_provider,
-    resolve_llm_provider,
-)
-
 PROVIDER_KEYS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -21,6 +14,7 @@ PROVIDER_KEYS = {
     "openai-compatible": "SKILL_EVAL_LLM_API_KEY",
 }
 CREDENTIAL_KEYS = frozenset((*PROVIDER_KEYS.values(), "SKILL_EVAL_EMBEDDING_API_KEY"))
+HTTP_PROXY_ENV = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"})
 SAFE_ENV = frozenset(
     {
         "PATH",
@@ -31,12 +25,7 @@ SAFE_ENV = frozenset(
         "SSL_CERT_DIR",
         "REQUESTS_CA_BUNDLE",
         "CURL_CA_BUNDLE",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
+        *HTTP_PROXY_ENV,
         "DOCKER_HOST",
         "DOCKER_CONTEXT",
         "DOCKER_CONFIG",
@@ -60,6 +49,8 @@ def _model(value: str) -> str:
 
 
 def _api_root(value: str) -> str:
+    from skillevaluator.provider_config import _normalize_anthropic_base_url
+
     # Reuse the runtime's strict authority/path validation without Anthropic's
     # protocol-specific removal of the final /v1 segment.
     if len(value) > 4096:
@@ -71,17 +62,21 @@ def _api_root(value: str) -> str:
     return value.rstrip("/")
 
 
-def required_credentials(child: dict[str, str], tier: int) -> frozenset[str]:
-    """Credential variable names required by the selected tier, never values."""
-    keys = {PROVIDER_KEYS[child["SKILL_EVAL_LLM_PROVIDER"]]}
-    if tier == 2:
-        embedding = child["SKILL_EVAL_EMBEDDING_PROVIDER"]
+def _credential_keys(provider: str, embedding: str | None) -> frozenset[str]:
+    keys = {PROVIDER_KEYS[provider]}
+    if embedding:
         keys.add("SKILL_EVAL_EMBEDDING_API_KEY" if embedding == "openai-compatible" else PROVIDER_KEYS[embedding])
     return frozenset(keys)
 
 
-def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
-    """Forward selected provider settings, never ambient CI or vendor credentials."""
+def required_credentials(child: dict[str, str], tier: int) -> frozenset[str]:
+    """Credential variable names required by the selected tier, never values."""
+    return _credential_keys(
+        child["SKILL_EVAL_LLM_PROVIDER"], child["SKILL_EVAL_EMBEDDING_PROVIDER"] if tier == 2 else None
+    )
+
+
+def _providers(env: dict[str, str], tier: int) -> tuple[str, str, str]:
     if tier not in {1, 2, 3}:
         raise ValueError("Select a supported evaluation tier.")
     base_provider = env.get("SKILL_EVAL_PROVIDER") or "openai"
@@ -91,6 +86,35 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
     )
     if provider not in PROVIDER_KEYS or (tier == 2 and embedding not in {"openai", "nv_build", "openai-compatible"}):
         raise ValueError("Select supported chat and embedding providers.")
+    return base_provider, provider, embedding
+
+
+def _credentials(env: dict[str, str], provider: str, embedding: str | None) -> dict[str, str]:
+    selected = {key: env[key] for key in _credential_keys(provider, embedding) if env.get(key)}
+    if embedding == "openai-compatible" and env.get("SKILL_EVAL_LLM_API_KEY"):
+        selected.setdefault("SKILL_EVAL_EMBEDDING_API_KEY", env["SKILL_EVAL_LLM_API_KEY"])
+    return selected
+
+
+def tier2_credentials(env: dict[str, str]) -> dict[str, str]:
+    """Select container credentials without needing the evaluator runtime."""
+    try:
+        _, provider, embedding = _providers(env, 2)
+    except ValueError:
+        # The container reports invalid model configuration using the native runner.
+        return {}
+    return _credentials(env, provider, embedding)
+
+
+def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
+    """Forward selected provider settings, never ambient CI or vendor credentials."""
+    from skillevaluator.provider_config import (
+        ProviderConfigurationError,
+        resolve_embedding_provider,
+        resolve_llm_provider,
+    )
+
+    base_provider, provider, embedding = _providers(env, tier)
     child = {key: value for key, value in env.items() if key in SAFE_ENV}
     child.update(
         {
@@ -102,16 +126,9 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
             "SKILLEVALUATOR_HARBOR_VIEWER_UPLOAD": "false",
         }
     )
-    selected_providers = {provider}
     if tier == 2:
         child["SKILL_EVAL_EMBEDDING_PROVIDER"] = embedding
-        selected_providers.add(embedding)
-    for selected in selected_providers - {"openai-compatible"}:
-        key = PROVIDER_KEYS[selected]
-        if env.get(key):
-            child[key] = env[key]
-    if provider == "openai-compatible" and env.get("SKILL_EVAL_LLM_API_KEY"):
-        child["SKILL_EVAL_LLM_API_KEY"] = env["SKILL_EVAL_LLM_API_KEY"]
+    child.update(_credentials(env, provider, embedding if tier == 2 else None))
     same_provider = provider == base_provider
     model = env.get(f"SKILL_EVAL_TIER{tier}_MODEL") if tier != 2 else None
     # Tier 1 may opt into the provider default independently of Tier 2.
@@ -125,9 +142,6 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
         child["SKILL_EVAL_LLM_BASE_URL"] = _api_root(base_url)
     if tier == 2:
         if embedding == "openai-compatible":
-            embedding_key = env.get("SKILL_EVAL_EMBEDDING_API_KEY") or env.get("SKILL_EVAL_LLM_API_KEY")
-            if embedding_key:
-                child["SKILL_EVAL_EMBEDDING_API_KEY"] = embedding_key
             embedding_url = env.get("SKILL_EVAL_EMBEDDING_BASE_URL") or env.get("SKILL_EVAL_BASE_URL")
             if embedding_url:
                 child["SKILL_EVAL_EMBEDDING_BASE_URL"] = _api_root(embedding_url)
@@ -149,9 +163,6 @@ def model_environment(env: dict[str, str], tier: int) -> dict[str, str]:
             resolve_embedding_provider(validation)
     except (ProviderConfigurationError, ValueError):
         raise ValueError("Selected provider configuration is incomplete or invalid.") from None
-    # Only the selected tier's routes are validated or receive credentials.
-    for key in CREDENTIAL_KEYS - required_credentials(child, tier):
-        child.pop(key, None)
     return child
 
 

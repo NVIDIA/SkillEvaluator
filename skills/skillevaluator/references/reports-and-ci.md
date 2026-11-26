@@ -45,6 +45,12 @@ Add `junit` to `-r` when the CI system shows native test reports (GitLab
 `<skill>/skillevaluator-output-<timestamp>.junit.xml` per skill. JUnit
 failures follow the same gate as the exit code.
 
+Add `github` to `-r` when a GitHub Actions job runs the CLI itself and needs
+inline annotations without uploading SARIF, for example `-r cli,github`.
+The format prints to stdout and does not write a file. GitHub shows at most
+10 error and 10 warning annotations per step; remaining findings are counted
+on the closing notice.
+
 Adopt progressively: run with `|| true` (advisory), then gate on Tier 1,
 raise `--min-score`, add `--llm --tiers 1,2` with a masked provider secret,
 and finally an advisory Tier 3 job (`--block-on-agent-eval` when ready).

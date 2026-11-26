@@ -56,4 +56,4 @@ read `SKILL.md`, ran the skill's scripts or used the skill (`skill_execution`
 scores that). `tier3 validate` warns about common wordings of these; it is a
 heuristic, so review the cases too.
 
-For generation and refinement commands, see [Guided dataset generation](tier3-dataset-generation.md).
+For generation and refinement commands, see `tier3-dataset-generation.md` in this folder.

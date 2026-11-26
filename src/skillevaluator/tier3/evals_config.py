@@ -24,6 +24,7 @@ from skillevaluator.quality_config import _yaml_error_detail
 from skillevaluator.tier3.harbor import canonical_agent_name
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 from skillevaluator.utils.structured_data import (
+    ScalarConstructionError,
     StructuredDataLimitError,
     StructuredDataSyntaxError,
     _UniqueKeySafeLoader,
@@ -44,8 +45,9 @@ GRADING_MODE_ALIASES = {
 }
 GRADING_MODES = {"default", "default_plus_custom", "custom_only", *GRADING_MODE_ALIASES}
 
-_TOP_LEVEL_KEYS = {"schema_version", "harbor", "skill_workspace", "grading"}
+_TOP_LEVEL_KEYS = {"schema_version", "harbor", "skill_workspace", "grading", "plugin"}
 _HARBOR_KEYS = {
+    "trial_retries",
     "task_source",
     "custom_dockerfile_mode",
     "base_image_mode",
@@ -206,11 +208,11 @@ def _parse_config_text(text: str, config_path: Path) -> Any:
             return yaml.load(text, Loader=_UniqueKeySafeLoader)  # nosec B506
     except StructuredDataLimitError as e:
         raise EvalsConfigError(f"{config_path}: invalid YAML: {e}") from e
-    except yaml.YAMLError as e:
-        raise EvalsConfigError(f"{config_path}: invalid YAML: {_yaml_error_text(e)}") from e
-    except (ValueError, IndexError, KeyError, AttributeError, TypeError) as e:
+    except (ScalarConstructionError, ValueError, IndexError, KeyError, AttributeError, TypeError) as e:
         # SafeLoader's scalar constructors raise these for values such as ``!!int abc`` or the date ``2026-13-01``.
         raise EvalsConfigError(f"{config_path}: invalid YAML: cannot parse a value") from e
+    except yaml.YAMLError as e:
+        raise EvalsConfigError(f"{config_path}: invalid YAML: {_yaml_error_text(e)}") from e
 
 
 def _yaml_error_text(exc: yaml.YAMLError) -> str:
@@ -247,6 +249,21 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
         raise EvalsConfigError(f"{config_path}: schema_version must be 1")
 
     out: dict[str, Any] = {"schema_version": 1}
+    if "plugin" in raw:
+        plugin_raw = raw["plugin"]
+        if not isinstance(plugin_raw, dict):
+            raise EvalsConfigError(f"{config_path}: plugin must be a mapping")
+        unknown = _unknown_keys(plugin_raw, {"load", "lift_mode"}, config_path, "plugin")
+        if unknown:
+            raise EvalsConfigError(f"{config_path}: unknown plugin key(s): {', '.join(sorted(unknown))}")
+        plugin = {}
+        for key, choices in (
+            ("load", {"wrapper", "native", "auto"}),
+            ("lift_mode", {"effectiveness", "integration", "both", "ladder"}),
+        ):
+            if key in plugin_raw:
+                plugin[key] = _enum(plugin_raw[key], choices, config_path, f"plugin.{key}")
+        out["plugin"] = plugin
     harbor_raw = raw.get("harbor")
     if harbor_raw is not None:
         if not isinstance(harbor_raw, dict):
@@ -257,6 +274,11 @@ def _validate_config(raw: dict[str, Any], config_path: Path) -> dict[str, Any]:
             raise EvalsConfigError(f"{config_path}: unknown harbor key(s): {', '.join(sorted(unknown_harbor))}")
 
         harbor: dict[str, Any] = {}
+        if "trial_retries" in harbor_raw:
+            retries = _int_at_least(harbor_raw["trial_retries"], 0, config_path, "harbor.trial_retries")
+            if retries > 5:
+                raise EvalsConfigError(f"{config_path}: harbor.trial_retries must be between 0 and 5")
+            harbor["trial_retries"] = retries
         if "task_source" in harbor_raw:
             harbor["task_source"] = _enum(
                 harbor_raw["task_source"],

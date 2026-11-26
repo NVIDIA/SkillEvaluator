@@ -21,6 +21,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from packaging.version import InvalidVersion, Version
+
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.scanner_install import (
@@ -49,6 +51,8 @@ CVSS_THRESHOLDS: dict[Severity, float] = {
 # Gitleaks normally uses exit 1 for both findings and operational errors.
 # Every invocation overrides the findings code so those states are distinct.
 GITLEAKS_FINDINGS_EXIT_CODE = 10
+
+_MIN_SKILLSPECTOR_VERSION = Version(SKILLSPECTOR_VERSION)
 
 
 def cvss_to_severity(score: float) -> Severity:
@@ -166,11 +170,10 @@ class ExternalTool:
             override_env: Optional environment variable containing an explicit
                 absolute executable path. Invalid overrides fail closed rather
                 than silently falling back to another executable.
-            managed: Fall back to SkillEvaluator's pinned provisioning when the
-                tool is missing, or automatically discovered SkillSpector is not
-                the pinned release: the verified SkillSpector wheel through
-                ``uv tool run`` (a uv on PATH, else the one installed with
-                SkillEvaluator), or the downloaded Gitleaks binary.
+            managed: Provision the pinned SkillSpector wheel through
+                ``uv tool run`` when the scanner is missing or its discovered
+                version is unsupported or unverified. Provision the pinned
+                Gitleaks binary when Gitleaks is missing.
         """
         self.name = name
         self.command = command or name
@@ -213,13 +216,21 @@ class ExternalTool:
                 elif self._path is None:
                     self._resolve_managed()
 
-    def _require_pinned_skillspector(self, version: str | None) -> None:
-        """Keep automatic SkillSpector resolution on the supported pinned release."""
-        if version == SKILLSPECTOR_VERSION:
-            return
+    def _accept_skillspector_candidate(self, version: str | None) -> bool:
+        """Keep a supported stable release or switch to the managed runtime."""
+        try:
+            parsed_version = Version(version) if version is not None else None
+        except InvalidVersion:
+            parsed_version = None
+        if (
+            parsed_version is not None
+            and not parsed_version.is_prerelease
+            and parsed_version >= _MIN_SKILLSPECTOR_VERSION
+        ):
+            return True
         detail = (
             f"Automatically discovered SkillSpector {version or '(version could not be verified)'} "
-            f"at {self._path}; expected pinned version {SKILLSPECTOR_VERSION}."
+            f"at {self._path}; expected a stable release >= {SKILLSPECTOR_VERSION}."
         )
         self._path = None
         self._version = None
@@ -239,6 +250,7 @@ class ExternalTool:
                 "for an intentional override."
             )
             logger.warning("%s", self._configuration_error)
+        return False
 
     def _resolve_managed(self) -> None:
         if self.command == "skillspector":
@@ -403,8 +415,7 @@ class ExternalTool:
                 else None
             )
             self._version = version or ""
-            self._require_pinned_skillspector(version)
-            if version == SKILLSPECTOR_VERSION and args == ["--version"]:
+            if self._accept_skillspector_candidate(version) and args == ["--version"]:
                 return ToolResult(True, probe.stdout or "", probe.stderr or "", probe.returncode)
             timeout -= time.monotonic() - started
 

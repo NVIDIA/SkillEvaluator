@@ -167,6 +167,31 @@ description: "Description for {name}"
         assert result.passed
         assert any("2 rule file(s)" in msg for msg in result.messages)
 
+    @pytest.mark.parametrize("scan_repository", [False, True])
+    @pytest.mark.parametrize("include_failure", [False, True])
+    def test_collection_keeps_passing_rule_warnings(
+        self, validator, valid_rule_file, tmp_path, scan_repository, include_failure
+    ):
+        rule_dir = valid_rule_file.parent
+        warning_rule = rule_dir / "Bad_Name.mdc"
+        warning_rule.write_text(
+            "---\nalwaysApply: false\ntitle: Warning rule\ndescription: A rule with advisory issues\n---\n"
+        )
+        individual = validator.validate(warning_rule)
+        assert individual.passed
+        assert len(individual.warnings) == 2
+        if include_failure:
+            (rule_dir / "broken-rule.mdc").write_text("---\ntitle: Missing required fields\n---\n")
+
+        result = validator.validate(tmp_path if scan_repository else rule_dir)
+
+        assert result.passed is not include_failure
+        assert result.warnings == [f"[Bad_Name] {warning}" for warning in individual.warnings]
+        assert result.summary.warnings == individual.summary.warnings
+        assert any(detail.check_name == "Bad_Name" for detail in result.success_details)
+        if include_failure:
+            assert all(error.startswith("[broken-rule] ") for error in result.errors)
+
     def test_validate_nonexistent_path(self, validator: RulesSchemaValidator, tmp_path: Path):
         """Test validation of nonexistent path."""
         result = validator.validate(tmp_path / "nonexistent.mdc")

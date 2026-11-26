@@ -30,6 +30,18 @@ def _write_completed_run(root: Path, run_id: str) -> Path:
     return run_dir
 
 
+@pytest.mark.parametrize("artifact", ["run_config.json", "result.json"])
+def test_latest_results_skips_run_with_deeply_nested_json(tmp_path: Path, artifact: str) -> None:
+    skill_path = tmp_path / "demo"
+    root = skill_path / "evals" / "results"
+    healthy = _write_completed_run(root, "20260705_120000")
+    broken = _write_completed_run(root, "20260705_130000")
+    depth = 1_000_000  # Decoder stack limits differ across supported Python versions.
+    (broken / artifact).write_text('{"nested":' + "[" * depth + "0" + "]" * depth + "}", encoding="utf-8")
+
+    assert resolve_latest_results(skill_path, environ={}) == healthy
+
+
 def _write_authenticated_current_run(
     root: Path,
     run_id: str,
@@ -600,3 +612,35 @@ def test_latest_results_rejects_windows_reparse_candidates(
     monkeypatch.setattr(results_location, "_path_is_link_or_reparse", mock_windows_reparse)
 
     assert resolve_latest_results(skill_path, cli_results_dir, environ={}) == expected
+
+
+@pytest.mark.parametrize(
+    ("requested", "configured", "expected"),
+    [
+        pytest.param("requested", "~/configured", "requested", id="request-wins"),
+        pytest.param(None, "~/configured", "home/configured", id="environment-expands-home"),
+        pytest.param(None, "", "root/results", id="empty-environment"),
+        pytest.param(None, None, "root/results", id="unset-environment"),
+    ],
+)
+def test_results_directory_prefers_request_then_environment_then_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    requested: str | None,
+    configured: str | None,
+    expected: str,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    if configured is None:
+        monkeypatch.delenv(results_location.ENV_RESULTS_DIR, raising=False)
+    else:
+        monkeypatch.setenv(results_location.ENV_RESULTS_DIR, configured)
+
+    selected = results_location.plugin_results_directory(
+        tmp_path / "root", None if requested is None else tmp_path / requested
+    )
+
+    assert selected == tmp_path / expected
+    assert list(tmp_path.iterdir()) == []

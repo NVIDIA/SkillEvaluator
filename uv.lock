@@ -2617,7 +2617,7 @@ wheels = [
 
 [[package]]
 name = "skillevaluator"
-version = "1.0.1"
+version = "1.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "bandit" },

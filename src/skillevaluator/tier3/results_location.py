@@ -56,6 +56,14 @@ def legacy_results_root(skill_path: Path) -> Path:
     return skill_path.expanduser().resolve() / "evals" / "results"
 
 
+def plugin_results_directory(plugin_root: Path, requested: Path | None = None) -> Path:
+    """Select a public plugin results base without creating an authored evals tree."""
+    if requested is not None:
+        return requested
+    configured = os.environ.get(ENV_RESULTS_DIR)
+    return Path(configured).expanduser() if configured else plugin_root / "results"
+
+
 def skill_results_name(skill_path: Path) -> str:
     """Return the directory name used under an external results root."""
     return skill_path.expanduser().resolve().name
@@ -219,7 +227,7 @@ def _read_stable_json(
     opened, raw = observed
     try:
         payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return None
     return payload, opened, raw
 

@@ -73,9 +73,12 @@ grader to replace the default evaluator metrics.
    metadata.
 
 2. Map benchmark fields into evaluator inputs.
-   Use benchmark prompts or prompt variants as `question` entries. Use the
-   target skill as `expected_skill`. Put each case's required starter files
-   under `evals/files/<case-id>/`, and declare
+   Prefer the agentskills.io dataset shape: put the target skill name in the
+   top-level `skill_name`, and use benchmark prompts or prompt variants as
+   per-case `prompt` fields. Use `question` only when extending an existing
+   legacy-format dataset. Per-case `expected_skill` stays valid, with `null` for
+   a negative case. Put each case's required starter files under
+   `evals/files/<case-id>/`, and declare
    `files: ["evals/files/<case-id>"]` on every corresponding eval entry. Do not
    omit `files` in a multi-case dataset, because omission intentionally stages
    the entire shared directory for legacy compatibility. Preserve
@@ -103,7 +106,7 @@ grader to replace the default evaluator metrics.
 
 5. Validate before running.
    ```bash
-   skillevaluator validate <skill-dir> --harbor-contract
+   skillevaluator tier3 validate <skill-dir> --harbor-contract
    ```
    Fix missing files, invalid Python, missing reward output, and native Harbor
    ID mismatches before evaluation.

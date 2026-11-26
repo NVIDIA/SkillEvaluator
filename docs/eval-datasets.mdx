@@ -168,6 +168,14 @@ before rerunning CI.
 | `expected_script` | No | Script the agent should run; `null` if none applies. |
 | `acceptable_skills` | No | Closely related skills that earn partial routing credit (legacy alias: `acceptable_alternates`). |
 
+`expected_skill` must be a skill name or `null` (use `null` for a negative case,
+not `false`), and `assertions` (legacy `expected_behavior`) must be a list of
+strings. `tier3 validate`, the Tier 3 step of `validate` and CI's strict dataset
+preflight report anything else, and a whitespace-only `expected_skill`, as an
+error before the run. Without the check, a number or list in `expected_skill`
+fails late with a `TypeError` while tasks are generated, and a whitespace-only
+name is scored as a positive case that never matches.
+
 Use JSON `null` when no script is expected. Case-insensitive whole-value
 placeholders such as `"None"`, `"null"`, `"N/A"`, `"-"`, empty strings, and
 whitespace-only values are treated as `null`; exact matching keeps real script
@@ -209,6 +217,16 @@ mentioned in the response. `output_matches` uses a regular expression and
 Unknown check types and invalid fields are dataset-validation errors. On a
 without-skill baseline, checks for scripts inside the evaluated skill are not
 checked because that skill is not installed.
+
+In the unreleased checkout, runtime `output_matches` checks use isolated Python
+workers with a default 1-second limit per pattern and a shared 5-second matching
+budget per case. A timeout or an exhausted matching budget counts as a failed
+check and stays in the `behavior_check` denominator. Invalid-pattern errors
+reported by a worker and worker startup failures remain not checked. Later
+literal checks still run. Set
+`SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC` and `SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC`
+in the host environment to allow slower legitimate patterns; both accept
+positive finite seconds. See [Output-pattern check limits](/skills/skillevaluator/environment-variables#output-pattern-check-limits).
 
 For an exact final-response format, use an anchored `output_matches` check
 and keep semantic requirements in `expected_behavior` (or `assertions`). For
@@ -650,9 +668,14 @@ url = "http://localhost:8080"
 
 [[mcp_servers]]
 name = "my-tool"
-command = "python /workspace/tools/server.py"
+command = "python"
+args = ["/workspace/tools/server.py"]
 transport = "stdio"
 ```
+
+[MCP Servers and Sidecars](/skills/skillevaluator/mcp-servers) explains where `localhost`,
+service names and commands resolve in each backend. For a skill whose tool needs
+a login, see [Cookbook: Evaluate a CLI Skill That Needs Login](/skills/skillevaluator/cookbook-authenticated-cli).
 
 <Note>
   In Docker mode, Claude Code, Codex, and OpenCode setup no longer installs the

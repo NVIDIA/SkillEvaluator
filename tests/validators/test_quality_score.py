@@ -1555,7 +1555,7 @@ class TestReliabilityErrorHandlingConfig:
         assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
         assert MENTION_MESSAGE not in [message for message, _ in _reliability_issues(result)]
 
-    @pytest.mark.parametrize("text", ["errorless", "failsafe", "validator", "éerror", "处理error时", "error٣"])
+    @pytest.mark.parametrize("text", ["errorless", "failsafe", "validator", "éerror", "处理errorless时", "error٣"])
     def test_terms_inside_other_words_do_not_record_error_handling(self, tmp_path: Path, text: str):
         skill_dir = _write_issue_skill(tmp_path, troubleshooting=f"Report {text} output to the owner.")
 

@@ -174,6 +174,9 @@ class TestLanguageNeutralWordLists:
         ("text", "term"),
         [
             ("报告错误信息并处理异常", "错误"),
+            ("处理error时", "error"),
+            ("从目录中RUN探针。", "run"),
+            ("利用APIします", "api"),
             ("Используй для анализа.", "для"),
             ("не\nудалось запустить", "не удалось"),
             ("built for speed", "for"),
@@ -189,11 +192,29 @@ class TestLanguageNeutralWordLists:
             ("некогда", "когда"),
             ("performance", "for"),  # English stays whole-word
             ("forêt", "for"),
-            ("处理error时", "error"),  # an English term does not match inside Chinese text
+            ("在forêt中", "for"),
+            ("在платформа中", "форма"),
+            ("处理error_code时", "error"),
+            ("处理error2时", "error"),
         ],
     )
     def test_terms_do_not_match_inside_other_words(self, text: str, term: str):
         assert not _contains_any_term(text, [term])
+
+    def test_english_terms_in_chinese_error_and_instruction_text(self, tmp_path: Path):
+        body = CHINESE_BODY.replace("运行探针", "从目录中RUN探针").replace("出现错误", "出现error")
+        skill_dir = _write_localized_skill(
+            tmp_path,
+            name="build-probe-zh",
+            description="当需要分析构建日志时使用此技能，用于查找多余的步骤。",
+            body=body,
+        )
+
+        result = _validate_with(skill_dir, tmp_path)
+
+        assert result.findings == []
+        assert result.metadata["quality_scores"]["metrics"]["has_error_handling"] is True
+        assert _dimension_scores(result)["efficiency"] == 100.0
 
     def test_russian_vague_words_are_still_reported(self, tmp_path: Path):
         skill_dir = _write_issue_skill(tmp_path, description="Делает разное и что-то общее для проекта.")

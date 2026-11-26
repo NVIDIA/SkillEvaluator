@@ -61,9 +61,10 @@ _LEGACY_ENGLISH_INSTRUCTION_HEADINGS = ("## Instructions", "## Usage")
 # Scripts written without spaces between words: CJK ideographs (with their extensions and
 # compatibility forms), kana, and the CJK radicals. A term that starts or ends with one of
 # these characters has no word boundary to check on that side, so it matches as a substring.
-_UNSPACED_SCRIPT_RE = re.compile(
-    "[\u2e80-\u2fdf\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003ffff]"
-)
+_UNSPACED_SCRIPT_CHARS = "\u2e80-\u2fdf\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0003ffff"
+_UNSPACED_SCRIPT_RE = re.compile(f"[{_UNSPACED_SCRIPT_CHARS}]")
+# Word characters from an unspaced script can delimit a term written in a spaced script.
+_SPACED_SCRIPT_WORD_CHAR = rf"[^\W{_UNSPACED_SCRIPT_CHARS}]"
 # Role and control tags that stay reportable in ``argument-hint`` even when they
 # look like a CLI placeholder, including nested forms (``<system<payload>>``) and a
 # role word with a message-part suffix (``<system_prompt>``, ``<toolCall>``,
@@ -188,15 +189,15 @@ def _term_pattern(term: str, *, flexible_spacing: bool = True) -> str:
     """Regex for one word or phrase that does not match inside another word.
 
     Whitespace inside a multi-word term matches any run of whitespace, so wrapped text
-    still matches. Word boundaries are Unicode-aware: ``for`` does not match inside
-    ``forêt`` or ``платформа``. A side of the term that starts or ends in a script without
-    spaces between words, such as Chinese, has no boundary check, so ``错误`` matches
-    inside ``报告错误信息`` while ``error`` still does not match inside ``处理error时``.
+    still matches. Unicode word boundaries include accented letters, digits, and underscores.
+    A side of the term written in an unspaced script matches within running text, so ``错误``
+    matches inside ``报告错误信息``. Unspaced script characters can also delimit terms
+    from other scripts, so ``error`` matches inside ``处理error时``.
     """
     words = term.split()
     body = r"\s+".join(map(re.escape, words)) if flexible_spacing else re.escape(term.strip())
-    left = "" if _UNSPACED_SCRIPT_RE.match(words[0][0]) else r"(?<!\w)"
-    right = "" if _UNSPACED_SCRIPT_RE.match(words[-1][-1]) else r"(?!\w)"
+    left = "" if _UNSPACED_SCRIPT_RE.match(words[0][0]) else f"(?<!{_SPACED_SCRIPT_WORD_CHAR})"
+    right = "" if _UNSPACED_SCRIPT_RE.match(words[-1][-1]) else f"(?!{_SPACED_SCRIPT_WORD_CHAR})"
     return f"{left}{body}{right}"
 
 

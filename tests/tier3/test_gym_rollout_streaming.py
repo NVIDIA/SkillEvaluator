@@ -32,14 +32,23 @@ def test_rollout_loading_avoids_whole_file_text_copies(tmp_path):
     assert all(row["payload"] == payload for row in rows)
     # Parsed rows must remain in memory; avoid retaining the whole list of
     # split input lines alongside those parsed rows.
-    assert peak < 2 * file_size, f"{file_size:,}-byte JSONL required {peak:,} traced bytes"
+    assert peak < 1.5 * file_size, f"{file_size:,}-byte JSONL required {peak:,} traced bytes"
 
 
-def test_unreadable_nested_row_keeps_healthy_rows_on_both_sides(tmp_path):
+def test_unreadable_nested_row_keeps_healthy_rows_on_both_sides(tmp_path, monkeypatch):
     path = tmp_path / "rollouts.jsonl"
-    nested = '{"nested":' + "[" * 100_000 + "0" + "]" * 100_000 + "}"
+    nested = '{"nested":[]}'
     path.write_text('{"task_id":"first"}\n' + nested + '\n{"task_id":"last"}\n', encoding="utf-8")
     errors = []
+    # Decoder nesting limits differ between supported Python versions.
+    original_loads = json.loads
+
+    def decode_row(line):
+        if line.strip() == nested:
+            raise RecursionError("JSON decoder nesting limit")
+        return original_loads(line)
+
+    monkeypatch.setattr(json, "loads", decode_row)
 
     assert read_rollouts(path, errors) == [{"task_id": "first"}, {"task_id": "last"}]
     assert errors == ["NeMo Gym wrote 1 unreadable line(s) to rollouts.jsonl; those rollouts were not collected"]

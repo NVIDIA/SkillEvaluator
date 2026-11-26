@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from packaging.version import InvalidVersion, Version
+from packaging.version import Version
 
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
@@ -218,16 +218,8 @@ class ExternalTool:
                     self._resolve_managed()
 
     def _accept_skillspector_candidate(self, version: str | None) -> bool:
-        """Keep a supported stable release or switch to the managed runtime."""
-        try:
-            parsed_version = Version(version) if version is not None and SEMVER_RE.fullmatch(version) else None
-        except InvalidVersion:
-            parsed_version = None
-        if (
-            parsed_version is not None
-            and not parsed_version.is_prerelease
-            and parsed_version >= _MIN_SKILLSPECTOR_VERSION
-        ):
+        """Keep a supported plain X.Y.Z release or switch to the managed runtime."""
+        if version is not None and SEMVER_RE.fullmatch(version) and Version(version) >= _MIN_SKILLSPECTOR_VERSION:
             return True
         detail = (
             f"Automatically discovered SkillSpector {version or '(version could not be verified)'} "

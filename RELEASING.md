@@ -214,10 +214,12 @@ it for both code and docs-only changes.
 Qualify the exact generated references in a disposable GitHub repository.
 Check a credentials-free scan, a failing same-repository PR scan with signed
 evidence and a successful private Pages deployment that updates **Open full
-report**. Test a publisher from the candidate release against retained evidence
-from the previous stable scanner. The scan and its feedback can resolve the
-channel at different times. Include queued scans, reruns and the full artifact
-retention period when reviewing a publisher compatibility change.
+report**. Also verify that the comments-only workflow updates the standard
+comment with Pages disabled. Test feedback from the candidate release against
+retained evidence from the previous stable scanner. The scan and its feedback
+can resolve the channel at different times. Include queued scans, reruns and
+the full artifact retention period when reviewing a publisher compatibility
+change.
 
 Promotion verifies the latest immutable release and checks its CI archive and
 runtime identities against the published artifact manifest.

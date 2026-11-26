@@ -6,6 +6,8 @@ stable_ref=refs/tags/stable
 version_pattern="^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$"
 scanner=.github/workflows/skill-checks-stable.yml
 publisher=.github/workflows/publish-skill-reports-stable.yml
+commenter=.github/workflows/comment-skill-checks-stable.yml
+commenter_template=ci/templates/stable/${commenter##*/}
 gitlab=ci/gitlab/stable-tier1.yml
 gitlab_template=ci/templates/stable/${gitlab##*/}
 event=${GITHUB_EVENT_NAME:-}
@@ -138,11 +140,15 @@ for workflow in "$scanner" "$publisher"; do
     git cat-file blob "$candidate:$template" > "$scratch/$template"
     git cat-file blob "$candidate:$workflow" > "$scratch/$workflow"
 done
-for file in "$gitlab_template" "$gitlab"; do
+for file in "$gitlab_template" "$gitlab" "$commenter_template" "$commenter"; do
     if git cat-file -e "$candidate:$file" 2>/dev/null; then
         git cat-file blob "$candidate:$file" > "$scratch/$file"
     fi
 done
+if [[ ! -f "$scratch/$commenter" && $previous ]] && git cat-file -e "$previous_commit:$commenter" 2>/dev/null; then
+    echo "The next stable release must retain the comments-only workflow." >&2
+    exit 1
+fi
 if [[ ! -f "$scratch/$gitlab" ]]; then
     if [[ $bootstrapping == true ]]; then
         echo "The reviewed bootstrap commit must contain the GitLab stable include." >&2

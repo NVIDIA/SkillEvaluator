@@ -8,6 +8,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - The reusable Tier 1 workflow can opt in to uploading complete full-scan
   SARIF results to GitHub Code Scanning with a caller-selected category.
+- GitHub stable channel setups can opt into the standard skill check PR comment
+  without GitHub Pages or version pins in the caller workflow. Full reports
+  remain downloadable from the Actions run.
 - Run bounded Tier 1 component scans and Tier 2 overlap checks on supported
   bundles. Reports include component inventory and scan evidence. Saved
   runtime evidence can be rendered again without rerunning the evaluation.
@@ -21,6 +24,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Tier 1 accepts automatically discovered stable SkillSpector releases
+  starting at 2.13.7. Managed installs and the Tier 1 CI image pin 2.13.7.
 - Tier 1 plugin reports label the validator `Plugin Schema & Component Checks` and
   use `manifest_missing_or_unsafe` for absent or unsafe manifests. Manifest schema
   validation runs even when `--checks` selects other checks. Auto-detection

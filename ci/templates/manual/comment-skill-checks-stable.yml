@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copy to .github/workflows/comment-skill-checks.yml alongside the stable scan.
+# Grant id-token: write in skill-checks.yml, then approve that file's Git blob below.
+name: Comment skill checks
+on:
+  workflow_run:
+    workflows: [Skill checks]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Completed Skill checks run to comment on
+        type: string
+        required: true
+      run-attempt:
+        description: Completed attempt number for that run
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  comment:
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    uses: NVIDIA/SkillEvaluator/.github/workflows/comment-skill-checks-stable.yml@stable
+    with:
+      run-id: ${{ format('{0}', github.event.workflow_run.id || inputs.run-id) }}
+      run-attempt: ${{ format('{0}', github.event.workflow_run.run_attempt || inputs.run-attempt) }}
+      # Replace with: git hash-object .github/workflows/skill-checks.yml
+      trusted-caller-blobs: APPROVED_SCAN_FILE_BLOB

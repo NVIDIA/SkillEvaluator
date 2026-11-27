@@ -61,17 +61,21 @@ def _finding_severity_value(finding: Finding) -> str:
 
 
 def _rule_descriptor(finding: Finding, validator_name: str) -> dict[str, Any]:
+    """Return a rule descriptor that is independent of any one finding.
+
+    One descriptor is kept per rule ID, so it must not carry a finding's
+    message: GitHub shows the rule description next to every result for the
+    rule, and the last finding would describe all of them. Each result keeps
+    its own ``message``.
+    """
     rule_id = _rule_id(validator_name, finding.check_name)
     severity = _finding_severity_value(finding)
-    descriptor: dict[str, Any] = {
+    return {
         "id": rule_id,
         "name": finding.check_name,
         "shortDescription": {"text": finding.check_name},
         "defaultConfiguration": {"level": _severity_to_level(severity)},
     }
-    if finding.message:
-        descriptor["fullDescription"] = {"text": finding.message}
-    return descriptor
 
 
 def _positive_start_line(line_number: Any) -> int | None:
@@ -226,8 +230,20 @@ def _physical_location(
     workspace_root: Path | None,
     scan_root: Path | None = None,
 ) -> dict[str, Any] | None:
+    """Return the result location, anchoring skill-wide findings at the skill.
+
+    GitHub Code Scanning displays a result only when it has a location. A
+    finding without a file describes the scanned skill as a whole, so it is
+    reported at the skill directory when that is known.
+    """
     if not finding.file_path:
-        return None
+        if scan_root is None:
+            return None
+        return {
+            "physicalLocation": {
+                "artifactLocation": {"uri": _normalize_artifact_uri(".", workspace_root, scan_root)},
+            },
+        }
     location: dict[str, Any] = {
         "artifactLocation": {
             "uri": _normalize_artifact_uri(finding.file_path, workspace_root, scan_root),

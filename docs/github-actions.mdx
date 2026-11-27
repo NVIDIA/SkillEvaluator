@@ -166,6 +166,55 @@ error, 10 warning, and 10 notice annotations per step; see
 [GitHub annotations](/skills/skillevaluator/reports#github-annotations).
 
 <AccordionGroup>
+  <Accordion title="Publish Tier 1 findings to Code Scanning">
+    Pin the reusable workflow at a revision that includes the `upload-sarif`
+    input; check whether your chosen release or stable template exposes it.
+    In a caller of `evaluate-skills.yml`, grant the job `contents: read`,
+    `actions: read`, and `security-events: write`, and add:
+
+    ```yaml
+    with:
+      scan-mode: all
+      upload-sarif: true
+      sarif-category: skillevaluator-skills
+    ```
+
+    Keep the existing required `image` and other inputs. Code Scanning must be
+    available and enabled for the repository; private and internal repositories
+    require GitHub Code Security. The caller cannot grant a reusable workflow
+    more permissions than it has itself. Fork PR tokens may be read-only, and
+    the upload action ignores the requested commit on fork PRs. Full-scan
+    publication therefore skips with a warning on fork PRs rather than
+    attributing head results to the merge commit. The scan verdict still
+    determines the job outcome, so a successful job does not guarantee
+    SARIF was published. Publication is unsupported for
+    `pull_request_target`; do not use that event to run untrusted PR code with
+    a privileged token.
+
+    Upload is off by default. A complete full scan is uploaded even if its
+    policy verdict fails; strict and advisory verdicts retain their existing
+    meanings. Upload, missing-report, malformed-report, and incomplete-scan
+    errors fail the job. Artifacts remain available as before. Changed-only
+    scans, including PRs with no changed skills under `scan-mode: auto`, skip
+    publication to avoid replacing a complete baseline with partial results.
+    An empty or incomplete full scan also does not replace the baseline.
+
+    Keep the category stable for the same configured collection, and use a
+    distinct category for each independent workflow invocation or collection.
+    Run full scans on the default branch to refresh its baseline; a narrower
+    `paths` configuration under the same category can close alerts outside
+    that scope. To publish PR analyses, explicitly select `scan-mode: all`
+    for same-repository PRs and ensure the event's token can upload. Fork PRs
+    do not publish; run a full scan on the default branch after merging.
+
+    All findings share one SARIF run. GitHub rejects runs over 25,000 results
+    and includes only the 5,000 highest-priority results when a run exceeds
+    that display limit. The workflow warns in the run and step summary before
+    upload when the report exceeds 5,000 results; it still attempts the upload,
+    including when the report exceeds GitHub's 25,000-result limit. See
+    [GitHub's SARIF limits](https://docs.github.com/en/code-security/reference/code-scanning/sarif-support-for-code-scanning#file-compatibility)
+    when scanning large collections.
+  </Accordion>
   <Accordion title="Use advisory enforcement">
     The 1.2.1 bundle pins a matching workflow and scanner image with
     `enforcement-mode` support. For an existing 0.8.0 workflow, review both

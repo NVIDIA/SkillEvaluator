@@ -1807,6 +1807,101 @@ class TestSARIFReporter:
         assert automation == {"id": "/skillevaluator/catalog"}
         assert "name" not in automation
 
+    @staticmethod
+    def _skill_wide_result(**reporter_kwargs: Path | None) -> dict:
+        result = ValidationResult(validator_name="DEPENDENCIES", validator_description="deps")
+        result.add_finding(
+            Finding(
+                category="CVE",
+                severity=Severity.HIGH,
+                check_name="python-vulnerability",
+                message="requests 2.0.0 has a known vulnerability",
+                file_path="",
+                line_number=7,
+            )
+        )
+        reporter = SARIFReporter(include_timestamp=False, **reporter_kwargs)
+        [item] = json.loads(reporter.render_all([result]))["runs"][0]["results"]
+        return item
+
+    def test_finding_without_a_file_is_reported_at_the_skill_directory(self, tmp_path: Path) -> None:
+        skill = tmp_path / "repo" / "skills" / "demo"
+        skill.mkdir(parents=True)
+
+        item = self._skill_wide_result(workspace_root=tmp_path / "repo", scan_root=skill)
+
+        # GitHub displays a result only when it has a location; the line number
+        # is meaningless without a file and must not be attached to the directory.
+        assert item["locations"] == [{"physicalLocation": {"artifactLocation": {"uri": "skills/demo"}}}]
+        assert item["message"]["text"] == "requests 2.0.0 has a known vulnerability"
+
+    def test_finding_without_a_file_is_a_file_uri_outside_a_workspace(self, tmp_path: Path) -> None:
+        skill = tmp_path / "skills" / "demo"
+        skill.mkdir(parents=True)
+
+        item = self._skill_wide_result(workspace_root=None, scan_root=skill)
+
+        uri = item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        assert uri.startswith("file:///") and uri.endswith("/skills/demo")
+
+    def test_finding_without_a_file_or_scan_root_has_no_location(self) -> None:
+        item = self._skill_wide_result(workspace_root=None, scan_root=None)
+
+        assert "locations" not in item
+
+    def test_rule_descriptor_does_not_carry_one_findings_message(self) -> None:
+        result = ValidationResult(validator_name="QUALITY", validator_description="quality")
+        for message in ("No troubleshooting section documented", "Scripts may lack error handling: lookup.py"):
+            result.add_finding(
+                Finding(
+                    category="QUALITY",
+                    severity=Severity.LOW,
+                    check_name="quality_reliability",
+                    message=message,
+                    file_path="SKILL.md",
+                )
+            )
+
+        run = json.loads(SARIFReporter(include_timestamp=False).render_all([result]))["runs"][0]
+
+        [rule] = run["tool"]["driver"]["rules"]
+        assert rule == {
+            "id": "QUALITY/quality_reliability",
+            "name": "quality_reliability",
+            "shortDescription": {"text": "quality_reliability"},
+            "defaultConfiguration": {"level": "note"},
+        }
+        assert [item["message"]["text"] for item in run["results"]] == [
+            "No troubleshooting section documented",
+            "Scripts may lack error handling: lookup.py",
+        ]
+
+    def test_merge_catalog_sarif_rule_descriptions_do_not_name_one_skill(self) -> None:
+        from skillevaluator.reporting.sarif_reporter import merge_catalog_sarif_documents
+
+        documents = []
+        for skill in ("alpha", "beta"):
+            result = ValidationResult(validator_name="HYGIENE", validator_description="hygiene")
+            result.add_finding(
+                Finding(
+                    category="HYGIENE",
+                    severity=Severity.MEDIUM,
+                    check_name="name-mismatch",
+                    message=f"Skill name '{skill}-x' does not match directory '{skill}'",
+                    file_path="SKILL.md",
+                )
+            )
+            documents.append(json.loads(SARIFReporter(include_timestamp=False).render_all([result])))
+
+        run = merge_catalog_sarif_documents(documents)["runs"][0]
+
+        [rule] = run["tool"]["driver"]["rules"]
+        assert "alpha" not in json.dumps(rule) and "beta" not in json.dumps(rule)
+        assert [item["message"]["text"] for item in run["results"]] == [
+            "Skill name 'alpha-x' does not match directory 'alpha'",
+            "Skill name 'beta-x' does not match directory 'beta'",
+        ]
+
     def test_merge_catalog_sarif_preserves_incomplete_invocation(self) -> None:
         result = ValidationResult(validator_name="BANDIT", validator_description="Bandit")
         result.add_error("Bandit scan did not complete")

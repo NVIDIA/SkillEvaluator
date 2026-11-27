@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- The reusable Tier 1 workflow can opt in to uploading complete full-scan
+  SARIF results to GitHub Code Scanning with a caller-selected category.
 - GitHub stable channel setups can opt into the standard skill check PR comment
   without GitHub Pages or version pins in the caller workflow. Full reports
   remain downloadable from the Actions run.
@@ -36,6 +38,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- SARIF rule descriptors no longer carry one finding's message as the rule
+  `fullDescription`. GitHub Code Scanning showed the last finding's text next
+  to every result for that rule, including results from other skills in a
+  merged upload. The reusable Tier 1 workflow also drops that field from
+  reports produced by earlier images before merging them.
+- SARIF results for findings without a file, such as dependency CVE findings,
+  are reported at the scanned skill directory instead of without a location.
+  GitHub Code Scanning does not display a result that has no location, so
+  those findings were accepted by the upload and then silently absent. The
+  reusable Tier 1 workflow applies the same fallback to reports from earlier
+  images.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

@@ -592,6 +592,7 @@ def test_private_helper_loads_with_staged_sibling_imports(security, tmp_path):
         "shell_lexing.py",
         "script_invocation.py",
         "codex_tool_call_normalizer.py",
+        "hermes_tool_call_normalizer.py",
         "secret_redaction.py",
     ):
         shutil.copyfile(directory / name, tmp_path / name)

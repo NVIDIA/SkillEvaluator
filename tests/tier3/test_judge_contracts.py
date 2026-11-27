@@ -2301,8 +2301,8 @@ def test_judge_header_format_preservation_masks_escaped_secret_suffixes(text: st
 
 
 _GATE_FACTS = [
-    {"claim": "report.py", "observed": True},
-    {"claim": "summary.md", "observed": True},
+    {"claim": "report.py", "observed": True, "file_steps": {"change": 0}},
+    {"claim": "summary.md", "observed": True, "file_steps": {"change": 1}},
 ]
 
 

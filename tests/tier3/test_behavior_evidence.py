@@ -10,10 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.eval_core import atif_helpers
+from skillevaluator.tier3.eval_core import atif_helpers, checks
 from skillevaluator.tier3.eval_core.atif_helpers import (
     build_behavior_evidence,
     build_conversation_summary,
+)
+from skillevaluator.tier3.eval_core.log_converters import (
+    synthetic_trajectory_from_claude_stream_jsonl,
+    synthetic_trajectory_from_opencode_json,
 )
 
 # build_behavior_evidence called without max_chars reconciles its own budget
@@ -592,7 +596,11 @@ def test_behavior_evidence_user_request_allowance_is_capped_above_the_old_800() 
             {
                 "source": "agent",
                 "tool_calls": [
-                    {"tool_call_id": f"run-{idx}", "function_name": "Bash", "arguments": {"command": f"pytest -k t{idx}"}}
+                    {
+                        "tool_call_id": f"run-{idx}",
+                        "function_name": "Bash",
+                        "arguments": {"command": f"pytest -k t{idx}"},
+                    }
                 ],
                 "observation": {"results": [{"source_call_id": f"run-{idx}", "content": f"{idx} passed"}]},
             }
@@ -1110,12 +1118,12 @@ def test_seam_bundle_to_judge_behavior_check_retains_failed_command_and_claim(mo
     monkeypatch.setattr(llm_judge, "call_public_llm", fake_shared_llm)
     monkeypatch.setattr(template_module, "call_public_llm", fake_template_llm)
 
-    shared_bundle = atif_helpers.build_metric_evidence_bundles(
-        traj, question, expected_behavior=behaviors
-    )["behavior_check"]["prompt_evidence"]
-    template_bundle = template_module.build_metric_evidence_bundles(
-        traj, question, expected_behavior=behaviors
-    )["behavior_check"]["prompt_evidence"]
+    shared_bundle = atif_helpers.build_metric_evidence_bundles(traj, question, expected_behavior=behaviors)[
+        "behavior_check"
+    ]["prompt_evidence"]
+    template_bundle = template_module.build_metric_evidence_bundles(traj, question, expected_behavior=behaviors)[
+        "behavior_check"
+    ]["prompt_evidence"]
 
     shared_res = llm_judge.judge_behavior_check(shared_bundle, behaviors)
     template_res = template_module.judge_behavior_check(template_bundle, behaviors)
@@ -1242,12 +1250,12 @@ def test_verified_facts_preserve_final_response_in_behavior_judge_prompt(monkeyp
     monkeypatch.setattr(llm_judge, "call_public_llm", make_judge_stub(shared_prompts, len(behaviors)))
     monkeypatch.setattr(template_module, "call_public_llm", make_judge_stub(template_prompts, len(behaviors)))
 
-    shared_bundle = atif_helpers.build_metric_evidence_bundles(
-        traj, question, expected_behavior=behaviors
-    )["behavior_check"]
-    template_bundle = template_module.build_metric_evidence_bundles(
-        traj, question, expected_behavior=behaviors
-    )["behavior_check"]
+    shared_bundle = atif_helpers.build_metric_evidence_bundles(traj, question, expected_behavior=behaviors)[
+        "behavior_check"
+    ]
+    template_bundle = template_module.build_metric_evidence_bundles(traj, question, expected_behavior=behaviors)[
+        "behavior_check"
+    ]
 
     assert shared_bundle == template_bundle
     assert len(shared_bundle["verified"]) == 12
@@ -1316,11 +1324,7 @@ def test_compact_behavior_conversation_preserves_final_response_section(monkeypa
             420,
             "400",
             lambda: (
-                "FINAL RESPONSE\n"
-                + ("F" * 370)
-                + "\nEND_FINAL\n\nCOMPACT TOOL HISTORY\n"
-                + ("H" * 500)
-                + "\nTINY_TAIL"
+                "FINAL RESPONSE\n" + ("F" * 370) + "\nEND_FINAL\n\nCOMPACT TOOL HISTORY\n" + ("H" * 500) + "\nTINY_TAIL"
             ),
             ["FINAL RESPONSE", "END_FINAL"],
         ),
@@ -1413,7 +1417,6 @@ def test_compact_behavior_conversation_section_layout_permutations(
         assert substr in shared_out, f"{case_name}: missing {substr!r}"
 
 
-
 # --- Codex apply_patch evidence (issue #236, requirement 7: retain patch contents) ---
 #
 # Codex decodes its file-edit tool to ``action_input = {"input": "<patch text>"}``.
@@ -1455,6 +1458,252 @@ def _codex_patch_trajectory(patch: str) -> dict:
 
 def _file_changes_section(evidence: str) -> str:
     return evidence.split("FINAL RESPONSE", 1)[0].split("COMPACT TOOL HISTORY", 1)[0]
+
+
+def _opencode_call(name: str, **arguments: str) -> dict:
+    return {"steps": [{"source": "agent", "tool_calls": [{"function_name": name, "arguments": arguments}]}]}
+
+
+def test_opencode_read_path_proves_activation() -> None:
+    path = "/workspace/skills/calculator/SKILL.md"
+    traj = _opencode_call("read", filePath=path)
+
+    activation = checks.check_activation(atif_helpers.extract_tool_calls_as_dicts(traj), "calculator")
+    assert activation["score"] == 1.0
+    assert activation["details"]["path"] == path
+    assert atif_helpers.get_read_calls(traj) == [path]
+
+
+def test_opencode_write_path_is_a_verified_fact() -> None:
+    path = "/workspace/output/result.txt"
+    traj = _opencode_call("write", filePath=path, content="done")
+
+    facts = atif_helpers.build_verified_facts(traj, [f"Save the result to {path}"], "")
+    assert facts == [{"claim": path, "observed": True, "step_id": 0, "evidence": path}]
+
+
+@pytest.mark.parametrize(
+    ("edit_status", "expectation", "verified"),
+    [
+        pytest.param("error", "Remove text from {path}", False, id="failed-edit"),
+        pytest.param("completed", "Remove text from {path}", True, id="successful-edit"),
+        pytest.param("error", "Read {path}", True, id="read-only"),
+    ],
+)
+def test_opencode_read_then_edit_on_same_path(edit_status, expectation, verified, monkeypatch) -> None:
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "500")
+    path = "/workspace/output/result.txt"
+    read = {"status": "completed", "input": {"filePath": path}, "output": "original"}
+    edit = {"status": edit_status, "input": {"filePath": path, "oldString": "original", "newString": ""}}
+    edit.update({"error": "No matching text"} if edit_status == "error" else {"output": "Edit applied"})
+    events = [
+        {"type": "tool_use", "part": {"tool": name, "callID": name, "state": state}}
+        for name, state in [("read", read), ("edit", edit)]
+    ]
+    events.append({"type": "text", "part": {"text": "A" * 3000 + "MISSING_MIDDLE" + "B" * 3000}})
+    traj = synthetic_trajectory_from_opencode_json("\n".join(json.dumps(event) for event in events))
+    assert traj is not None
+    bundle = atif_helpers.build_metric_evidence_bundles(
+        traj, "Inspect the result.", expected_behavior=[expectation.format(path=path)]
+    )["behavior_check"]
+
+    omitted = bundle["omitted"]
+    assert "MISSING_MIDDLE" not in bundle["prompt_evidence"]
+    assert omitted["required_missing"] == ["final response"]
+    assert omitted["expected_behaviors_verified"] is verified
+    assert bool(atif_helpers.behavior_evidence_gap(omitted)) is not verified
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "status", "expectation", "verified"),
+    [
+        ("read", {}, "completed", "Edit `result.txt`", False),
+        ("read", {}, "completed", "The agent removed text from `result.txt`", False),
+        ("read", {}, "completed", "Read `result.txt`", True),
+        ("read", {}, "completed", "Read from `result.txt`", True),
+        ("write", {"content": "unrelated"}, "completed", "Read from `result.txt`", False),
+        (
+            "edit",
+            {"oldString": "keep obsolete", "newString": "keep"},
+            "completed",
+            "Remove `obsolete` from `result.txt`",
+            True,
+        ),
+        (
+            "apply_patch",
+            {"patchText": "*** Begin Patch\n*** Delete File: /workspace/output/result.txt\n*** End Patch"},
+            "completed",
+            "Create `result.txt`",
+            False,
+        ),
+        ("edit", {"oldString": "obsolete", "newString": ""}, "completed", "Remove `obsolete` from `result.txt`", True),
+        (
+            "edit",
+            {"oldString": "obsolete", "newString": "replacement"},
+            "completed",
+            "Remove `obsolete` from `result.txt`",
+            True,
+        ),
+        ("write", {"content": "unrelated"}, "completed", "Remove text from `result.txt`", False),
+        ("write", {"content": "WRONG"}, "completed", "Write `result.txt` containing only valid JSON", False),
+        ("edit", {"oldString": "DROP", "newString": ""}, "completed", "Do not remove `DROP` from `result.txt`", False),
+        ("bash", {"command": "python validate.py"}, "completed", "Run `validate.py`", True),
+        ("multiedit", {"edits": []}, "error", "Update `result.txt`", False),
+        (
+            "apply_patch",
+            {"patchText": "*** Begin Patch\n*** Add File: /workspace/output/result.txt\n+ok\n*** End Patch"},
+            "completed",
+            "Write `result.txt`",
+            True,
+        ),
+        ("bash", {"command": "printf ok > /workspace/output/result.txt"}, "completed", "Write `result.txt`", True),
+        ("bash", {"command": "echo '>' /workspace/output/result.txt"}, "completed", "Write `result.txt`", False),
+        ("bash", {"command": "echo /workspace/output/result.txt"}, "completed", "Read `result.txt`", False),
+        (
+            "bash",
+            {"command": "echo DONE /workspace/output/result.txt"},
+            "completed",
+            "Append `DONE` to /workspace/output/result.txt",
+            False,
+        ),
+        (
+            "bash",
+            {"command": "printf %s DONE > /workspace/output/result.txt"},
+            "completed",
+            "Save `DONE` to /workspace/output/result.txt",
+            True,
+        ),
+        (
+            "apply_patch",
+            {"patchText": "*** Begin Patch\n*** Add File: /workspace/output/result.txt\n+DONE\n*** End Patch"},
+            "completed",
+            "Save `DONE` to /workspace/output/result.txt",
+            True,
+        ),
+    ],
+)
+def test_only_the_matching_file_operation_settles_a_quoted_claim(tool, args, status, expectation, verified):
+    if tool not in {"bash", "apply_patch"}:
+        args = {**args, "filePath": "/workspace/output/result.txt"}
+    state = {"status": status, "input": args, "metadata": {"exit": 0}, "output": "ok"}
+    event = {"type": "tool_use", "part": {"tool": tool, "callID": "op", "state": state}}
+    traj = synthetic_trajectory_from_opencode_json(json.dumps(event))
+    facts = atif_helpers.build_verified_facts(traj, [expectation], "")
+    assert atif_helpers._expected_behaviors_verified([expectation], facts) is verified
+
+
+def test_clause_separator_in_artifact_path_is_not_a_second_claim():
+    path = "/workspace/output/before.json"
+    expectation = [f"Write {path}"]
+    facts = [{"claim": path, "observed": True, "file_steps": {"change": 1}}]
+    assert atif_helpers._expected_behaviors_verified(expectation, facts)
+
+
+@pytest.mark.parametrize("last, punctuation", [("second.txt", ""), ("Makefile", ".")])
+def test_conjoined_write_requires_both_file_changes(last, punctuation):
+    expectation = [f"Write `first.txt` and `{last}`{punctuation}"]
+    facts = [
+        {"claim": "first.txt", "observed": True, "file_steps": {"change": 0}},
+        {"claim": last, "observed": True},
+    ]
+    assert not atif_helpers._expected_behaviors_verified(expectation, facts)
+    facts[1]["file_steps"] = {"change": 2}
+    assert atif_helpers._expected_behaviors_verified(expectation, facts)
+
+
+@pytest.mark.parametrize("background", ["codex", "claude"])
+def test_running_command_does_not_prove_file_change(background):
+    target = "/workspace/output/result.txt"
+    call = {"tool_call_id": "cmd", "function_name": "exec_command", "arguments": {"cmd": f"printf done > {target}"}}
+    result = {
+        "source_call_id": "cmd",
+        "content": "Chunk ID: abc123\nWall time: 1 seconds\nProcess running with session ID 12\nOutput:\n",
+        "extra": {"tool_result_is_error": False},
+    }
+    traj = {"steps": [{"source": "agent", "tool_calls": [call], "observation": {"results": [result]}}]}
+    expectation = [f"Write {target}"]
+    if background == "claude":
+        call.update(function_name="Bash", arguments={"command": f"cat {target}", "run_in_background": True})
+        result["content"] = "Command running in background with ID: b123"
+        expectation = [f"Read {target}"]
+    assert not atif_helpers._expected_behaviors_verified(
+        expectation, atif_helpers.build_verified_facts(traj, expectation, "")
+    )
+
+
+@pytest.mark.parametrize(
+    "receipt_override,verified",
+    [
+        ({}, True),
+        ({"content": "File created successfully at: /workspace/output/other.py"}, False),
+        ({"source_call_id": "read-0"}, False),
+        ({"extra": {"tool_result_is_error": True}}, False),
+    ],
+)
+def test_claude_create_uses_its_own_exact_receipt(receipt_override, verified):
+    traj = _trajectory_with_late_write()
+    traj["steps"][-2]["observation"]["results"][0].update(receipt_override)
+    expectation = ["Create /workspace/output/test_gpu_engine_selection.py"]
+    facts = atif_helpers.build_verified_facts(traj, expectation, "")
+    assert atif_helpers._expected_behaviors_verified(expectation, facts) is verified
+
+
+def test_claude_stream_preserves_explicit_write_success():
+    target = "/workspace/output/result.txt"
+    call = {"type": "tool_use", "id": "w", "name": "Write", "input": {"file_path": target, "content": "DONE"}}
+    result = {
+        "type": "tool_result",
+        "tool_use_id": "w",
+        "is_error": False,
+        "content": f"File created successfully at: {target}",
+    }
+    events = [
+        {"type": role, "message": {"content": [block]}} for role, block in [("assistant", call), ("user", result)]
+    ]
+    traj = synthetic_trajectory_from_claude_stream_jsonl("\n".join(map(json.dumps, events)))
+    for expectation in [[f"Save `DONE` to {target}"], [f"Create {target}"]]:
+        assert atif_helpers._expected_behaviors_verified(
+            expectation, atif_helpers.build_verified_facts(traj, expectation, "")
+        )
+
+
+def test_patch_context_does_not_verify_an_edit_to_another_file():
+    path = "/workspace/output/result.txt"
+    patch = f"*** Begin Patch\n*** Update File: notes.md\n@@\n *** Update File: {path}\n-old\n+new\n*** End Patch"
+    traj = _codex_patch_trajectory(patch)
+    expectation = [f"Edit {path}"]
+    facts = atif_helpers.build_verified_facts(traj, expectation, "")
+    assert not atif_helpers._expected_behaviors_verified(expectation, facts)
+
+
+@pytest.mark.parametrize("verb", ["Read", "Update"])
+def test_recorded_codex_read_and_patch_verify_their_own_file_actions(verb):
+    trajectory = json.loads((Path(__file__).parent / "fixtures/harbor_0_24_codex_trajectory.json").read_text())
+    expectation = [f"{verb} `README.md`"]
+    facts = atif_helpers.build_verified_facts(trajectory, expectation, "")
+    assert atif_helpers._expected_behaviors_verified(expectation, facts)
+
+
+@pytest.mark.parametrize(
+    ("tool", "body"),
+    [("write", {"content": "updated"}), ("edit", {"oldString": "original", "newString": "updated"})],
+)
+def test_opencode_file_changes_include_path_and_new_content(tool: str, body: dict[str, str]) -> None:
+    path = "/workspace/output/result.txt"
+    traj = _opencode_call(tool, filePath=path, **body)
+
+    changes = _evidence_section(build_behavior_evidence(traj, "Update the result."), "FILE CHANGES")
+    assert f"Agent called: {tool}" in changes
+    assert f"Path: {path}" in changes.splitlines()
+    assert "updated" in changes.splitlines()
+    assert "original" not in changes
+
+
+def test_opencode_file_changes_distinguish_deletion_from_missing_replacement() -> None:
+    for replacement, deleted in [({"newString": ""}, True), ({}, False)]:
+        traj = _opencode_call("edit", filePath="/workspace/output/result.txt", oldString="original", **replacement)
+        changes = _evidence_section(build_behavior_evidence(traj, "Remove the text."), "FILE CHANGES")
+        assert ('newString: ""' in changes.splitlines()) is deleted
 
 
 @pytest.mark.parametrize(
@@ -1600,9 +1849,7 @@ def test_codex_patch_survives_the_truncation_pressure_issue_236_is_about() -> No
         {
             "source": "agent",
             "message": "Executed apply_patch",
-            "tool_calls": [
-                {"tool_call_id": "patch-1", "function_name": "apply_patch", "arguments": {"input": patch}}
-            ],
+            "tool_calls": [{"tool_call_id": "patch-1", "function_name": "apply_patch", "arguments": {"input": patch}}],
             "observation": {"results": [{"source_call_id": "patch-1", "content": "Success."}]},
         }
     )

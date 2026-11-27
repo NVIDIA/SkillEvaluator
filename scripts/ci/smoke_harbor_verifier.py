@@ -59,6 +59,26 @@ def check_staged(directory: Path) -> None:
     }
     assert all(result["passed"] for result in results.values()), results
     assert "details" not in results["efficiency"]
+    for command, exit_code, output, recovered in [
+        ("python scripts/calc.py", 0, "Input declined", True),
+        ("python scripts/calc.py", 7, "Input declined", False),
+        ("grep -q needle input", 1, "", True),
+        ("grep -q needle input", 1, "grep: input: read error", False),
+    ]:
+        payload = {"output": output, "exit_code": exit_code, "error": None}
+        tool = {"tool_call_id": "c1", "function_name": "terminal", "arguments": {"command": command}}
+        result = {"source_call_id": "c1", "content": json.dumps(payload)}
+        trajectory = {"steps": [{"source": "agent", "tool_calls": [tool], "observation": {"results": [result]}}]}
+        calls = verifier["extract_tool_calls_as_dicts"](trajectory)
+        check = verifier["_shared_declarative_checks"].evaluate_declarative_checks(
+            [{"type": "command_succeeded", "script": "scripts/calc.py"}],
+            tool_calls=calls,
+            final_response="",
+            workspace_roots=[],
+        )[0]
+        assert check["passed"] is (exit_code == 0), check
+        assert verifier["check_error_recovery"](calls, "scripts/calc.py")["passed"] is recovered
+    check_hermes_retry(verifier)
     # Exercise the recent root-search and cleanup rules on the task interpreter,
     # including both sides of each classification boundary.
     for command, score in [("find / -name calc.py", 0.0), ("find /workspace -name calc.py", 1.0)]:
@@ -88,6 +108,31 @@ def check_staged(directory: Path) -> None:
             }
         )
     )
+
+
+def check_hermes_retry(verifier):
+    command = "python scripts/calc.py"
+    steps = []
+    for index, payload in enumerate(
+        (
+            {"exit_code": 7, "output": "Input declined"},
+            {
+                "status": "yielded_to_background",
+                "exit_code": None,
+                "session_id": "proc_1",
+                "output": "checking permission denied cases",
+            },
+            {"exit_code": 0, "output": "done"},
+        )
+    ):
+        call_id = str(index)
+        tool = {"tool_call_id": call_id, "function_name": "terminal", "arguments": {"command": command}}
+        result = {"source_call_id": call_id, "content": json.dumps(payload)}
+        steps.append({"source": "agent", "tool_calls": [tool], "observation": {"results": [result]}})
+        calls = verifier["extract_tool_calls_as_dicts"]({"steps": steps})
+        recovery = verifier["check_error_recovery"](calls, "scripts/calc.py")
+        assert recovery["score"] == (0.9 if index == 2 else 0.0), recovery
+        assert [row["steps_to_fix"] for row in recovery["corrections"]] == ([2] if index == 2 else []), recovery
 
 
 def run_verifier_main(directory: Path) -> dict[str, float]:

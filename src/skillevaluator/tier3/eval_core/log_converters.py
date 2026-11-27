@@ -55,7 +55,7 @@ def _stringify_tool_result_content(content: Any) -> str:
 
 
 def _attach_tool_result(
-    steps_by_call_id: dict[str, dict[str, Any]], tool_use_id: str, content_text: str, *, is_error: bool = False
+    steps_by_call_id: dict[str, dict[str, Any]], tool_use_id: str, content_text: str, *, is_error: bool | None
 ) -> None:
     step = steps_by_call_id.get(tool_use_id)
     if step is None:
@@ -63,9 +63,9 @@ def _attach_tool_result(
     step.setdefault("observation", {"results": []})
     step["observation"].setdefault("results", [])
     result: dict[str, Any] = {"source_call_id": tool_use_id, "content": content_text}
-    if is_error:
+    if isinstance(is_error, bool):
         # Match Harbor's native Claude Code ATIF result metadata.
-        result["extra"] = {"tool_result_is_error": True}
+        result["extra"] = {"tool_result_is_error": is_error}
     step["observation"]["results"].append(result)
 
 
@@ -165,7 +165,7 @@ def synthetic_trajectory_from_claude_stream_jsonl(text: str) -> dict[str, Any] |
                 tid = str(block.get("tool_use_id") or "")
                 res_text = _stringify_tool_result_content(block.get("content"))
                 if tid:
-                    _attach_tool_result(steps_by_call_id, tid, res_text, is_error=block.get("is_error") is True)
+                    _attach_tool_result(steps_by_call_id, tid, res_text, is_error=block.get("is_error"))
 
         elif et == "result":
             res = evt.get("result")
@@ -414,6 +414,9 @@ def synthetic_trajectory_from_cline_cli(text: str) -> dict[str, Any] | None:
     }
 
 
+OPENCODE_FILE_TOOLS = frozenset({"read", "read_file", "edit", "write", "multiedit", "apply_patch"})
+
+
 def _normalize_opencode_tool(tool_name: str, raw_input: Any) -> tuple[str, dict[str, Any]]:
     """Map OpenCode tool names and inputs to ATIF tool-call fields."""
     if not isinstance(raw_input, dict):
@@ -577,11 +580,11 @@ def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
             "observation": {"results": []},
         }
         observation_text = _opencode_tool_observation(state)
-        failed_read = status == "error" and function_name.lower() in {"read", "read_file"}
-        if observation_text or failed_read:
+        file_outcome = status in {"completed", "error"} and tool_name.lower() in OPENCODE_FILE_TOOLS
+        if observation_text or file_outcome:
             result = {"source_call_id": call_id, "content": observation_text}
-            if failed_read:
-                result["extra"] = {"tool_result_is_error": True}
+            if file_outcome:
+                result["extra"] = {"tool_result_is_error": status == "error"}
             step["observation"]["results"].append(result)
         steps.append(step)
 

@@ -237,11 +237,13 @@ def _has_atx_title(body: str) -> bool:
     """Return whether the body has a non-empty ``# Title`` heading.
 
     Parsing the Markdown keeps a ``# comment`` line inside a fenced code
-    block or an HTML comment from counting as the skill's title.
+    block or an HTML comment, or a heading nested in a blockquote or list
+    item, from counting as the skill's title.
     """
     tokens = _BODY_PARSER.parse(body)
     return any(
         token.type == "heading_open"
+        and token.level == 0
         and token.tag == "h1"
         and token.markup == "#"
         and index + 1 < len(tokens)

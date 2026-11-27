@@ -678,11 +678,13 @@ Example.
             "~~~python\n# configure the client\nclient = Client()\n~~~",
             "    # indented code comment\n    run --fast",
             "<!--\n# Draft Title\n-->",
+            "> # Report example",
+            "- # Nested in a list item",
         ],
-        ids=["backtick-fence", "tilde-fence", "indented-code", "html-comment"],
+        ids=["backtick-fence", "tilde-fence", "indented-code", "html-comment", "blockquote", "list-item"],
     )
     def test_hash_line_outside_markdown_heading_is_not_a_title(self, tmp_path: Path, hidden_title: str):
-        """A '# ...' line inside code or an HTML comment is not the body's top-level heading."""
+        """A '# ...' line inside code, an HTML comment, a blockquote or a list item is not the body's title."""
         skill_dir = tmp_path / "code-comment"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(

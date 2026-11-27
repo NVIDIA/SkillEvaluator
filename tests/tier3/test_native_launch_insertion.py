@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 
 import pytest
@@ -31,6 +32,11 @@ CODEX = (
 )
 OPENCODE = "[ -f ~/.nvm/nvm.sh ] && . ~/.nvm/nvm.sh; opencode --model=p/m run --format=json -- 'task' 2>&1 | tee x"
 HERMES = 'export PATH="$HOME/.local/bin:$PATH" && hermes --yolo chat -q "$HARBOR_INSTRUCTION" 2>&1 | tee x'
+PI = (
+    ". ~/.nvm/nvm.sh; mkdir -p /logs/agent/pi/sessions && PI_CODING_AGENT_DIR=/tmp/harbor-pi-agent "
+    "pi --print --mode json --session-dir /logs/agent/pi/sessions --provider harbor-endpoint "
+    "--model m 'do the task' 2>&1 </dev/null | grep -v upd | stdbuf -oL tee /logs/agent/pi.txt"
+)
 
 
 @pytest.mark.parametrize(
@@ -40,6 +46,7 @@ HERMES = 'export PATH="$HOME/.local/bin:$PATH" && hermes --yolo chat -q "$HARBOR
         (native_agents._NativeCodexMixin, CODEX, "codex exec"),
         (native_agents._NativeOpenCodeMixin, OPENCODE, "opencode --model"),
         (native_agents._NativeHermesMixin, HERMES, "hermes --yolo"),
+        (native_agents._NativePiMixin, PI, "PI_CODING_AGENT_DIR="),
     ],
 )
 def test_setup_runs_after_launch_line_initialization(cls: type, command: str, before: str) -> None:
@@ -48,6 +55,54 @@ def test_setup_runs_after_launch_line_initialization(cls: type, command: str, be
     assert tail.startswith(before)
     assert command.startswith(head)
     assert subprocess.run(["sh", "-n", "-c", rewritten], check=False).returncode == 0
+
+
+def test_pi_launch_keeps_prompt_argument_and_log_pipeline() -> None:
+    rewritten, _ = _mixin(native_agents._NativePiMixin).skilleval_native_command(PI, None)
+    assert "pi --print --mode json" in rewritten
+    assert rewritten.endswith("| stdbuf -oL tee /logs/agent/pi.txt")
+    assert "--model m 'do the task'" in rewritten
+
+
+def test_pi_launch_with_a_multiline_prompt_still_gets_native_setup() -> None:
+    instruction = "First line of the task.\nSecond line, with 'single quotes' and $shell."
+    quoted = shlex.quote(instruction)
+    command = PI.replace("'do the task'", quoted)
+    agent = _mixin(native_agents._NativePiMixin)
+    agent._skilleval_quoted_prompt = quoted
+
+    rewritten, _ = agent.skilleval_native_command(command, None)
+
+    head, _, tail = rewritten.partition(SETUP)
+    assert command.startswith(head)
+    assert tail.startswith("PI_CODING_AGENT_DIR=")
+    assert quoted in rewritten  # the prompt stays byte-identical, newlines and all
+    assert rewritten.endswith("| stdbuf -oL tee /logs/agent/pi.txt")
+    assert subprocess.run(["sh", "-n", "-c", rewritten], check=False).returncode == 0
+
+
+@pytest.mark.parametrize("instruction", ["pi", "json", "blue"])
+def test_one_word_prompts_get_native_setup(instruction: str) -> None:
+    # A one-word prompt stays unquoted and its text (``pi``, ``json``) also
+    # occurs earlier in the launcher; only the argument hard against the
+    # launch tail is the prompt.
+    quoted = shlex.quote(instruction)
+    command = PI.replace("'do the task'", quoted)
+    agent = _mixin(native_agents._NativePiMixin)
+    agent._skilleval_quoted_prompt = quoted
+
+    rewritten, _ = agent.skilleval_native_command(command, None)
+
+    assert SETUP in rewritten  # setup staged, not a NativeLaunchError
+    head, _, tail = rewritten.partition(SETUP)
+    assert command.startswith(head)
+    assert f"--model m {quoted} 2>&1 </dev/null" in tail
+
+
+def test_pi_version_probe_is_never_touched_by_native_setup() -> None:
+    probe = "pi --version"
+    rewritten, _ = _mixin(native_agents._NativePiMixin).skilleval_native_command(probe, None)
+    assert rewritten == probe
 
 
 def test_claude_launch_keeps_pipe_and_gets_plugin_dir() -> None:

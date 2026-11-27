@@ -65,6 +65,7 @@ def test_claude_format_acceptance_matrix(tmp_path: Path):
         "hermes": "not_loaded",
         "openclaw": "loads",
         "opencode": "not_loaded",
+        "pi": "not_loaded",
     }
     assert "CX-PLUGIN-NAMESPACE" in s["codex"][1]
 

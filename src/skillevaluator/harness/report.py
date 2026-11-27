@@ -159,6 +159,7 @@ _LISTING = {
     "cut": "cut to {limit} chars",
     "name_only": "name only",
     "dropped": "not listed",
+    "hidden": "hidden (not in the model list)",
     "shortened": "shortened (over list budget)",
 }
 
@@ -251,10 +252,16 @@ def run_harness_check(
     config: dict[str, Any] | None = None,
 ) -> Block:
     """Evaluate each skill harness by harness, updating a live panel as each finishes."""
+    requested = target
     target = target.parent if target.is_file() else target
     profiles = load_profiles(harness, profiles_dir)
     finder = HarnessValidator()
-    skills = [target] if finder._is_skill_directory(target) else finder._find_all_skills(target)
+    # pi 1.6.0 also loads a mixed-case Skill.md; an explicit manifest argument
+    # whose name casefolds to skill.md stands for its folder even though the
+    # canonical variants are absent.
+    explicit_manifest = requested.is_file() and requested.name.casefold() == "skill.md"
+    skills = [target] if explicit_manifest or finder._is_skill_directory(target) else finder._find_all_skills(target)
+    manifests = {target: requested} if explicit_manifest else None
     width = max(60, min(WIDTH, console.width))
     block: Block = {}
     if is_plugin_root(target):
@@ -270,7 +277,7 @@ def run_harness_check(
         )
         console.print()
         block[f"{target} (plugin)"] = rows
-    all_facts = facts_for(skills, profiles)
+    all_facts = facts_for(skills, profiles, manifests)
     for skill in skills:
         rows: list[dict[str, Any]] = [{"harness": p["harness"], "status": "pending"} for p in profiles]
 

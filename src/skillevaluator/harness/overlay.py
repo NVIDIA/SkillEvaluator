@@ -14,6 +14,7 @@ from itertools import groupby
 from pathlib import Path
 from typing import Any
 
+import pathspec
 import yaml
 
 from skillevaluator.constants import (
@@ -83,6 +84,8 @@ _KNOWN_ROOTS = (
     ".copilot/skills",
     ".openclaw/skills",
     ".config/opencode/skills",
+    ".pi/skills",
+    ".pi/agent/skills",
 )
 
 
@@ -156,6 +159,28 @@ def _link_location_parts(path: Path) -> tuple[str, ...]:
     return tuple(parts)
 
 
+def _same_directory(actual: Path, expected: Path) -> bool:
+    """True when both paths name one folder.
+
+    A cased alias on a case-insensitive volume counts (`.PI/skills` is where pi's lowercase default lands), while a
+    distinct folder on a case-sensitive volume does not.
+    """
+    try:
+        return expected.samefile(actual)
+    except OSError:
+        return False
+
+
+def _same_root(window: tuple[str, ...], root: str, above: tuple[str, ...]) -> bool:
+    """Whether *window* names the known *root*, by name or by being the same folder spelled differently."""
+    if "/".join(window) == root:
+        return True
+    words = root.split("/")
+    if tuple(word.casefold() for word in window) != tuple(word.casefold() for word in words):
+        return False
+    return _same_directory(Path(*above, *window), Path(*above, *words))
+
+
 def _install_root(skill_path: Path) -> tuple[str | None, int]:
     # Harnesses scan the folder a skill is installed in, so a symlinked skill counts where the link is.
     parts = _link_location_parts(skill_path)
@@ -166,11 +191,107 @@ def _install_root(skill_path: Path) -> tuple[str | None, int]:
         homes = set()
     for root in sorted(_KNOWN_ROOTS, key=lambda r: -len(r.split("/"))):
         size = len(root.split("/"))
-        for index in range(len(parts) - size - 1, -1, -1):
-            if "/".join(parts[index : index + size]) == root:
+        # index + size == len(parts): the skill dir is the root itself (pi's
+        # loose manifests); that counts as installed at the root, depth 0.
+        for index in range(len(parts) - size, -1, -1):
+            if _same_root(tuple(parts[index : index + size]), root, tuple(parts[:index])):
                 user = parts[:index] in homes
-                return f"~/{root}" if user else root, len(parts) - (index + size) - 1
+                return f"~/{root}" if user else root, max(len(parts) - (index + size) - 1, 0)
     return None, 0
+
+
+#: pi 1.6.0 discovery (collectSkillEntries modes "pi"/"agents"): a loose
+#: manifest at the .pi skills roots loads with any .md name, a nested one only
+#: as exact SKILL.md; under .agents/skills it is the other way around.
+#: (path suffix, scan mode) of the roots pi discovers on its own.
+_PI_ROOT_SUFFIXES = (
+    ("/.pi/skills", "pi"),
+    ("/.pi/agent/skills", "pi"),
+    ("/.agents/skills", "agents"),
+)
+
+_PI_ROOT_FAMILIES = {
+    ".pi/skills": "pi",
+    ".pi/agent/skills": "pi",
+    ".agents/skills": "agents",
+}
+
+
+def _pi_manifest_ignored(skill_path: Path) -> bool:
+    """Whether pi skips a non-SKILL.md manifest at this depth under its roots.
+
+    Verified against the pinned loader's default-root discovery (``collectSkillEntries``
+    in dist/core/package-manager.js): a loose ``.md`` file loads directly in a ``.pi``
+    root only, and nested under ``.agents/skills`` only. A directory pi is given
+    explicitly instead (``loadSkillsFromDirInternal`` in dist/core/skills.js) loads loose
+    files at its own root.
+    """
+    parts = _link_location_parts(skill_path)
+    for root, family in _PI_ROOT_FAMILIES.items():
+        size = len(root.split("/"))
+        for index in range(len(parts) - size, -1, -1):
+            if _same_root(tuple(parts[index : index + size]), root, tuple(parts[:index])):
+                return (family == "pi") != (index + size == len(parts))  # the skill dir is the root: loose
+    return False
+
+
+def _pi_ignored_by_rules(skill_path: Path) -> tuple[str, str] | None:
+    """The ``(ignore file, line)`` excluding this path from pi's scan under a pi root, both as written.
+
+    Ignore files (matched case-insensitively) are read per folder from the root down, each folder's
+    ``.gitignore``, ``.ignore`` and ``.fdignore`` in turn. pi checks a folder before its contents and never
+    re-enters an excluded one, so every folder on the way down is tested before the file itself.
+    """
+    try:
+        posix = skill_path.absolute().as_posix()
+        roots = [root for root in _PI_ROOT_FAMILIES if "/" + root + "/" in posix + "/" or posix.endswith("/" + root)]
+        if not roots:
+            return None
+        root = max(roots, key=len)
+        base = Path(posix[: posix.rindex(root) + len(root)])
+        folders = []
+        folder = skill_path.absolute().parent
+        while True:
+            folders.append(folder)
+            if folder in (base, folder.parent):
+                break
+            folder = folder.parent
+        rules: list[tuple[str, str, bool, pathspec.GitIgnoreSpec]] = []  # ignore file, line, negated, matcher
+        for folder in reversed(folders):
+            prefix = "" if folder == base else folder.relative_to(base).as_posix() + "/"
+            for name in PI_IGNORE_FILES:
+                path = folder / name
+                if path.is_file():
+                    try:
+                        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    except OSError:
+                        continue
+                    for line in lines:
+                        added: list[str] = []
+                        _pi_add_ignore_line(added, line, prefix)
+                        if added:
+                            # A negated line is matched by its positive form: a lone "!" pattern never
+                            # answers True from match_file().
+                            negated = added[0].startswith("!")
+                            rules.append(
+                                (prefix + name, line, negated, pathspec.GitIgnoreSpec.from_lines([added[0][negated:]]))
+                            )
+        if not rules:
+            return None
+        absolute = skill_path.absolute()
+        folders_on_the_way = absolute.relative_to(base).as_posix().lower().split("/")[:-1]
+        candidates = ["/".join(folders_on_the_way[:i]) + "/" for i in range(1, len(folders_on_the_way) + 1)]
+        candidates.append(absolute.relative_to(base).as_posix().lower() + ("/" if skill_path.is_dir() else ""))
+        for candidate in candidates:
+            reason = None  # gitignore: the last line that matches decides
+            for ignore_file, line, negated, matcher in rules:
+                if matcher.match_file(candidate):
+                    reason = None if negated else (ignore_file, line)
+            if reason:
+                return reason
+        return None
+    except (ValueError, OSError):
+        return None  # outside any recognizable pi root
 
 
 # OpenClaw 2026.10.9 cjk-chars.ts: CJK code points cost 4-16 chars, every other UTF-16 unit 1.
@@ -231,10 +352,34 @@ def _openclaw_read_chars(text: str) -> int:
     return _OPENCLAW_READ_OVERHEAD + len(text.encode("utf-16-le", "surrogatepass")) // 2 + extra
 
 
-def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, Any]]:
-    manifest = next(
-        (skill_path / n for n in SKILL_MANIFEST_VARIANTS if (skill_path / n).exists()), skill_path / "SKILL.md"
-    )
+def _read_manifest(skill_path: Path, explicit: Path | None = None) -> tuple[Path, bytes, str, str, dict[str, Any]]:
+    if explicit is not None:
+        # An explicitly selected manifest stands for its folder; never rediscover
+        # a differently cased sibling (distinct only on case-sensitive filesystems).
+        manifest = explicit
+    else:
+        # Pick the variant by its real on-disk name: a case-insensitive filesystem
+        # answers exists() for every spelling, which would construct a path that
+        # no longer identifies the actual file.
+        present = {p.name: p for p in skill_path.iterdir()} if skill_path.is_dir() else {}
+        manifest = (
+            skill_path
+            if skill_path.is_file()
+            else next((present[n] for n in SKILL_MANIFEST_VARIANTS if n in present), skill_path / "SKILL.md")
+        )
+        if not manifest.is_file() and skill_path.is_dir():
+            # pi 1.6.0 also loads a mixed-case Skill.md (loose at the .pi skills
+            # roots, nested under .agents/skills); an explicit-file check can point
+            # at a directory whose only manifest is that casing. The extension
+            # itself is compared exactly, so SKILL.MD is never a manifest.
+            manifest = next(
+                (
+                    p
+                    for p in sorted(skill_path.iterdir())
+                    if p.is_file() and p.name.endswith(".md") and p.name.casefold() == "skill.md"
+                ),
+                manifest,
+            )
     raw = manifest.read_bytes() if manifest.is_file() else b""
     text = raw.decode("utf-8-sig", errors="replace")
     match = FRONTMATTER_PATTERN.match(text)
@@ -266,6 +411,80 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
 
 def _is_true(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.strip().lower() == "true")
+
+
+def _pi_top_level_bool(fm_yaml: str, key: str) -> bool | None:
+    """Resolve ``key`` at the top level the way pi 1.6.0's parser does (eemeli/yaml, YAML 1.2 core).
+
+    An implicit ``<<`` stays an ordinary key — eemeli/yaml does not resolve it —
+    but an explicitly tagged ``!!merge`` key merges its mapping, and an explicit
+    top-level key still beats a merged copy. Only the top level is read: pi
+    never looks at a ``metadata`` copy. Returns ``None`` when the key is
+    absent, ``False`` when present but not pi's ``true``; the last duplicate wins.
+    """
+    from yaml.events import ScalarEvent
+
+    parsed = _pi_frontmatter(fm_yaml)
+    if parsed is None:
+        return None
+    root, anchors = parsed
+    if root[0] != "mapping":
+        return None
+
+    def scalar_bool(event: ScalarEvent) -> bool:
+        if event.tag == "tag:yaml.org,2002:bool":
+            # An explicit !!bool resolves even a quoted scalar.
+            return event.value in ("true", "True", "TRUE")
+        if event.style is not None or event.tag is not None:
+            return False  # quoted, or explicitly tagged (e.g. !!str): a string
+        return event.value in ("true", "True", "TRUE")  # plain scalar, core schema
+
+    def node_bool(node: tuple) -> bool:
+        # An alias resolves to its anchored node the way pi's parser does.
+        target = node if node[0] == "scalar" else anchors.get(node[1]) if node[0] == "alias" else None
+        return bool(target and target[0] == "scalar" and scalar_bool(target[1]))
+
+    value: bool | None = None
+    merged: list[tuple] = []
+    for key_node, value_node in root[1]:
+        event = key_node[1]
+        if not isinstance(event, ScalarEvent):
+            continue
+        if event.tag == "tag:yaml.org,2002:merge":
+            # The value's own tag tells the placements apart: `<<: !!merge [...]`
+            # (tag on value) warns and never merges sequences; `!!merge <<: [...]`
+            # (tag on key) merges entries first-wins (verified against pi 1.6.0).
+            tag = value_node[3] if len(value_node) > 3 else None
+            merged.append((value_node, tag != "tag:yaml.org,2002:merge"))
+        elif event.value == key and event.tag in (None, "tag:yaml.org,2002:str"):
+            value = node_bool(value_node)
+    if value is None:
+        # A !!merge value may be one mapping or an alias to it. A sequence is
+        # NOT merged: pi's parser warns "merge used for seq collection" and
+        # keeps the key literal (verified against 1.6.0), so only mappings count.
+        stack = list(reversed(merged))
+        while stack and value is None:
+            candidate, seq_ok = stack.pop()
+            if candidate[0] == "alias":
+                candidate = anchors.get(candidate[1]) or ("missing",)
+            if candidate[0] == "sequence":
+                if seq_ok:
+                    stack.extend((item, True) for item in reversed(candidate[1]))
+                continue
+            if candidate[0] != "mapping":
+                continue
+            for key_node, value_node in candidate[1]:
+                event = key_node[1]
+                if (
+                    isinstance(event, ScalarEvent)
+                    and event.value == key
+                    and event.tag in (None, "tag:yaml.org,2002:str")
+                ):
+                    value = node_bool(value_node)
+                    break
+            if value is not None:
+                break
+    return value
 
 
 def _shipped_paths(skill_path: Path) -> list[Path]:
@@ -436,13 +655,19 @@ def _claude_ignored_values(data: dict[str, Any]) -> list[str]:
     return ignored
 
 
-def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, Any]:
+def skill_facts(
+    skill_path: Path,
+    catalog: Catalog | None = None,
+    manifest: Path | None = None,
+    canonical: Catalog | None = None,
+) -> dict[str, Any]:
     """Compute the facts profile rules refer to (see profiles README).
 
     ``catalog`` describes the other skills installed alongside this one; without it the
-    catalog facts are zero and catalog rules are skipped.
+    catalog facts are zero and catalog rules are skipped. ``manifest`` overrides
+    manifest discovery when the check selected an explicit manifest file.
     """
-    manifest, raw, text, fm_yaml, data = _read_manifest(skill_path)
+    manifest, raw, text, fm_yaml, data = _read_manifest(skill_path, manifest)
     description = data.get("description")
     tools = data.get("allowed-tools")
     trigger = _TRIGGER_RE.search(description) if isinstance(description, str) else None
@@ -468,8 +693,50 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
     custom = {k: v for k, v in data.items() if str(k) not in _KNOWN_FIELDS}
     platforms = data.get("platforms")
     name = _skill_name(skill_path, data)
-    duplicates = catalog.duplicates(skill_path, name) if catalog else []
-    lookalikes = catalog.lookalikes(skill_path) if catalog else []
+    # pi compares real entry names; on a case-insensitive filesystem the
+    # discovered manifest path carries the canonical spelling while the
+    # entry is cased differently, so resolve the actual name first.
+    actual_manifest_name = (
+        manifest.name
+        if manifest.name in names
+        else next((n for n in names if n.casefold() == manifest.name.casefold()), manifest.name)
+    )
+    duplicate_keys = bool(_duplicate_frontmatter_keys(fm_yaml))
+    tab_indent = _tab_indent_breaks_yaml(fm_yaml)
+    # pi's YAML parser (eemeli/yaml) rejects duplicate keys and tab indentation,
+    # so the skill is dropped and hidden findings must not suggest /skill:name.
+    pi_dropped = duplicate_keys or tab_indent
+    # The description as pi 1.6.0 resolves it (YAML 1.2 core: plain yes/on are strings).
+    pi_fm = FRONTMATTER_PATTERN.match(text)
+    pi_description = _pi_description(pi_fm.group(1)) if pi_fm else None
+    pi_hidden = _pi_top_level_bool(fm_yaml, "disable-model-invocation")
+    # A file pi never discovers cannot hide the skill or need a value fix.
+    # The ignore rules match the file pi reads, not the folder an explicit check selects.
+    pi_ignore = _pi_ignored_by_rules(manifest if manifest is not None else skill_path)
+    pi_rule_ignored = pi_ignore is not None
+    # pi's scan of the root stops at the first SKILL.md above this skill, so it never sees the file
+    # (a check of that manifest file itself selects the skill pi does load).
+    selected = skill_path.absolute()
+    pi_cutoff = (
+        next((c for c in catalog.cutoffs if c != selected and c.parent in selected.parents), None) if catalog else None
+    )
+    # pi skips an ignored entry, or stops above it, before it ever compares the manifest name.
+    pi_manifest_ignored = (
+        not pi_rule_ignored
+        and pi_cutoff is None
+        and actual_manifest_name != "SKILL.md"
+        and ("SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path))
+    )
+    duplicates = catalog.duplicates(manifest, name) if catalog else []
+    # Non-pi harnesses never discover pi's loose manifests: their name clashes
+    # come from the canonical catalog (SKILL.md folders) only.
+    canonical_dups = canonical.duplicates(manifest, name) if canonical is not None else duplicates
+    lookalikes = (
+        (canonical if canonical is not None else catalog).lookalikes(manifest)
+        if canonical is not None or catalog
+        else []
+    )
+    listed_catalog = canonical if canonical is not None else catalog
     return {
         "skill_name": name,
         "description_text": description if isinstance(description, str) else "",
@@ -477,6 +744,12 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "workspace_skills": root is None and skill_path.absolute().parent.name == "skills",
         "grouping_depth": depth,
         "manifest_name_exact": "SKILL.md" in names,
+        "pi_manifest_ignored": pi_manifest_ignored,
+        "pi_ignored_by_rules": pi_rule_ignored,
+        "pi_ignore_file": pi_ignore[0] if pi_ignore else "",
+        "pi_ignore_rule": pi_ignore[1] if pi_ignore else "",
+        "pi_ancestor_manifest": pi_cutoff.relative_to(catalog.base).as_posix() if pi_cutoff else "",
+        "pi_hidden_by_ancestor": pi_cutoff is not None,
         "nested_skill_md": bool(nested),
         "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
         "skill_md_symlink": manifest.is_symlink(),
@@ -499,12 +772,22 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "trigger_end": trigger.end() if trigger else None,
         "name_missing": "name" not in data,
         "frontmatter_bom": raw.startswith(b"\xef\xbb\xbf"),
-        "frontmatter_duplicate_keys": bool(_duplicate_frontmatter_keys(fm_yaml)),
-        "frontmatter_tab_indent": _tab_indent_breaks_yaml(fm_yaml),
+        "frontmatter_duplicate_keys": duplicate_keys,
+        "frontmatter_tab_indent": tab_indent,
         "allowed_tools_shape": "none"
         if tools is None
         else {str: "string", list: "list", dict: "map"}.get(type(tools), "other"),
         "disable_model_invocation": _is_true(data.get("disable-model-invocation")),
+        "pi_disable_model_invocation": pi_hidden is True
+        and not pi_dropped
+        and not pi_rule_ignored
+        and not pi_manifest_ignored,
+        "pi_hidden_value_invalid": pi_hidden is False
+        and not pi_dropped
+        and not pi_rule_ignored
+        and not pi_manifest_ignored
+        and pi_cutoff is None
+        and _is_true(data.get("disable-model-invocation")),
         "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
         "claude_ignored_values": "; ".join(_claude_ignored_values(data)),
@@ -525,11 +808,23 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "uses_arguments_placeholder": "$ARGUMENTS" in body,
         "uses_claude_skill_dir": "${CLAUDE_SKILL_DIR}" in body,
         **_bundle_facts(skill_path, manifest),
-        "catalog_size": catalog.size if catalog else 0,
-        "catalog_desc_chars": catalog.desc_chars if catalog else 0,
+        # Listing budgets follow what the harness actually scans: the canonical
+        # catalog, not pi's census (which also holds pi-only loose manifests).
+        "catalog_size": listed_catalog.size if listed_catalog else 0,
+        "catalog_desc_chars": listed_catalog.desc_chars if listed_catalog else 0,
+        # What this harness's own scan saw (pi census counts, Codex/Claude scan counts).
+        "census_size": catalog.size if catalog else 0,
+        "census_desc_chars": catalog.desc_chars if catalog else 0,
         "catalog_base": str(catalog.base) if catalog and catalog.base else "",
-        "duplicate_name": bool(duplicates),
-        "duplicate_paths": ", ".join(duplicates[:3]),
+        "duplicate_name": bool(canonical_dups),
+        "duplicate_paths": ", ".join(canonical_dups[:3]),
+        "pi_duplicate_name": bool(duplicates),
+        "pi_duplicate_paths": ", ".join(duplicates[:3]),
+        "pi_description_text": pi_description or "",
+        "pi_description_invalid": pi_description is None and not pi_dropped,
+        "pi_not_loaded": (
+            pi_dropped or pi_rule_ignored or pi_manifest_ignored or pi_cutoff is not None or pi_description is None
+        ),
         "lookalike_names": ", ".join(lookalikes[:3]),
     }
 
@@ -606,22 +901,50 @@ class Catalog:
     desc_chars: int
     base: Path | None = None
     descriptions: dict[Path, str] | None = None
+    # pi's scan of the folder stopped at these manifests: nothing below them is discovered.
+    cutoffs: tuple[Path, ...] = ()
 
     @classmethod
-    def of(cls, skills: list[Path], base: Path | None = None) -> Catalog:
+    def of(
+        cls,
+        skills: list[Path],
+        base: Path | None = None,
+        manifests: dict[Path, Path] | None = None,
+        pi_resolved: bool = False,
+        cutoffs: list[Path] | None = None,
+    ) -> Catalog:
+        """Count the skills in one folder; ``pi_resolved`` measures descriptions as pi's parser resolves them."""
         names, descriptions, chars = {}, {}, 0
         for skill in skills:
-            _, _, _, _, data = _read_manifest(skill)
-            names[skill.resolve()] = _skill_name(skill, data)
+            # Loose manifest files (pi's root .md skills) stand for their folder;
+            # entries key on the manifest file so an explicit check can match it.
+            folder = skill.parent if skill.is_file() else skill
+            # A file entry is its own explicit manifest; a folder entry only uses
+            # the manifest an explicit check selected for it.
+            manifest, _, text, _, data = _read_manifest(
+                folder, skill if skill.is_file() else (manifests or {}).get(folder.resolve())
+            )
+            names[manifest.resolve()] = _skill_name(folder, data)
             description = data.get("description")
+            if pi_resolved:
+                # pi lists what its YAML 1.2 core parser resolves: plain yes and on stay strings.
+                frontmatter = FRONTMATTER_PATTERN.match(text)
+                description = _pi_description(frontmatter.group(1)) if frontmatter else None
             chars += len(description) if isinstance(description, str) else 0
-            descriptions[skill.resolve()] = description if isinstance(description, str) else ""
-        return cls(names=names, size=len(skills), desc_chars=chars, base=base, descriptions=descriptions)
+            descriptions[manifest.resolve()] = description if isinstance(description, str) else ""
+        return cls(
+            names=names,
+            size=len(skills),
+            desc_chars=chars,
+            base=base,
+            descriptions=descriptions,
+            cutoffs=tuple(cutoffs or ()),
+        )
 
-    def lookalikes(self, skill: Path) -> list[str]:
+    def lookalikes(self, manifest: Path) -> list[str]:
         """Other skills here whose description has nearly the same words as this one's."""
         descriptions = self.descriptions or {}
-        own = skill.resolve()
+        own = manifest.resolve()
         words = _description_words(descriptions.get(own, ""))
         if len(words) < _LOOKALIKE_MIN_WORDS:
             return []
@@ -633,8 +956,8 @@ class Catalog:
             and _jaccard(words, _description_words(text)) >= _LOOKALIKE_OVERLAP
         ]
 
-    def duplicates(self, skill: Path, name: str) -> list[str]:
-        own = skill.resolve()
+    def duplicates(self, manifest: Path, name: str) -> list[str]:
+        own = manifest.resolve()
         return [self._display(other) for other, other_name in self.names.items() if other != own and other_name == name]
 
     def _display(self, path: Path) -> str:
@@ -660,19 +983,277 @@ def _catalog_base(skill: Path) -> Path | None:
     """The skills folder a skill is installed in: a harness root, or a workspace ``skills/`` folder (OpenClaw)."""
     root, depth = _install_root(skill)
     if root is not None:
+        # A skill sitting directly at the skills root (pi's loose manifests)
+        # scans that root itself; parents[0] would start one folder above it.
+        parts = _link_location_parts(skill)
+        if "/".join(parts[-len(root.removeprefix("~/").split("/")) :]) == root.removeprefix("~/"):
+            return skill.absolute()
         return skill.absolute().parents[depth]
     parent = skill.absolute().parent
     return parent if parent.name == "skills" else None
 
 
-def _catalog_of(group: list[Path]) -> Catalog:
+def _on_disk_spelling(path: Path) -> Path:
+    """*path* re-spelled component by component as the filesystem stores the names.
+
+    On a case-insensitive volume the same file can be reached with a cased alias (macOS APFS keeps the alias
+    through resolve()), which breaks every folder comparison and catalog key. Missing components stay as typed.
+    """
+    absolute = path.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        try:
+            names = [entry.name for entry in current.iterdir()]
+        except OSError:
+            return absolute
+        spelled = part if part in names else next((n for n in names if n.casefold() == part.casefold()), None)
+        if spelled is None:
+            return absolute
+        current /= spelled
+    return current
+
+
+def _pi_skills_mode(base: Path) -> str | None:
+    """How pi 1.6.0 scans *base*: "pi" roots keep loose .md files at the root, .agents/skills keeps them only nested.
+
+    A root stored with other case (".PI/skills" on a case-insensitive volume) is the folder pi's lowercase default
+    reaches, so a name that misses falls back to the folder identity, which keeps a distinct ".PI" apart from ".pi" on
+    a case-sensitive volume.
+    """
+    absolute = base.absolute()
+    posix = absolute.as_posix()
+    for suffix, mode in _PI_ROOT_SUFFIXES:
+        if posix.endswith(suffix):
+            return mode
+        words = suffix.strip("/").split("/")
+        if len(absolute.parts) > len(words) and _same_directory(absolute, Path(*absolute.parts[: -len(words)], *words)):
+            return mode
+    return None
+
+
+PI_IGNORE_FILES = (".gitignore", ".ignore", ".fdignore")
+
+
+def _pi_add_ignore_line(patterns: list[str], line: str, prefix: str) -> None:
+    """Add one .gitignore line the way pi's ignore setup does (dist/core/skills.js addIgnoreRules)."""
+    trimmed = line.strip()
+    if not trimmed or (trimmed.startswith("#") and not trimmed.startswith("\\#")):
+        return
+    pattern, negated = line, False
+    if pattern.startswith("!"):
+        negated, pattern = True, pattern[1:]
+    elif pattern.startswith("\\!"):
+        pattern = pattern[1:]
+    pattern = pattern.removeprefix("/").lower()
+    patterns.append(("!" if negated else "") + prefix.lower() + pattern)
+
+
+# Plain scalars pi's parser (eemeli/yaml, YAML 1.2 core) resolves away from a
+# string: booleans, null and numbers. YAML 1.1 words like "yes" stay strings.
+_CORE_NON_STRING = re.compile(
+    r"^(?:[+-]?(?:[0-9]+|[0-9]*\.[0-9]+)(?:[eE][+-]?[0-9]+)?|0x[0-9a-fA-F]+|0o[0-7]+|"
+    r"true|True|TRUE|false|False|FALSE|null|Null|NULL|~)$"
+)
+
+
+def _pi_frontmatter(fm_yaml: str, *, reject_duplicate_keys: bool = False):
+    """Parse frontmatter into a node tree the way pi's parser (eemeli/yaml, YAML 1.2 core) sees it.
+
+    Raw parser events keep what the composer erases: explicit tags on plain
+    scalars and on merge keys. Returns ``(root, anchors)`` or ``None`` when the
+    text is not valid YAML (bad syntax, and, when ``reject_duplicate_keys``,
+    a repeated top-level key).
+    """
+    from yaml.events import (
+        AliasEvent,
+        MappingEndEvent,
+        MappingStartEvent,
+        ScalarEvent,
+        SequenceEndEvent,
+        SequenceStartEvent,
+    )
+
+    try:
+        events = list(yaml.parse(fm_yaml))
+    except (yaml.YAMLError, RecursionError, ValueError):
+        # ValueError: PyYAML's scanner raises on an escape outside Unicode (``"\U00110000"``), which is
+        # unparseable frontmatter like any other syntax error.
+        return None
+    anchors: dict[str, tuple] = {}
+
+    def walk(index: int) -> tuple[tuple, int]:
+        event = events[index]
+        index += 1
+        if isinstance(event, ScalarEvent):
+            node = ("scalar", event)
+            if event.anchor:
+                anchors[event.anchor] = node
+            return node, index
+        if isinstance(event, AliasEvent):
+            return ("alias", event.anchor), index
+        mapping = isinstance(event, MappingStartEvent)
+        node: tuple = ("mapping" if mapping else "sequence", [], event.anchor, event.tag)
+        if event.anchor:
+            anchors[event.anchor] = node
+        end = MappingEndEvent if mapping else SequenceEndEvent
+        while not isinstance(events[index], end):
+            if mapping:
+                key_node, index = walk(index)
+            value_node, index = walk(index)
+            node[1].append((key_node, value_node) if mapping else value_node)
+        return node, index + 1
+
+    try:
+        pos = 0
+        while pos < len(events) and not isinstance(
+            events[pos], (MappingStartEvent, SequenceStartEvent, ScalarEvent, AliasEvent)
+        ):
+            pos += 1
+        root, _ = walk(pos)
+    except (IndexError, RecursionError, yaml.YAMLError):
+        return None
+    if reject_duplicate_keys and root[0] == "mapping":
+        seen: set[str] = set()
+        for key_node, _ in root[1]:
+            if key_node[0] == "scalar" and key_node[1].value in seen:
+                return None  # duplicate keys make the document unparseable for pi
+            if key_node[0] == "scalar":
+                seen.add(key_node[1].value)
+    return root, anchors
+
+
+def _pi_node_string(node: tuple, anchors: dict[str, tuple]) -> str | None:
+    """The string pi's YAML 1.2 core schema resolves *node* to, or ``None`` if it is not a string."""
+    if node[0] == "alias":
+        node = anchors.get(node[1]) or ("missing",)
+    if node[0] != "scalar":
+        return None
+    event = node[1]
+    if event.tag not in (None, "tag:yaml.org,2002:str"):
+        return None  # an explicit bool/int/float/null tag resolves away from string
+    if event.tag == "tag:yaml.org,2002:str" or event.style is not None:
+        return event.value  # quoted or explicitly tagged strings stay strings
+    return event.value if event.value and _CORE_NON_STRING.match(event.value) is None else None
+
+
+def _pi_description(fm_yaml: str) -> str | None:
+    """The description as pi resolves it: ``None`` when absent, non-string, or empty."""
+    parsed = _pi_frontmatter(fm_yaml, reject_duplicate_keys=True) if fm_yaml else None
+    if parsed is None or parsed[0][0] != "mapping":
+        return None
+    root, anchors = parsed
+    for key_node, value_node in root[1]:
+        if (
+            key_node[0] == "scalar"
+            and key_node[1].value == "description"
+            and key_node[1].tag
+            in (
+                None,
+                "tag:yaml.org,2002:str",
+            )
+        ):
+            resolved = _pi_node_string(value_node, anchors)
+            return resolved if resolved and resolved.strip() else None
+    return None
+
+
+def _pi_loadable(manifest: Path) -> bool:
+    """Whether pi 1.6.0 loads *manifest*: valid frontmatter (no duplicate keys) with a non-empty description."""
+    try:
+        raw = manifest.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    match = FRONTMATTER_PATTERN.match(raw)
+    if match is None:
+        return False
+    return _pi_description(match.group(1)) is not None
+
+
+def _pi_manifests(base: Path, cutoffs: list[Path] | None = None) -> list[Path]:
+    """Manifest files pi 1.6.0 accepts under a skills root.
+
+    ``cutoffs`` collects the exact ``SKILL.md`` files that stopped the scan; pi never looks below them.
+
+    Default roots follow ``collectSkillEntries`` (dist/core/package-manager.js): a loose
+    ``.md`` file (any name) loads directly in a ``.pi`` root (mode "pi") and nested under
+    ``.agents/skills`` (mode "agents"). A directory pi is given explicitly keeps loose files
+    at its own root instead (``loadSkillsFromDirInternal``, dist/core/skills.js), which is
+    also how a non-default root is modelled here. A folder short-circuits on the exact
+    ``SKILL.md`` spelling — a differently cased sibling is invisible to it — while subfolders
+    recurse. Entries matched by the root's ignore files are skipped, and only files whose
+    frontmatter parses with a description load.
+    """
+    mode = _pi_skills_mode(base) or "pi"
+
+    def scan(folder: Path, root_level: bool, patterns: list[str]) -> list[Path]:
+        try:
+            children = sorted(folder.iterdir())
+        except OSError:
+            return []
+        prefix = "" if folder == base else folder.relative_to(base).as_posix() + "/"
+        for name in PI_IGNORE_FILES:
+            path = folder / name
+            if path.is_file():
+                try:
+                    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    continue
+                for line in lines:
+                    _pi_add_ignore_line(patterns, line, prefix)
+        spec = pathspec.GitIgnoreSpec.from_lines(patterns)
+
+        def ignored(child: Path, directory: bool) -> bool:
+            rel = child.relative_to(base).as_posix().lower()
+            return bool(spec.match_file(rel + "/" if directory else rel))
+
+        # pi compares entry names exactly, so on a case-insensitive filesystem
+        # skill.md is not the canonical spelling here.
+        canonical = next((c for c in children if c.name == "SKILL.md"), None)
+        if canonical is not None and canonical.is_file() and not ignored(canonical, False):
+            if cutoffs is not None:
+                cutoffs.append(canonical)
+            return [canonical] if _pi_loadable(canonical) else []
+        found: list[Path] = []
+        for child in children:
+            if child.name.startswith(".") or child.name == "node_modules":
+                continue
+            is_dir = child.is_dir()
+            if ignored(child, is_dir):
+                continue
+            if is_dir:
+                found.extend(scan(child, False, patterns))
+            elif (
+                child.is_file()
+                and child.name.endswith(".md")
+                and (mode == "agents") != root_level
+                and _pi_loadable(child)
+            ):
+                found.append(child)
+        return found
+
+    return scan(base, True, [])
+
+
+def _catalog_of(
+    group: list[Path], manifests: dict[Path, Path] | None = None, cutoffs: list[Path] | None = None
+) -> Catalog:
     base = _catalog_base(group[0])
     if base is not None:
-        return Catalog.of(_find_skills(base) or group, base)
-    return Catalog.of(group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None)
+        if _pi_skills_mode(base) is not None:
+            # pi's own discovery: every loose .md file it loads is its own skill;
+            # an empty census stands, ignore rules may exclude everything.
+            return Catalog.of(_pi_manifests(base, cutoffs), base, manifests, pi_resolved=True, cutoffs=cutoffs)
+        return Catalog.of(_find_skills(base) or group, base, manifests)
+    return Catalog.of(
+        group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None, manifests
+    )
 
 
-def facts_for(skills: list[Path], profiles: list[dict[str, Any]] | None = None) -> dict[Path, dict[str, Any]]:
+def facts_for(
+    skills: list[Path],
+    profiles: list[dict[str, Any]] | None = None,
+    manifests: dict[Path, Path] | None = None,
+) -> dict[Path, dict[str, Any]]:
     """Facts per skill, with the catalog they are installed in.
 
     A skill installed in a skills folder (e.g. ``.claude/skills``, or an OpenClaw workspace ``skills/``) is
@@ -680,18 +1261,39 @@ def facts_for(skills: list[Path], profiles: list[dict[str, Any]] | None = None) 
     installations. Skills outside any skills folder that are given together form their own catalog.
 
     ``profiles`` are the harnesses being checked: only the user-level skills folders they read are searched for
-    same-named copies (every known folder when omitted).
+    same-named copies (every known folder when omitted). ``manifests`` maps a skill folder
+    to the manifest file an explicit check selected for it.
     """
+    # A path spelled with a cased alias of the on-disk name is the same skill: compare and key by the stored spelling.
+    on_disk = {skill: _on_disk_spelling(skill) for skill in skills}
+    explicit = {
+        _on_disk_spelling(folder).resolve(): _on_disk_spelling(file) for folder, file in (manifests or {}).items()
+    }
     groups: dict[Path | None, list[Path]] = {}
     for skill in skills:
-        base = _catalog_base(skill)
-        groups.setdefault(base.resolve() if base else None, []).append(skill)
+        base = _catalog_base(on_disk[skill])
+        groups.setdefault(base.resolve() if base else None, []).append(on_disk[skill])
     catalogs: dict[Path, Catalog] = {}
     for group in groups.values():
-        catalogs.update(dict.fromkeys(group, _catalog_of(group)))
+        cutoffs: list[Path] = []
+        catalogs.update(dict.fromkeys(group, _catalog_of(group, explicit, cutoffs)))
     user_roots = None if profiles is None else {r for p in profiles for r in p.get("roots", {}).get("user", [])}
     user_skills: dict[Path, dict[Path, str]] = {}
-    facts = {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
+    # Canonical-catalog name clashes for non-pi harnesses sharing a pi-mode folder.
+    canonical: dict[Path, Catalog] = {}
+    for base_, members in groups.items():
+        if base_ is not None and _pi_skills_mode(base_) is not None:
+            canon = Catalog.of(_find_skills(base_) or members, base_, explicit)
+            canonical.update(dict.fromkeys(members, canon))
+    facts = {
+        skill: skill_facts(
+            on_disk[skill],
+            catalogs[on_disk[skill]],
+            explicit.get(on_disk[skill].resolve()),
+            canonical.get(on_disk[skill]),
+        )
+        for skill in skills
+    }
     for skill_facts_ in facts.values():
         skill_facts_["user_copies"] = _user_copies(skill_facts_, user_skills, user_roots)
     return facts
@@ -749,9 +1351,25 @@ def _utf16_units(value: Any) -> int:
     return len(value.encode("utf-16-le", "surrogatepass")) // 2 if isinstance(value, str) else 0
 
 
+def listing_fact(profile: dict[str, Any], facts: dict[str, Any], key: str, default: str) -> str:
+    """Fact name for this profile's catalog row counts (e.g. pi counts its own census)."""
+    name = (profile.get("listing") or {}).get(key, default)
+    return name if name in facts else default
+
+
 def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     """What the profile says this harness puts in the model's skill list for the description."""
     listing = profile.get("listing") or {}
+    dropped_when = listing.get("dropped_when")
+    if dropped_when and facts.get(dropped_when):
+        # The harness never loaded this file (unparseable or undiscovered):
+        # nothing is listed at all, and no invocation works either.
+        return {"mode": "dropped", "text": ""}
+    hidden_when = listing.get("hidden_when")
+    if hidden_when and facts.get(hidden_when):
+        # The harness omits the skill from the model list entirely; the explicit
+        # invocation that still works is reported by its own finding.
+        return {"mode": "hidden", "text": ""}
     text = facts[listing.get("text_fact", "description_text")]
     budget = listing.get("budget") or {}
     over_budget = facts["catalog_size"] and (
@@ -985,8 +1603,8 @@ def evaluate_profile(
         findings=findings,
         listed=listed_description(profile, facts),
         catalog={
-            "size": facts["catalog_size"],
-            "desc_chars": facts["catalog_desc_chars"],
+            "size": facts[listing_fact(profile, facts, "size_fact", "catalog_size")],
+            "desc_chars": facts[listing_fact(profile, facts, "chars_fact", "catalog_desc_chars")],
             "folder": facts["catalog_base"],
         },
     )

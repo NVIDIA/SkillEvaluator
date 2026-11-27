@@ -252,10 +252,10 @@ class SchemaValidator(ValidatorBase):
     def description(self) -> str:
         return "Validate SKILL.md frontmatter and repository structure"
 
-    def validate(self, skill_path: Path) -> ValidationResult:
+    def validate(self, skill_path: Path, manifest: Path | None = None) -> ValidationResult:
         """Validate skill(s) at path for schema and structure compliance."""
-        if self._is_skill_directory(skill_path):
-            return self._validate_single_skill(skill_path)
+        if manifest is not None or self._is_skill_directory(skill_path):
+            return self._validate_single_skill(skill_path, manifest)
 
         # Folder-level validation with compliance checks
         skill_dirs = self._find_all_skills(skill_path)
@@ -365,10 +365,11 @@ class SchemaValidator(ValidatorBase):
             )
         return result
 
-    def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
+    def _validate_single_skill(self, skill_path: Path, manifest: Path | None = None) -> ValidationResult:
         """Run all schema validation checks on a single skill directory."""
         result = ValidationResult()
-        skill_md = self._find_skill_manifest(skill_path)
+        # An explicit manifest (a harness-check file argument) replaces canonical discovery.
+        skill_md = manifest or self._find_skill_manifest(skill_path)
 
         if not skill_md:
             result.add_finding(
@@ -521,7 +522,7 @@ class SchemaValidator(ValidatorBase):
                     check_name="duplicate_key",
                     message=(
                         f"Duplicate frontmatter key '{key}': YAML parsers disagree on it "
-                        "(Codex, OpenCode, Copilot CLI and OpenClaw drop the skill; others keep the last value)"
+                        "(Codex, OpenCode, Copilot CLI, OpenClaw and pi drop the skill; others keep the last value)"
                     ),
                     file_path=file_path,
                     line_number=line_number,

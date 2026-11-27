@@ -35,6 +35,7 @@ from pathlib import Path
 from queue import Empty, SimpleQueue
 from types import MappingProxyType
 from typing import Any, NoReturn
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from skillevaluator import __version__
@@ -188,6 +189,7 @@ from skillevaluator.tier3_environments import (
     HARBOR_ENVIRONMENT_ALIAS_KWARGS,
     HARBOR_ENVIRONMENT_EXTRAS,
     HARBOR_ENVIRONMENT_KWARGS,
+    HARBOR_NATIVE_ENV_MODES,
     HARBOR_VERSION,
     SKILLEVALUATOR_GKE_EXTRA_ENVIRONMENT_KWARGS,
     EnvironmentBackendError,
@@ -1469,6 +1471,7 @@ _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_D
 _CODEX_VERSION = PINNED_RUNTIME_VERSIONS["codex"]
 _CLAUDE_CODE_VERSION = PINNED_RUNTIME_VERSIONS["claude-code"]
 OPENCODE_VERSION = PINNED_RUNTIME_VERSIONS["opencode"]
+PI_VERSION = PINNED_RUNTIME_VERSIONS["pi"]
 # Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
 # releases defer to Codex's own default. Pin the effort SkillEvaluator was
 # validated with so scores and cost stay comparable across Harbor upgrades.
@@ -1478,6 +1481,7 @@ _HARBOR_AGENT_KWARGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
         "claude-code": MappingProxyType({"version": _CLAUDE_CODE_VERSION}),
         "opencode": MappingProxyType({"version": OPENCODE_VERSION}),
         "hermes": MappingProxyType({"version": HERMES_VERSION}),
+        "pi": MappingProxyType({"version": PI_VERSION}),
     }
 )
 # Claude Code's default effort depends on the model, and Claude Opus 5 ran at
@@ -1885,6 +1889,35 @@ def _harbor_agent_kwargs(agent: str, model: str | None, env_mode: str) -> dict[s
     return kwargs
 
 
+def _pi_openai_public_endpoint(run_env: Mapping[str, str]) -> bool:
+    """Whether pi's run env points at OpenAI's public endpoint.
+
+    The plain OpenAI provider exports its default endpoint as
+    ``OPENAI_BASE_URL``, which is indistinguishable from an operator-chosen
+    custom URL pointing at the same host; either way pi can use its built-in
+    ``openai`` provider.
+    """
+    hostname = urlparse(run_env.get("OPENAI_BASE_URL", "").strip()).hostname or ""
+    return hostname == "api.openai.com"
+
+
+def _pi_custom_endpoint_agent_kwargs(run_env: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """Give pi the explicit API style its OpenAI-shaped custom endpoints need.
+
+    Harbor's Pi agent routes a custom base URL through models.json, and building
+    that file requires the ``model_api`` agent option; without it the launch
+    fails with "Pi custom endpoints require the model_api agent argument".
+    The public OpenAI endpoint is excluded (the SkillEvaluatorPi wrapper keeps
+    pi on its built-in provider there): pi stays on the full model catalog, and
+    gateways get the completions style. The Anthropic provider has no pi
+    custom-endpoint path and is rejected by the credential gate instead.
+    """
+    base_url = run_env.get("OPENAI_BASE_URL", "").strip()
+    if not base_url or _pi_openai_public_endpoint(run_env):
+        return {}
+    return {"pi": {"model_api": "openai-completions"}}
+
+
 def build_harbor_run_command(
     *,
     dataset_path: str | Path,
@@ -1904,6 +1937,7 @@ def build_harbor_run_command(
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    agent_kwargs_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[str]:
     """Build a Harbor invocation for a built-in or backend environment, or local mode."""
     if not is_env_mode(env_mode):
@@ -1986,11 +2020,25 @@ def build_harbor_run_command(
             env_import_path = SECURE_DOCKER_ENV_IMPORT_PATH
         command.extend(["--env", env_import_path])
     elif backend is not None:
-        command.extend(["--agent", agent_import_path or backend.agent_import_paths.get(agent, agent)])
+        backend_import = backend.agent_import_paths.get(agent)
+        if backend_import is None and agent == "pi":
+            # Custom backends (e2b, daytona) run Harbor's stock agents unless they
+            # wrap one themselves; pi must still go through the pinned wrapper,
+            # whose native mcp.json staging replaces Harbor 0.25.0's stock
+            # pi-mcp-adapter path (it rejects pi >= 0.86 before any setup).
+            backend_import = CONTAINER_AGENT_IMPORT_PATHS["pi"]
+        command.extend(["--agent", agent_import_path or backend_import or agent])
         command.extend(["--env", backend.import_path])
     else:
-        command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
-    for name, value in sorted(_harbor_agent_kwargs(agent, model, env_mode).items()):
+        # Every remaining Harbor-native mode (e2b, daytona, modal, ...) runs
+        # Harbor's stock agents; pi must still go through the pinned wrapper,
+        # whose native mcp.json staging replaces Harbor 0.25.0's stock
+        # pi-mcp-adapter path (it rejects pi >= 0.86 before any setup).
+        default_import = CONTAINER_AGENT_IMPORT_PATHS["pi"] if agent == "pi" else agent
+        command.extend(["--agent", agent_import_path or default_import, "--env", harbor_environment_type(env_mode)])
+    agent_kwargs = _harbor_agent_kwargs(agent, model, env_mode)
+    agent_kwargs.update((agent_kwargs_overrides or {}).get(agent, {}))
+    for name, value in sorted(agent_kwargs.items()):
         command.extend(["--ak", encode_environment_kwarg(name, value)])
     for name, value in sorted(validated_environment_kwargs.items()):
         # A SkillEvaluator GKE wrapper option, not a Harbor constructor kwarg.
@@ -2151,9 +2199,9 @@ def _validate_agent_provider_credentials(
 
     if provider.provider != "nv_build":
         supported_agents = {
-            "openai": {"claude-code", "codex", "opencode"},
-            "openai-compatible": {"claude-code", "codex", "opencode"},
-            "anthropic": {"claude-code", "codex", "opencode"},
+            "openai": {"claude-code", "codex", "opencode", "pi"},
+            "openai-compatible": {"claude-code", "codex", "opencode", "pi"},
+            "anthropic": {"claude-code", "codex", "opencode", "pi"},
             "bedrock": {"claude-code"},
         }.get(provider.provider, set())
         unsupported = [agent for agent in agents if agent not in supported_agents]
@@ -2194,6 +2242,12 @@ def _validate_agent_provider_credentials(
                 ]
 
         if provider.provider == "anthropic":
+            if provider.base_url and "pi" in agents:
+                return [
+                    "pi with the Anthropic evaluator provider requires the public Anthropic endpoint; "
+                    "pi has no custom-endpoint path for Anthropic base URLs. Select claude-code, or route "
+                    "the gateway through the OpenAI-compatible provider."
+                ]
             if "opencode" in agents and model_sources.get("opencode", "public provider default") == (
                 "public provider default"
             ):
@@ -2221,7 +2275,7 @@ def _validate_agent_provider_credentials(
         return [
             "nv_build does not support live agent(s): "
             + ", ".join(unsupported)
-            + ". Choose opencode, claude-code, or codex."
+            + ". Choose opencode, claude-code, codex, or hermes."
         ]
 
     if env_mode == ENV_MODE_LOCAL:
@@ -2754,12 +2808,14 @@ def _check_prerequisites(
             return [str(exc)]
         except ValueError as exc:
             return [f"Invalid local sandbox configuration: {exc}"]
+        from skillevaluator.tier3.harbor import LOCAL_HARBOR_AGENTS
         from skillevaluator.tier3.harbor.local_runtime import validate_local_agents
 
         selected_agents = agents or []
         unsupported = validate_local_agents(selected_agents)
         if unsupported:
-            return [f"Local mode supports only claude-code, codex, opencode. Unsupported: {', '.join(unsupported)}."]
+            supported = ", ".join(sorted(LOCAL_HARBOR_AGENTS))
+            return [f"Local mode supports only {supported}. Unsupported: {', '.join(unsupported)}."]
         try:
             strict_reads = local_sandbox.coerce_flag(None, env_var=local_sandbox.STRICT_READS_ENV)
             return ensure_local_runtimes(
@@ -3660,6 +3716,11 @@ def _model_for_agent(
         selected = _NVIDIA_BUILD_AGENT_DEFAULT_MODEL
     if agent == "hermes" and source == "public provider default" and provider.provider == "nv_build":
         selected = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+    if agent == "pi" and provider.provider == "anthropic" and source not in {"CLI", "evals/config.yml"}:
+        # Harbor's Pi resolves its model connection through the OPENAI_* pair, so an
+        # unqualified Anthropic default never reaches pi as a provider choice; the
+        # anthropic/ prefix restores the provider flag and the API key.
+        selected = f"anthropic/{selected}"
     if agent == "opencode":
         namespace = {
             "anthropic": "anthropic",
@@ -4194,6 +4255,7 @@ def _run_harbor(
         agent_import_path=agent_import_path,
         verifier_env=verifier_env,
         environment_kwargs=environment_kwargs,
+        agent_kwargs_overrides=_pi_custom_endpoint_agent_kwargs(run_env),
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
@@ -5222,6 +5284,9 @@ def _private_agent_paths(
                     else CONTAINER_AGENT_IMPORT_PATHS
                 )
                 base = defaults.get(agent)
+            elif base is None and agent == "pi" and env_mode in HARBOR_NATIVE_ENV_MODES:
+                # As in the run command's stock-agent branch: only pi needs the pinned wrapper there.
+                base = CONTAINER_AGENT_IMPORT_PATHS[agent]
             with_path = hooks.with_agent_import_path(agent, base)
             classify = getattr(hooks, "baseline_agent_import_path", None)
             baseline_path = classify(agent, base) if classify is not None else base

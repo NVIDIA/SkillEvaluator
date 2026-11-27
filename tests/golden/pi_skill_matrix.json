@@ -1,0 +1,538 @@
+{
+  "generator": "generate_pi_skill_matrix.mjs",
+  "pi_version": "1.6.0",
+  "cases": [
+    {
+      "id": "dmi-1-true",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": true,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "dmi-2-!!str",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": false,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "dmi-3-!!bool",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": true,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "dmi-4-yes",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": false,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "dmi-5-true",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": false,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "dmi-6-true",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": true,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "dmi-7-on",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": false,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-implicit",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing merges.",
+          "disableModelInvocation": false,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-tag-on-key",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": [
+        {
+          "type": "warning",
+          "message": "An alias node must not specify any properties at line 5, column 13:\n\n<<: !!merge *d\n            ^^\n",
+          "path": "<root>/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "merge-tag-on-op",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing merges.",
+          "disableModelInvocation": true,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-seq",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing merges.",
+          "disableModelInvocation": false,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "dup-keys",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": [
+        {
+          "type": "warning",
+          "message": "Map keys must be unique at line 2, column 1:\n\nname: demo\nname: other\n^\n",
+          "path": "<root>/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "tabs-in-frontmatter",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": [
+        {
+          "type": "warning",
+          "message": "Tabs are not allowed as indentation at line 4, column 1:\n\nmetadata:\n\tdisable-model-invocation: true\n^\n",
+          "path": "<root>/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "no-description",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": [
+        {
+          "type": "warning",
+          "message": "description is required",
+          "path": "<root>/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "empty-description",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": [
+        {
+          "type": "warning",
+          "message": "description is required",
+          "path": "<root>/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "loose-collision-root",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing collisions.",
+          "disableModelInvocation": false,
+          "filePath": "aaa.md"
+        }
+      ],
+      "diagnostics": [
+        {
+          "type": "collision",
+          "message": "name \"demo\" collision",
+          "path": "<root>/skill.md",
+          "collision": {
+            "resourceType": "skill",
+            "name": "demo",
+            "winnerPath": "<root>/aaa.md",
+            "loserPath": "<root>/skill.md"
+          }
+        }
+      ]
+    },
+    {
+      "id": "loose-md-in-subdir-only",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": []
+    },
+    {
+      "id": "skillmd-dir-no-loose",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": true,
+          "filePath": "SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "name-fallback",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "skills",
+          "description": "Use when testing names.",
+          "disableModelInvocation": false,
+          "filePath": "skills/aaa.md"
+        }
+      ],
+      "diagnostics": [
+        {
+          "type": "collision",
+          "message": "name \"skills\" collision",
+          "path": "<root>/skills/skill.md",
+          "collision": {
+            "resourceType": "skill",
+            "name": "skills",
+            "winnerPath": "<root>/skills/aaa.md",
+            "loserPath": "<root>/skills/skill.md"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ignore-gitignore-loose",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing ignores.",
+          "disableModelInvocation": false,
+          "filePath": "skill.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "ignore-dot-ignore",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "demo",
+          "description": "Use when testing ignores.",
+          "disableModelInvocation": false,
+          "filePath": "skill.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "two-nested-skillmd",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "alpha",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": true,
+          "filePath": "a/SKILL.md"
+        },
+        {
+          "name": "beta",
+          "description": "Use when testing tags.",
+          "disableModelInvocation": true,
+          "filePath": "b/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "ignore-fdignore",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "check",
+          "description": "Use when testing ignores.",
+          "disableModelInvocation": false,
+          "filePath": "check/skill.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-seq-first-wins",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-seq-explicit-wins",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "desc-yes-plain",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "dy",
+          "description": "yes",
+          "disableModelInvocation": false,
+          "filePath": "skills/dy/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "desc-true-plain",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": [
+        {
+          "type": "warning",
+          "message": "description is required",
+          "path": "<root>/skills/dt/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "dup-desc-keys-loose",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "ok",
+          "description": "fine",
+          "disableModelInvocation": false,
+          "filePath": "skills/ok.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "ignore-all-empty-census",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-seq-order-probe",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-seq-single",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-key-tag-first-wins",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": true,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-key-tag-explicit-wins",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "ignore-rule-case-insensitive",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "zzz",
+          "description": "kept",
+          "disableModelInvocation": false,
+          "filePath": "skills/zzz.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "agents-root-loose",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "canon",
+          "description": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+          "disableModelInvocation": false,
+          "filePath": "m/.agents/skills/canon/SKILL.md"
+        },
+        {
+          "name": "alpha",
+          "description": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "disableModelInvocation": false,
+          "filePath": "m/.agents/skills/sub/alpha.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "pi-root-loose",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "canon",
+          "description": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+          "disableModelInvocation": false,
+          "filePath": "m/.pi/skills/canon/SKILL.md"
+        },
+        {
+          "name": "pi0",
+          "description": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+          "disableModelInvocation": false,
+          "filePath": "m/.pi/skills/pi0.md"
+        },
+        {
+          "name": "pi1",
+          "description": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+          "disableModelInvocation": false,
+          "filePath": "m/.pi/skills/pi1.md"
+        },
+        {
+          "name": "pi2",
+          "description": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+          "disableModelInvocation": false,
+          "filePath": "m/.pi/skills/pi2.md"
+        },
+        {
+          "name": "pi3",
+          "description": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+          "disableModelInvocation": false,
+          "filePath": "m/.pi/skills/pi3.md"
+        },
+        {
+          "name": "pi4",
+          "description": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+          "disableModelInvocation": false,
+          "filePath": "m/.pi/skills/pi4.md"
+        },
+        {
+          "name": "pi5",
+          "description": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+          "disableModelInvocation": false,
+          "filePath": "m/.pi/skills/pi5.md"
+        },
+        {
+          "name": "pi6",
+          "description": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+          "disableModelInvocation": false,
+          "filePath": "m/.pi/skills/pi6.md"
+        },
+        {
+          "name": "pi7",
+          "description": "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+          "disableModelInvocation": false,
+          "filePath": "m/.pi/skills/pi7.md"
+        }
+      ],
+      "diagnostics": []
+    }
+  ]
+}

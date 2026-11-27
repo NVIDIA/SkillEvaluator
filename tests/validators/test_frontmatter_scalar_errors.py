@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from skillevaluator.harness.overlay import _tab_indent_breaks_yaml
+from skillevaluator.harness.overlay import _tab_indent_breaks_yaml, load_profiles
 from skillevaluator.tier1.commands import run_validation
 from skillevaluator.utils.structured_data import (
     ScalarConstructionError,
@@ -146,7 +146,7 @@ def test_schema_and_harness_finish_with_a_yaml_finding(malformed_skill: Path) ->
 
     assert any(finding.check_name == "yaml_syntax" for result in results for finding in result.findings)
     harness = next(result for result in results if HARNESS_METADATA_KEY in result.metadata)
-    assert len(harness.metadata[HARNESS_METADATA_KEY][str(malformed_skill)]) == 6
+    assert len(harness.metadata[HARNESS_METADATA_KEY][str(malformed_skill)]) == len(load_profiles())
 
 
 @pytest.mark.parametrize(

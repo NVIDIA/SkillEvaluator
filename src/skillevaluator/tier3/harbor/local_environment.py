@@ -79,7 +79,11 @@ _BLOCKED_COMMAND_ENV_PREFIXES = ("DYLD_", "LD_", "PYTHON")
 # Harbor transports Claude Code prompts through an uppercased UUID-named
 # variable; keep that contract narrow so unrelated Harbor controls stay private.
 _HARBOR_INSTRUCTION_ENV_RE = re.compile(r"HARBOR_(?:INSTRUCTION|CLAUDE_CODE_INSTRUCTION_[0-9A-F]{32})")
-_CLAUDE_INSTRUCTION_ENV_RE = re.compile(r"CLAUDE_CODE_INSTRUCTION_[0-9A-F]{32}")
+# Per-launch instruction env vars (Claude Code's and the local pi wrapper's).
+# The generated uuid4().hex is uppercased into the env name, so [0-9A-F] holds;
+# the value must stay verbatim or a prompt quoting /workspace or /logs paths is
+# rewritten before the CLI sees it.
+_AGENT_INSTRUCTION_ENV_RE = re.compile(r"(?:CLAUDE_CODE|PI)_INSTRUCTION_[0-9A-F]{32}")
 _INNER_ENV_BOOTSTRAP = """
 import json
 import os
@@ -1908,7 +1912,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
     def _rewrite_env_values(self, env: dict[str, str]) -> dict[str, str]:
         """Map runtime paths while preserving Claude's instruction payload verbatim."""
         return {
-            key: value if _CLAUDE_INSTRUCTION_ENV_RE.fullmatch(key) else self._rewrite_raw_paths(value)
+            key: value if _AGENT_INSTRUCTION_ENV_RE.fullmatch(key) else self._rewrite_raw_paths(value)
             for key, value in env.items()
         }
 
@@ -1929,7 +1933,9 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                 )
             if key in protected or key in {"HOME", "TMPDIR", "PATH", "PWD"}:
                 continue
-            if key.startswith("CLAUDE_CODE_INSTRUCTION") and _CLAUDE_INSTRUCTION_ENV_RE.fullmatch(key) is None:
+            if key.startswith(("CLAUDE_CODE_INSTRUCTION", "PI_INSTRUCTION")) and (
+                _AGENT_INSTRUCTION_ENV_RE.fullmatch(key) is None
+            ):
                 continue
             if (
                 key.startswith("HARBOR_")

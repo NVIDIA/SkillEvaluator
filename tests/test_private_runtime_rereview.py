@@ -35,6 +35,36 @@ def test_wrapper_preserves_custom_backend_routes_in_both_arms(tmp_path, monkeypa
     assert calls[0]["with_agent_import_path"] == CUSTOM_AGENT
 
 
+@pytest.mark.parametrize("env_mode", ["e2b", "daytona", "modal"])
+@pytest.mark.parametrize(
+    ("agent", "baseline", "with_arm"),
+    [("claude-code", "PrivateClaudeCode", "NativeClaudeCode"), ("pi", "PrivatePi", "NativePi")],
+)
+def test_cloud_mode_plugin_arms_build_on_the_run_command_route(
+    tmp_path, monkeypatch, env_mode, agent, baseline, with_arm
+):
+    """Harbor-native cloud modes run Harbor's stock agent for claude-code and the pinned wrapper for pi
+    (build_harbor_run_command); with the native hooks active, both plugin arms build on that same agent."""
+    calls = []
+
+    def emit_tasks(_skill, output, **_kwargs):
+        (output / "case-1" / "environment").mkdir(parents=True)
+        (output / "case-1" / "environment" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+        return [output / "case-1"]
+
+    _, skill = _stub_runner(
+        monkeypatch, tmp_path, task_emitter=emit_tasks, run_agent=lambda **kw: calls.append(kw) or []
+    )
+    source = _prepared(tmp_path / "plugin").native_source
+    hooks = px.NativeRuntimeHooks(source, native.resolve_plugin_load("native", [agent], env_mode=env_mode))
+    with px.private_runtime(hooks):
+        result = runner.run_harbor_eval(skill, [agent], output_dir=tmp_path / "results", env_mode=env_mode)
+    assert result["execution_status"] == "succeeded", result
+    assert len(calls) == 1
+    assert calls[0]["with_agent_import_path"] == f"skillevaluator.tier3.harbor.native_agents:{with_arm}"
+    assert calls[0]["agent_import_path"] == f"skillevaluator.tier3.harbor.native_agents:{baseline}"
+
+
 def test_unsupported_native_route_persists_failure_before_build_or_staging(tmp_path, monkeypatch):
     def unexpected(*_args, **_kwargs):
         pytest.fail("refused native route must not build, stage, preflight or launch")

@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from skillevaluator.cli_core import detect_content_type, resolve_plugin_path
+from skillevaluator.harness.overlay import PROFILES_DIR
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.publication_identity import publication_target_from_path
 from skillevaluator.tier1.commands import run_validation
@@ -158,7 +159,8 @@ def test_default_skill_keeps_the_actual_harness_check(plugin_with_local_scanners
 
     harness = next(result for result in results if result.validator_name == "Harness Compatibility")
     assert result_execution_status(harness) == "pass"
-    assert len(harness.metadata["harness_compatibility"][str(member)]) == 6
+    # One row per harness profile: main counted six, this branch adds pi.
+    assert len(harness.metadata["harness_compatibility"][str(member)]) == len(list(PROFILES_DIR.glob("*.yaml")))
     assert not any(detail.metadata.get("not_applicable") for detail in harness.success_details)
 
 

@@ -56,6 +56,7 @@ from skillevaluator.tier3.harbor.local_agents import (
     SkillEvaluatorNvidiaBuildCodex,
     SkillEvaluatorOpenCode,
 )
+from skillevaluator.tier3.harbor.pi_agent import SkillEvaluatorPi
 from skillevaluator.tier3.plugin_native import SETUP_SCRIPT, ClaudeCodeAdapter, OpenCodeAdapter
 
 if TYPE_CHECKING:
@@ -303,6 +304,49 @@ class NativeNvidiaBuildHermes(_NativeHermesMixin, SkillEvaluatorHermes):
     """Pinned NVIDIA Build Hermes with the load census written before launch."""
 
 
+class _NativePiMixin(_NativePluginLoadMixin):
+    # Harbor stages the skills, then launches with the prompt as a positional argument:
+    # ". ~/.nvm/nvm.sh; mkdir -p <sessions> && [PI_CODING_AGENT_DIR=...] pi --print --mode json
+    # --session-dir ... --provider ... --model ... PROMPT 2>&1 </dev/null | ... | tee ...".
+    # Harbor may assign the isolated config dir inline before the CLI; that is the only inline prefix.
+    _SKILLEVAL_LAUNCH_RE = re.compile(
+        _COMMAND_START + r"(?:PI_CODING_AGENT_DIR=[^ \t]+[ \t]+)?pi[ \t]+--print[ \t]+--mode[ \t]+json\b"
+    )
+    _SKILLEVAL_PROMPT_SEPARATOR = False
+    _skilleval_quoted_prompt: str | None = None
+
+    async def run(self, instruction: str, environment: BaseEnvironment, context: Any) -> None:
+        # Pi embeds the shlex-quoted prompt inside the launcher line, so a
+        # multiline task puts the launch command's only legitimate newline
+        # inside that quoted argument; keep it out of the single-line check.
+        self._skilleval_quoted_prompt = shlex.quote(self.render_instruction(instruction))
+        try:
+            await super().run(instruction=instruction, environment=environment, context=context)
+        finally:
+            self._skilleval_quoted_prompt = None
+
+    def _skilleval_launch_match(self, command: str) -> tuple[str, str, str, re.Match[str]] | None:
+        quoted = self._skilleval_quoted_prompt
+        if quoted:
+            # Anchor on the prompt hard against the launch tail: a one-word
+            # instruction (``pi``, ``json``) also occurs earlier in the launcher
+            # line (the config path, ``--mode json``), so a bare substring cut
+            # would truncate the launcher and skip the native setup.
+            prompt_and_tail = f"{quoted} 2>&1 </dev/null"
+            if prompt_and_tail in command:
+                before, _, after = command.partition(prompt_and_tail)
+                found = super()._skilleval_launch_match(before)
+                if found is None:
+                    return None
+                launcher, separator, prompt, match = found
+                return launcher, separator, prompt_and_tail + after + prompt, match
+        return super()._skilleval_launch_match(command)
+
+
+class NativePi(_NativePiMixin, SkillEvaluatorPi):
+    """The pinned pi wrapper with the native setup group in front of its launch."""
+
+
 # Private baseline and wrapper arms need the same setup-phase error boundary
 # as native arms, without adding native setup, flags, or config to their launch.
 class PrivateClaudeCode(SetupNetworkErrorAgent, ClaudeCode):
@@ -351,6 +395,10 @@ class PrivateHermes(SetupNetworkErrorAgent, Hermes):
 
 class PrivateNvidiaBuildHermes(SetupNetworkErrorAgent, SkillEvaluatorHermes):
     """NVIDIA Build Hermes with setup-only network error classification."""
+
+
+class PrivatePi(SetupNetworkErrorAgent, SkillEvaluatorPi):
+    """The pinned pi wrapper with setup-only network error classification."""
 
 
 class PrivateLocalClaudeCode(SetupNetworkErrorAgent, SkillEvaluatorLocalClaudeCode):

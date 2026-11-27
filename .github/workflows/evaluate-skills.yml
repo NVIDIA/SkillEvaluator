@@ -354,6 +354,10 @@ jobs:
                       or any(not isinstance(invocation, dict) or invocation.get("executionSuccessful") is not True
                              for invocation in run.get("invocations", []))):
                       raise ValueError("a skill SARIF report is malformed or incomplete")
+                  # Images before the rule-description fix fill fullDescription with one
+                  # skill's finding message; the merged descriptor must not name any skill.
+                  for rule in driver["rules"]:
+                      rule.pop("fullDescription", None)
                   for result in run["results"]:
                       locations = result.get("locations", [])
                       if not isinstance(locations, list):

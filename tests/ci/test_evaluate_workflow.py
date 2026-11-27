@@ -348,6 +348,25 @@ def test_complete_reports_are_merged_even_with_a_failed_verdict(tmp_path):
     assert [item["id"] for item in run["tool"]["driver"]["rules"]] == ["rule-1", "rule-2"]
 
 
+def test_merged_rule_descriptions_do_not_name_one_skill(tmp_path):
+    # Images before the rule-description fix fill fullDescription with one skill's message.
+    reports, output, _summary = _sarif_evidence(tmp_path)
+    for index in (1, 2):
+        document = _sarif_document("HYGIENE/name-mismatch")
+        document["runs"][0]["tool"]["driver"]["rules"][0]["fullDescription"] = {
+            "text": f"Skill name 'skill-{index}' does not match its directory"
+        }
+        document["runs"][0]["results"][0]["message"]["text"] = f"finding for skill {index}"
+        (reports / f"skill-{index:03d}" / "skillevaluator-tier1.sarif.json").write_text(json.dumps(document))
+
+    result = _prepare_sarif(reports, output)
+
+    assert result.returncode == 0, result.stderr
+    run = json.loads((output / "catalog.sarif.json").read_text())["runs"][0]
+    assert run["tool"]["driver"]["rules"] == [{"id": "HYGIENE/name-mismatch"}]
+    assert [item["message"]["text"] for item in run["results"]] == ["finding for skill 1", "finding for skill 2"]
+
+
 @pytest.mark.parametrize(
     "result_count,warning",
     [

@@ -38,6 +38,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- SARIF rule descriptors no longer carry one finding's message as the rule
+  `fullDescription`. GitHub Code Scanning showed the last finding's text next
+  to every result for that rule, including results from other skills in a
+  merged upload. The reusable Tier 1 workflow also drops that field from
+  reports produced by earlier images before merging them.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

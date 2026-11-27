@@ -91,6 +91,8 @@ agent runtime preflight fails. The extra execution is disabled by default.
 
 Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedrock`, or `openai-compatible`. The selected provider determines which credential SkillEvaluator reads. Each ships a default evaluator model that `SKILL_EVAL_LLM_MODEL` overrides.
 
+`SKILL_EVAL_LLM_MODEL` is sent as the request's model field, so on providers where that is a deployment name rather than the model name itself (for example an Azure OpenAI deployment named `judge-prod`), SkillEvaluator cannot tell from the name alone whether it is a reasoning model. Set `SKILL_EVAL_LLM_REASONING_MODEL` to the underlying model (for example `gpt-5-mini`) to get reasoning-model request shaping — `max_completion_tokens` instead of `max_tokens`, no custom `temperature` — without renaming the deployment. `SKILL_EVAL_LLM_MODEL` keeps going out on the wire unchanged.
+
 <Tabs>
   <Tab title="OpenAI" language="openai">
     ```bash title="OpenAI setup"

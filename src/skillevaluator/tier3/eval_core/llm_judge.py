@@ -26,7 +26,9 @@ from skillevaluator.inference.types import EmptyLLMResponseError, LLMClientTrunc
 from skillevaluator.provider_config import (
     MAX_COMPLETION_TOKENS,
     ProviderConfig,
+    capability_model,
     effective_reasoning_effort,
+    reasoning_model_override,
 )
 from skillevaluator.tier3.eval_core.atif_helpers import (
     _BEHAVIOR_EVIDENCE_GAP_HINT,
@@ -238,15 +240,17 @@ def _chat_completion_payload(
         api_key=None,
         base_url=resolved_request_url.rstrip("/").removesuffix("/chat/completions"),
         litellm_model=f"openai/{model}",
+        reasoning_model=reasoning_model_override() if resolved_provider == "openai-compatible" else None,
     )
+    model_for_capability_checks = capability_model(config)
     payload: dict[str, Any] = {
         "model": model,
         **_token_limit_kwargs(config, max_tokens),
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        **_temperature_kwargs(model, temperature),
+        **_temperature_kwargs(model_for_capability_checks, temperature),
     }
-    if effort := effective_reasoning_effort(resolved_provider, model, JUDGE_REASONING_EFFORT):
+    if effort := effective_reasoning_effort(resolved_provider, model_for_capability_checks, JUDGE_REASONING_EFFORT):
         payload["reasoning_effort"] = effort
     if response_schema is not None:
         payload["response_format"] = _build_openai_response_format(response_schema, schema_name)

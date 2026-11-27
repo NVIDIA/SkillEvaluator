@@ -2036,6 +2036,7 @@ def _provider_environment(config: ProviderConfig) -> dict[str, str]:
     environment = {
         "SKILL_EVAL_LLM_PROVIDER": config.provider,
         "SKILL_EVAL_LLM_MODEL": config.model,
+        "SKILL_EVAL_LLM_REASONING_MODEL": config.reasoning_model or "",
     }
     environment.update(
         {

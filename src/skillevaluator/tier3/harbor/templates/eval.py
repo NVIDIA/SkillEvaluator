@@ -1277,6 +1277,13 @@ def _is_openai_reasoning_model(model):
     return _model_leaf(model).startswith(("gpt-5", "gpt-6"))
 
 
+def _capability_model(provider, model):
+    """Return the model name reasoning-capability checks should key off."""
+    if str(provider or "").strip().casefold() != "openai-compatible":
+        return model
+    return os.environ.get("SKILL_EVAL_LLM_REASONING_MODEL", "").strip() or model
+
+
 def _is_claude_5_5_or_later(model):
     version = _claude_version(model)
     return version is not None and version >= (5, 5)
@@ -1477,9 +1484,10 @@ def _chat_completion_payload(
 ):
     resolved_provider = _public_provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
+    capability = _capability_model(resolved_provider, model)
     token_key = (
         "max_completion_tokens"
-        if _is_openai_reasoning_model(model)
+        if _is_openai_reasoning_model(capability)
         and (
             _is_native_openai_chat_url(resolved_provider, resolved_request_url)
             or _is_azure_openai_chat_url(resolved_provider, resolved_request_url)
@@ -1488,13 +1496,13 @@ def _chat_completion_payload(
     )
     payload = {
         "model": model,
-        token_key: _completion_token_limit(model, max_tokens),
+        token_key: _completion_token_limit(capability, max_tokens),
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }
-    if temperature is not None and _supports_custom_temperature(model):
+    if temperature is not None and _supports_custom_temperature(capability):
         payload["temperature"] = temperature
-    if effort := _effective_reasoning_effort(resolved_provider, model, JUDGE_REASONING_EFFORT):
+    if effort := _effective_reasoning_effort(resolved_provider, capability, JUDGE_REASONING_EFFORT):
         payload["reasoning_effort"] = effort
     if response_schema is not None:
         payload["response_format"] = _build_openai_response_format(response_schema, schema_name)

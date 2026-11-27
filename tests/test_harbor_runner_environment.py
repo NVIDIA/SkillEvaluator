@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import threading
 import tomllib
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -349,6 +350,23 @@ def test_provider_environment_forwards_each_host_retry_or_pattern_limit_override
     environment = runner._provider_environment(_provider(provider_name))
 
     assert environment.get(name) == expected
+
+
+@pytest.mark.parametrize("provider_name", ["openai", "openai-compatible", "anthropic", "bedrock", "nv_build"])
+def test_provider_environment_forwards_a_declared_reasoning_model(provider_name: str) -> None:
+    config = replace(_provider(provider_name), reasoning_model="gpt-5-mini")
+
+    environment = runner._provider_environment(config)
+
+    assert environment["SKILL_EVAL_LLM_REASONING_MODEL"] == "gpt-5-mini"
+    assert environment["SKILL_EVAL_LLM_MODEL"] == "test-model"
+
+
+@pytest.mark.parametrize("provider_name", ["openai", "openai-compatible", "anthropic", "bedrock", "nv_build"])
+def test_provider_environment_omits_reasoning_model_when_unset(provider_name: str) -> None:
+    environment = runner._provider_environment(_provider(provider_name))
+
+    assert "SKILL_EVAL_LLM_REASONING_MODEL" not in environment
 
 
 def test_resolve_agent_runtime_plan_retains_retry_settings_in_subprocess_env(

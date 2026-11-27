@@ -26,6 +26,8 @@ import idna
 CREDENTIAL_SOURCE_ADC = "ADC"
 CREDENTIAL_SOURCE_ENV = "SKILL_EVAL_LLM_CREDENTIAL_SOURCE"
 CREDENTIAL_EXPIRY_ENV = "SKILL_EVAL_LLM_CREDENTIAL_EXPIRY"
+# Names a deployment's underlying model for capability checks, independently of its model/deployment name.
+REASONING_MODEL_ENV = "SKILL_EVAL_LLM_REASONING_MODEL"
 GOOGLE_ADC_TOKEN_LIFETIME_SEC = 3600.0
 _ADC_MIN_REMAINING_LIFETIME_SEC = 30.0
 _ADC_MAX_SAFETY_MARGIN_SEC = 300.0
@@ -173,6 +175,17 @@ def is_gpt6_model(model: str) -> bool:
     return _model_leaf(model).startswith("gpt-6")
 
 
+def reasoning_model_override(environ: Mapping[str, str] | None = None) -> str | None:
+    """Return ``SKILL_EVAL_LLM_REASONING_MODEL``, or ``None`` when unset or blank."""
+    value = (os.environ if environ is None else environ).get(REASONING_MODEL_ENV, "").strip()
+    return value or None
+
+
+def capability_model(config: ProviderConfig) -> str:
+    """Return the model name reasoning-capability checks should key off."""
+    return config.reasoning_model or config.model
+
+
 def is_claude_5_5_or_later(model: str) -> bool:
     """Return whether ``model`` is a Claude 5.5 or later model."""
     version = _claude_version(model)
@@ -233,6 +246,8 @@ class ProviderConfig:
     credential_env: str | None = None
     base_url_env: str | None = None
     credential_expiry: float | None = None
+    # Underlying model for capability checks, when it differs from ``model``. See REASONING_MODEL_ENV.
+    reasoning_model: str | None = None
     # Extra HTTP headers for the ``openai-compatible`` chat client, as (name, value)
     # pairs so the frozen dataclass stays hashable. Values may be secrets: never
     # print them. ``extra_headers_dict`` returns them in SDK form.
@@ -260,6 +275,8 @@ class ProviderConfig:
             environment["SKILL_EVAL_LLM_BASE_URL"] = self.base_url
         elif self.provider == "bedrock" and self.region:
             environment["AWS_REGION"] = self.region
+        if self.reasoning_model:
+            environment[REASONING_MODEL_ENV] = self.reasoning_model
 
         return environment
 
@@ -610,6 +627,8 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             region=env.get("AWS_REGION") or "us-west-2",
         )
 
+    # Only openai-compatible can have model be an arbitrary deployment name, so only it reads the override.
+    reasoning_model = reasoning_model_override(env)
     base_url = _required(env, "SKILL_EVAL_LLM_BASE_URL").rstrip("/")
     api_key = env.get("SKILL_EVAL_LLM_API_KEY")
     extra_headers = resolve_extra_headers(env)
@@ -631,6 +650,7 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
         credential_env="SKILL_EVAL_LLM_API_KEY",
         base_url_env="SKILL_EVAL_LLM_BASE_URL",
         extra_headers=extra_headers,
+        reasoning_model=reasoning_model,
     )
 
 

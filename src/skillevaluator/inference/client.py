@@ -55,11 +55,13 @@ from skillevaluator.provider_config import (
     ProviderConfigurationError,
     _supports_custom_temperature,
     anthropic_refusal_fallback_model,
+    capability_model,
     completion_token_limit,
     effective_reasoning_effort,
     has_bedrock_bearer_token,
     is_claude_5_5_or_later,
     is_openai_reasoning_model,
+    reasoning_model_override,
     resolve_extra_headers,
     resolve_llm_provider,
 )
@@ -285,10 +287,9 @@ def _is_native_anthropic_endpoint(config: ProviderConfig) -> bool:
 def _token_limit_kwargs(config: ProviderConfig, max_tokens: int | None) -> dict[str, int]:
     if max_tokens is None:
         return {}
-    max_tokens = completion_token_limit(config.model, max_tokens)
-    if is_openai_reasoning_model(config.model) and (
-        _is_native_openai_endpoint(config) or _is_azure_openai_endpoint(config)
-    ):
+    model = capability_model(config)
+    max_tokens = completion_token_limit(model, max_tokens)
+    if is_openai_reasoning_model(model) and (_is_native_openai_endpoint(config) or _is_azure_openai_endpoint(config)):
         return {"max_completion_tokens": max_tokens}
     return {"max_tokens": max_tokens}
 
@@ -715,7 +716,7 @@ class LLMClient:
     def reasoning_effort(self) -> str | None:
         """Return the reasoning effort sent to the resolved model, or ``None`` for its default."""
         config = self._resolved_config()
-        return effective_reasoning_effort(config.provider, config.model, self._reasoning_effort)
+        return effective_reasoning_effort(config.provider, capability_model(config), self._reasoning_effort)
 
     @property
     def max_retries(self) -> int:
@@ -757,6 +758,7 @@ class LLMClient:
                 base_url=base_url,
                 litellm_model=f"openai/{model}",
                 extra_headers=extra_headers,
+                reasoning_model=reasoning_model_override() if provider == "openai-compatible" else None,
             )
 
         try:
@@ -989,7 +991,7 @@ class LLMClient:
                     "model": config.model,
                     "stream": False,
                     "messages": _chat_messages(system_prompt, turns),
-                    **_temperature_kwargs(config.model, self._temperature),
+                    **_temperature_kwargs(capability_model(config), self._temperature),
                     **_token_limit_kwargs(config, max_tokens),
                     **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
                 }

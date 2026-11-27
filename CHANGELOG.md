@@ -43,7 +43,14 @@ All notable changes to SkillEvaluator are documented in this file.
   reasoning models already required. Previously only the literal
   `api.openai.com` endpoint got this treatment, so Tier 2/3 requests against an
   Azure-hosted reasoning deployment failed with `unsupported_parameter:
-  max_tokens`.
+  max_tokens`. A deployment with an arbitrary name (for example `judge-prod`)
+  isn't recognized as a reasoning model by name alone; set the new
+  `SKILL_EVAL_LLM_REASONING_MODEL` to the underlying model (for example
+  `gpt-5-mini`) to get the same request shaping -- `max_completion_tokens` and
+  no custom `temperature` -- without renaming the deployment.
+  `SKILL_EVAL_LLM_MODEL` keeps going out on the wire unchanged. Applies to the
+  shared public-provider client and both Tier 3 judge paths (the in-process
+  judge and the sandboxed Harbor judge).
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

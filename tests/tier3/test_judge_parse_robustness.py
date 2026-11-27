@@ -721,6 +721,70 @@ def test_template_native_openai_gpt5_payload_matches_eval_core(model):
     assert "max_tokens" not in template_payload
 
 
+def test_template_azure_arbitrary_deployment_payload_matches_eval_core(monkeypatch):
+    """An Azure deployment named "judge-prod" gets reasoning-model request shaping, in
+    both the shared judge and the in-sandbox template, once SKILL_EVAL_LLM_REASONING_MODEL
+    names its underlying model -- the deployment name itself stays on the wire."""
+    monkeypatch.setenv("SKILL_EVAL_LLM_REASONING_MODEL", "gpt-5-mini")
+    kwargs = {
+        "model": "judge-prod",
+        "prompt": "Judge this response",
+        "max_tokens": 321,
+        "temperature": 0.25,
+        "provider": "openai-compatible",
+        "request_url": "https://my-resource.openai.azure.com/openai/v1/chat/completions",
+    }
+
+    template_payload = eval_template._chat_completion_payload(**kwargs)
+    assert template_payload == llm_judge._chat_completion_payload(**kwargs)
+    assert template_payload["model"] == "judge-prod"
+    assert "max_completion_tokens" in template_payload
+    assert "max_tokens" not in template_payload
+    assert "temperature" not in template_payload
+
+
+def test_template_azure_arbitrary_deployment_without_override_matches_eval_core(monkeypatch):
+    """Without SKILL_EVAL_LLM_REASONING_MODEL, "judge-prod" is indistinguishable from a
+    non-reasoning deployment in both the shared judge and the in-sandbox template."""
+    monkeypatch.delenv("SKILL_EVAL_LLM_REASONING_MODEL", raising=False)
+    kwargs = {
+        "model": "judge-prod",
+        "prompt": "Judge this response",
+        "max_tokens": 321,
+        "temperature": 0.25,
+        "provider": "openai-compatible",
+        "request_url": "https://my-resource.openai.azure.com/openai/v1/chat/completions",
+    }
+
+    template_payload = eval_template._chat_completion_payload(**kwargs)
+    assert template_payload == llm_judge._chat_completion_payload(**kwargs)
+    assert template_payload["model"] == "judge-prod"
+    assert template_payload["max_tokens"] == 321
+    assert "max_completion_tokens" not in template_payload
+    assert template_payload["temperature"] == 0.25
+
+
+def test_template_native_provider_ignores_stray_reasoning_model_override_matches_eval_core(monkeypatch):
+    """A stray SKILL_EVAL_LLM_REASONING_MODEL (e.g. left over from a prior Azure setup) must
+    not affect a native OpenAI request -- only openai-compatible can have an arbitrary
+    deployment name standing in for the real model, so only it reads the override."""
+    monkeypatch.setenv("SKILL_EVAL_LLM_REASONING_MODEL", "gpt-5-mini")
+    kwargs = {
+        "model": "gpt-4o",
+        "prompt": "Judge this response",
+        "max_tokens": 321,
+        "temperature": 0.25,
+        "provider": "openai",
+        "request_url": llm_judge.OPENAI_CHAT_URL,
+    }
+
+    template_payload = eval_template._chat_completion_payload(**kwargs)
+    assert template_payload == llm_judge._chat_completion_payload(**kwargs)
+    assert template_payload["max_tokens"] == 321
+    assert "max_completion_tokens" not in template_payload
+    assert template_payload["temperature"] == 0.25
+
+
 def test_template_schema_and_payload_match_eval_core():
     assert eval_template.ACCURACY_JSON_SCHEMA == llm_judge.ACCURACY_JSON_SCHEMA
     assert eval_template.GOAL_ACCURACY_JSON_SCHEMA == llm_judge.GOAL_ACCURACY_JSON_SCHEMA

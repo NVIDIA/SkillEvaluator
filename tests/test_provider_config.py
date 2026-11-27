@@ -14,12 +14,15 @@ import pytest
 from skillevaluator.provider_config import (
     MAX_COMPLETION_TOKENS,
     REASONING_MAX_COMPLETION_TOKENS,
+    ProviderConfig,
     ProviderConfigurationError,
     _supports_custom_temperature,
+    capability_model,
     completion_token_limit,
     effective_reasoning_effort,
     is_claude_5_5_or_later,
     is_openai_reasoning_model,
+    reasoning_model_override,
     resolve_embedding_provider,
     resolve_llm_provider,
     skillspector_reasoning_effort,
@@ -448,6 +451,126 @@ def test_openai_compatible_provider_requires_explicit_endpoint() -> None:
             }
         )
     assert str(exc_info.value) == "SKILL_EVAL_LLM_BASE_URL is required for the selected provider."
+
+
+def test_reasoning_model_override_is_unset_by_default() -> None:
+    assert reasoning_model_override({}) is None
+
+
+def test_reasoning_model_override_treats_blank_as_unset() -> None:
+    assert reasoning_model_override({"SKILL_EVAL_LLM_REASONING_MODEL": "   "}) is None
+
+
+def test_reasoning_model_override_strips_whitespace() -> None:
+    assert reasoning_model_override({"SKILL_EVAL_LLM_REASONING_MODEL": "  gpt-5-mini  "}) == "gpt-5-mini"
+
+
+def test_capability_model_falls_back_to_deployment_name_by_default() -> None:
+    config = ProviderConfig(
+        provider="openai-compatible",
+        model="judge-prod",
+        api_key="test-key",
+        base_url="https://my-resource.openai.azure.com/openai/v1",
+        litellm_model="openai/judge-prod",
+    )
+
+    assert capability_model(config) == "judge-prod"
+
+
+def test_capability_model_prefers_the_declared_reasoning_model() -> None:
+    config = ProviderConfig(
+        provider="openai-compatible",
+        model="judge-prod",
+        api_key="test-key",
+        base_url="https://my-resource.openai.azure.com/openai/v1",
+        litellm_model="openai/judge-prod",
+        reasoning_model="gpt-5-mini",
+    )
+
+    assert capability_model(config) == "gpt-5-mini"
+
+
+def test_resolve_llm_provider_reads_reasoning_model_override_for_openai_compatible() -> None:
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
+            "SKILL_EVAL_LLM_API_KEY": "test-key",
+            "SKILL_EVAL_LLM_BASE_URL": "https://my-resource.openai.azure.com/openai/v1",
+            "SKILL_EVAL_LLM_MODEL": "judge-prod",
+            "SKILL_EVAL_LLM_REASONING_MODEL": "gpt-5-mini",
+        }
+    )
+
+    assert config.model == "judge-prod"
+    assert config.reasoning_model == "gpt-5-mini"
+    assert capability_model(config) == "gpt-5-mini"
+
+
+@pytest.mark.parametrize(
+    ("provider", "extra_env"),
+    [
+        ("openai", {"OPENAI_API_KEY": "test-key"}),
+        ("anthropic", {"ANTHROPIC_API_KEY": "test-key"}),
+        ("nv_build", {"NVIDIA_API_KEY": "test-key"}),
+        ("bedrock", {}),
+    ],
+)
+def test_resolve_llm_provider_ignores_reasoning_model_override_for_unambiguous_providers(
+    provider: str, extra_env: dict[str, str]
+) -> None:
+    """Only openai-compatible can have `model` be an arbitrary deployment name. A stray
+    SKILL_EVAL_LLM_REASONING_MODEL (e.g. left over from a prior Azure setup) must not
+    silently override a model identity that was never ambiguous for any other provider."""
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": provider,
+            "SKILL_EVAL_LLM_REASONING_MODEL": "gpt-5-mini",
+            **extra_env,
+        }
+    )
+
+    assert config.reasoning_model is None
+    assert capability_model(config) == config.model
+
+
+def test_resolve_llm_provider_leaves_reasoning_model_unset_by_default() -> None:
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
+            "SKILL_EVAL_LLM_API_KEY": "test-key",
+            "SKILL_EVAL_LLM_BASE_URL": "https://my-resource.openai.azure.com/openai/v1",
+            "SKILL_EVAL_LLM_MODEL": "judge-prod",
+        }
+    )
+
+    assert config.reasoning_model is None
+
+
+def test_child_environment_propagates_reasoning_model_override() -> None:
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
+            "SKILL_EVAL_LLM_API_KEY": "test-key",
+            "SKILL_EVAL_LLM_BASE_URL": "https://my-resource.openai.azure.com/openai/v1",
+            "SKILL_EVAL_LLM_MODEL": "judge-prod",
+            "SKILL_EVAL_LLM_REASONING_MODEL": "gpt-5-mini",
+        }
+    )
+
+    assert config.child_environment()["SKILL_EVAL_LLM_REASONING_MODEL"] == "gpt-5-mini"
+
+
+def test_child_environment_omits_reasoning_model_when_unset() -> None:
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
+            "SKILL_EVAL_LLM_API_KEY": "test-key",
+            "SKILL_EVAL_LLM_BASE_URL": "https://my-resource.openai.azure.com/openai/v1",
+            "SKILL_EVAL_LLM_MODEL": "judge-prod",
+        }
+    )
+
+    assert "SKILL_EVAL_LLM_REASONING_MODEL" not in config.child_environment()
 
 
 def test_anthropic_requires_explicit_embedding_provider() -> None:

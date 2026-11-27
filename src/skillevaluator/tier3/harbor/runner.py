@@ -5277,13 +5277,16 @@ def _private_agent_paths(
                 from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS
 
                 base = LOCAL_AGENT_IMPORT_PATHS.get(agent)
-            elif base is None and env_mode in HARBOR_NATIVE_ENV_MODES | {"gke"}:
+            elif base is None and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES | {"gke"}:
                 defaults = (
                     DOCKER_AGENT_IMPORT_PATHS
                     if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES
                     else CONTAINER_AGENT_IMPORT_PATHS
                 )
                 base = defaults.get(agent)
+            elif base is None and agent == "pi" and env_mode in HARBOR_NATIVE_ENV_MODES:
+                # As in the run command's stock-agent branch: only pi needs the pinned wrapper there.
+                base = CONTAINER_AGENT_IMPORT_PATHS[agent]
             with_path = hooks.with_agent_import_path(agent, base)
             classify = getattr(hooks, "baseline_agent_import_path", None)
             baseline_path = classify(agent, base) if classify is not None else base

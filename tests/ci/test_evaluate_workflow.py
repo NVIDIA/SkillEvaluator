@@ -367,6 +367,41 @@ def test_merged_rule_descriptions_do_not_name_one_skill(tmp_path):
     assert [item["message"]["text"] for item in run["results"]] == ["finding for skill 1", "finding for skill 2"]
 
 
+def test_results_without_a_location_are_reported_at_the_skill_directory(tmp_path):
+    # GitHub displays a result only when it has a location; the CI reporter has
+    # no scan root, so dependency CVE findings without a file arrive location-less.
+    reports, output, _summary = _sarif_evidence(tmp_path)
+    document = _sarif_document("DEPENDENCIES/python-vulnerability")
+    document["runs"][0]["results"] = [
+        {"ruleId": "DEPENDENCIES/python-vulnerability", "message": {"text": "no locations key"}},
+        {"ruleId": "DEPENDENCIES/python-vulnerability", "message": {"text": "empty locations"}, "locations": []},
+    ]
+    (reports / "skill-001" / "skillevaluator-tier1.sarif.json").write_text(json.dumps(document))
+
+    result = _prepare_sarif(reports, output)
+
+    assert result.returncode == 0, result.stderr
+    run = json.loads((output / "catalog.sarif.json").read_text())["runs"][0]
+    anchored = [item for item in run["results"] if item["ruleId"] == "DEPENDENCIES/python-vulnerability"]
+    assert [item["message"]["text"] for item in anchored] == ["no locations key", "empty locations"]
+    for item in anchored:
+        assert item["locations"] == [{"physicalLocation": {"artifactLocation": {"uri": "skills/1"}}}]
+
+
+def test_skill_directory_fallback_cannot_escape_the_workspace(tmp_path):
+    reports, output, summary = _sarif_evidence(tmp_path, count=1)
+    summary["skills"][0]["path"] = "../outside"
+    summary["selection"]["selected"] = ["../outside"]
+    (reports / "summary.json").write_text(json.dumps(summary))
+    # _sarif_document results carry no locations, so the skill-directory fallback applies.
+
+    result = _prepare_sarif(reports, output)
+
+    assert result.returncode != 0
+    assert "escapes the workspace" in result.stderr
+    assert not (output / "catalog.sarif.json").exists()
+
+
 @pytest.mark.parametrize(
     "result_count,warning",
     [

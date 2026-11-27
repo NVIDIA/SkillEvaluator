@@ -230,8 +230,20 @@ def _physical_location(
     workspace_root: Path | None,
     scan_root: Path | None = None,
 ) -> dict[str, Any] | None:
+    """Return the result location, anchoring skill-wide findings at the skill.
+
+    GitHub Code Scanning displays a result only when it has a location. A
+    finding without a file describes the scanned skill as a whole, so it is
+    reported at the skill directory when that is known.
+    """
     if not finding.file_path:
-        return None
+        if scan_root is None:
+            return None
+        return {
+            "physicalLocation": {
+                "artifactLocation": {"uri": _normalize_artifact_uri(".", workspace_root, scan_root)},
+            },
+        }
     location: dict[str, Any] = {
         "artifactLocation": {
             "uri": _normalize_artifact_uri(finding.file_path, workspace_root, scan_root),

@@ -1807,6 +1807,48 @@ class TestSARIFReporter:
         assert automation == {"id": "/skillevaluator/catalog"}
         assert "name" not in automation
 
+    @staticmethod
+    def _skill_wide_result(**reporter_kwargs: Path | None) -> dict:
+        result = ValidationResult(validator_name="DEPENDENCIES", validator_description="deps")
+        result.add_finding(
+            Finding(
+                category="CVE",
+                severity=Severity.HIGH,
+                check_name="python-vulnerability",
+                message="requests 2.0.0 has a known vulnerability",
+                file_path="",
+                line_number=7,
+            )
+        )
+        reporter = SARIFReporter(include_timestamp=False, **reporter_kwargs)
+        [item] = json.loads(reporter.render_all([result]))["runs"][0]["results"]
+        return item
+
+    def test_finding_without_a_file_is_reported_at_the_skill_directory(self, tmp_path: Path) -> None:
+        skill = tmp_path / "repo" / "skills" / "demo"
+        skill.mkdir(parents=True)
+
+        item = self._skill_wide_result(workspace_root=tmp_path / "repo", scan_root=skill)
+
+        # GitHub displays a result only when it has a location; the line number
+        # is meaningless without a file and must not be attached to the directory.
+        assert item["locations"] == [{"physicalLocation": {"artifactLocation": {"uri": "skills/demo"}}}]
+        assert item["message"]["text"] == "requests 2.0.0 has a known vulnerability"
+
+    def test_finding_without_a_file_is_a_file_uri_outside_a_workspace(self, tmp_path: Path) -> None:
+        skill = tmp_path / "skills" / "demo"
+        skill.mkdir(parents=True)
+
+        item = self._skill_wide_result(workspace_root=None, scan_root=skill)
+
+        uri = item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+        assert uri.startswith("file:///") and uri.endswith("/skills/demo")
+
+    def test_finding_without_a_file_or_scan_root_has_no_location(self) -> None:
+        item = self._skill_wide_result(workspace_root=None, scan_root=None)
+
+        assert "locations" not in item
+
     def test_rule_descriptor_does_not_carry_one_findings_message(self) -> None:
         result = ValidationResult(validator_name="QUALITY", validator_description="quality")
         for message in ("No troubleshooting section documented", "Scripts may lack error handling: lookup.py"):

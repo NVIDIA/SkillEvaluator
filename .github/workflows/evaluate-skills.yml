@@ -362,6 +362,11 @@ jobs:
                       locations = result.get("locations", [])
                       if not isinstance(locations, list):
                           raise ValueError("SARIF locations are not a list")
+                      if not locations:
+                          # GitHub displays a result only when it has a location. A finding
+                          # without a file describes the skill as a whole; report it there.
+                          locations = [{"physicalLocation": {"artifactLocation": {"uri": "."}}}]
+                          result["locations"] = locations
                       for location in locations:
                           normalize_location(location, row["path"])
                   documents.append(document)

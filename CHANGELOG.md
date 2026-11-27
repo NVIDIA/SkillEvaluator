@@ -440,6 +440,24 @@ notes below describe the new policy and backend configuration behavior.
 - Tier 3 rejects non-object entries in legacy list and `cases` datasets instead
   of silently evaluating a subset of the authored cases.
 - Similarity scores stay correct for extremely small embedding vectors.
+- A folder run of `quality-check`, `validate` or `pii-scan` no longer lists each
+  skill twice, once under a `[skill] check` label that always reported a pass and
+  once under the skill's own name. The per-skill verdict is also the skill's own
+  again: advisory-only findings leave a skill passing, and a
+  `--min-score` gate or a HIGH finding fails only the skill it names, so the HTML
+  skill cards, the JSON `skills[]` entries and the contributor summary agree with
+  the overall result. The verdict is reconstructed from finding severity and each
+  member's labelled gate failures, so a member that failed a different way — an
+  incomplete scan (`mark_scan_incomplete`) or a legacy `add_error` line with only
+  advisory findings — still reads as passed in `skills[]` and the skill cards.
+  Recording each member's own status in `merge_with_prefix` would close that, and
+  is left for a follow-up.
+- Each member of a folder run keeps its own name in that list. A directory name
+  containing `]` no longer truncates to the text before it, which had hidden that
+  skill behind a shorter one, and two skills with the same basename in different
+  folders keep separate verdicts instead of the later one replacing the earlier.
+  The member is carried in the result rather than re-read from the `[skill] check`
+  label, so the JSON `skills[]` entries and the HTML skill cards agree.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

@@ -19,6 +19,7 @@ import contextlib
 import contextvars
 import os
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
@@ -278,6 +279,26 @@ class ValidatorBase(ABC):
                 skill_dirs.add(skill_md.parent)
         return sorted(skill_dirs)
 
+    @staticmethod
+    def _member_labels(skill_dirs: list[Path], root: Path) -> dict[Path, str]:
+        """Return the label a folder run uses to tell each of *skill_dirs* apart.
+
+        The directory name is the label while it is unique, which is what a
+        report has always shown. Skills nested under different folders can
+        share a basename, and keying those by the basename alone merges their
+        verdicts into one report entry, so a repeated name falls back to the
+        path relative to *root*, which stays distinct.
+        """
+        labels = {skill_dir: skill_dir.name for skill_dir in skill_dirs}
+        counts = Counter(labels.values())
+        for skill_dir, name in labels.items():
+            if counts[name] > 1:
+                try:
+                    labels[skill_dir] = skill_dir.relative_to(root).as_posix()
+                except ValueError:
+                    labels[skill_dir] = name
+        return labels
+
     def _is_skill_directory(self, path: Path) -> bool:
         """Check if path is a skill directory (contains SKILL.md)."""
         return self._find_skill_manifest(path) is not None
@@ -322,9 +343,11 @@ class ValidatorBase(ABC):
             skill_count=len(skill_dirs),
         )
 
+        labels = self._member_labels(skill_dirs, skill_path)
+
         for skill_dir in skill_dirs:
             skill_result = single_skill_validator(skill_dir)
-            skill_name = skill_dir.name
+            skill_name = labels[skill_dir]
 
             if skill_result.passed:
                 result.summary.files_scanned += skill_result.summary.files_scanned

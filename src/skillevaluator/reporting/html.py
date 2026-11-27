@@ -2167,6 +2167,109 @@ def _result_display_status(result: ValidationResult) -> str:
     return result_execution_status(result)
 
 
+def _finding_member_label(finding: Any) -> str | None:
+    """Return the member a finding came from when ``prefix_finding`` recorded it."""
+    metadata = getattr(finding, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    label = metadata.get("member_label")
+    if isinstance(label, str) and label.strip():
+        return label
+    return None
+
+
+def _member_label(detail: Any) -> str | None:
+    """Return the member a success detail came from, as ``merge_with_prefix`` recorded it.
+
+    The ``member_label`` metadata is authoritative: a member's own name may
+    contain ``]``, and two members of one folder may share a basename, so the
+    composed ``[member] check`` string cannot be split back into the member
+    that the findings were keyed by. Older results, and the finding path,
+    carry no such record, so fall back to the label in the check name.
+    """
+    metadata = getattr(detail, "metadata", None)
+    if isinstance(metadata, dict):
+        label = metadata.get("member_label")
+        if isinstance(label, str) and label.strip():
+            return label
+    label, _ = _split_member_label(detail.check_name)
+    return label
+
+
+def _split_member_label(check_name: str) -> tuple[str | None, str]:
+    """Split the ``[member] check`` label ``merge_with_prefix`` writes.
+
+    ``ValidationResult.merge_with_prefix`` prefixes a member result's success
+    details with ``[member] `` so that a folder run keeps them distinguishable,
+    the same way it prefixes ``Finding.file_path``. Reports that group results
+    back per member must read that label rather than take the whole
+    ``[member] check`` string as a member name, or the member gets a second,
+    empty entry beside the one its findings created.
+
+    Returns ``(label, check_name)``; ``label`` is ``None`` when the check name
+    carries no label.
+    """
+    if not check_name.startswith("["):
+        return None, check_name
+    end = check_name.find("]")
+    if end < 0:
+        return None, check_name
+    # A member name may itself contain "]"; merge_with_prefix writes the label as
+    # "[name] " and the finding path stops at the first "]", so both sides read the
+    # same substring and cannot disagree about which member a record belongs to.
+    label = check_name[1:end]
+    if not label:
+        return None, check_name
+    remainder = check_name[end + 1 :]
+    return label, remainder.removeprefix(" ")
+
+
+def _finding_blocks(finding: Any) -> bool:
+    """Whether *finding* alone makes a result fail, as ``add_finding`` decides it.
+
+    ``ValidationResult.add_finding`` fails the result for a CRITICAL or HIGH
+    finding, and for a MEDIUM one whose metadata sets ``fail_on_medium`` (a
+    dependency audit with that option). LOW and MEDIUM findings are advisories,
+    which is why a skill whose only findings are advisories passes.
+    """
+    severity = finding.severity.value if hasattr(finding.severity, "value") else str(finding.severity).lower()
+    if severity in {"critical", "high"}:
+        return True
+    metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
+    return severity == "medium" and metadata.get("fail_on_medium") is True
+
+
+def _gate_failed_member_labels(result: ValidationResult) -> set[str]:
+    """Return the members whose own result failed a gate that severity overrides cannot waive.
+
+    ``ValidationResult.merge_with_prefix`` prefixes each member's gate failures
+    with ``[member] ``, the label it also puts on that member's findings. A
+    requirement such as ``--min-score`` is recorded there rather than as a
+    finding, so it is the only place a folder run still knows which member it
+    failed. An unlabelled gate failure applies to no single member and is left
+    to the whole run's status.
+
+    The per-member record is preferred, because a name containing ``]`` makes
+    the composed message ambiguous. The prefixed messages are still read for
+    results merged before that record existed.
+    """
+    recorded = result.metadata.get("member_gate_failures")
+    if isinstance(recorded, list):
+        labels = {
+            entry["label"]
+            for entry in recorded
+            if isinstance(entry, dict) and isinstance(entry.get("label"), str) and entry["label"].strip()
+        }
+        if labels:
+            return labels
+    labels: set[str] = set()
+    for failure in result.gate_failures:
+        label, _ = _split_member_label(failure)
+        if label is not None:
+            labels.add(label)
+    return labels
+
+
 def _validated_ci_context(context: dict[str, str] | None) -> dict[str, str]:
     """Allow only bounded display text and HTTPS links in trusted CI chrome."""
     if context is None:
@@ -2457,11 +2560,15 @@ class HTMLReporter(ReporterBase):
         for result in results:
             validator_name = result.validator_name
 
-            # Extract skill names from success_details
+            # Extract skill names from success_details. A member merged with
+            # ``merge_with_prefix`` records its label in the detail metadata, and
+            # older results only name it in the ``[skill] check`` form, so both
+            # are read: taken whole it becomes a second skill entry for a skill
+            # the findings below already keyed.
             for detail in result.success_details:
-                skill_name = detail.check_name
+                label = _member_label(detail)
                 # Skip discovery/folder-level checks
-                if skill_name in (
+                if detail.check_name in (
                     "skill_discovery",
                     "folder_structure",
                     "skills_directory",
@@ -2470,6 +2577,7 @@ class HTMLReporter(ReporterBase):
                     "pii_detection",
                 ):
                     continue
+                skill_name = label if label is not None else detail.check_name
 
                 if skill_name not in skills:
                     skills[skill_name] = {"passed": True, "validators": {}}
@@ -2503,22 +2611,35 @@ class HTMLReporter(ReporterBase):
                     if len(parts) > 0:
                         skill_name = parts[0]
 
+                # ``prefix_finding`` also records the member the finding came
+                # from, which survives a member name containing "]"; the file
+                # path above is the fallback for results merged without it.
+                labelled = file_path.startswith("[") and "]" in file_path
+                recorded_label = _finding_member_label(finding)
+                if recorded_label is not None:
+                    skill_name = recorded_label
+                    labelled = True
+
                 if skill_name:
+                    blocking = _finding_blocks(finding)
                     if skill_name not in skills:
-                        skills[skill_name] = {"passed": False, "validators": {}, "issue_count": 0}
+                        skills[skill_name] = {"passed": not blocking, "validators": {}, "issue_count": 0}
 
                     if validator_name not in skills[skill_name]["validators"]:
                         skills[skill_name]["validators"][validator_name] = {
-                            "passed": False,
+                            "passed": True,
                             "description": result.validator_description,
                             "details": [],
                             "findings": [],
                         }
 
-                    skills[skill_name]["validators"][validator_name]["passed"] = False
-                    skills[skill_name]["passed"] = False
+                    # A blocking finding fails its own member. An unlabelled
+                    # finding has no member to attribute, so it keeps failing
+                    # the entry it landed in, as it always has.
+                    if blocking or not labelled:
+                        skills[skill_name]["passed"] = False
+                        skills[skill_name]["validators"][validator_name]["passed"] = False
 
-                    # Clean file_path: strip redundant [skill-name] prefix
                     clean_path = file_path
                     if file_path.startswith("[") and "] " in file_path:
                         clean_path = file_path[file_path.index("] ") + 2 :]
@@ -2550,6 +2671,31 @@ class HTMLReporter(ReporterBase):
                         }
                     )
                     skills[skill_name]["issue_count"] = skills[skill_name].get("issue_count", 0) + 1
+
+            # Members whose own result failed through a gate such as a minimum
+            # score keep that verdict here; the parent's ``passed`` describes
+            # the whole folder, not any one member.
+            for failed_label in _gate_failed_member_labels(result):
+                # A member can fail a gate before it records any success detail
+                # (quality_score calls fail_gate and returns), so create the entry
+                # rather than dropping the only trace it left in the report.
+                if failed_label not in skills:
+                    skills[failed_label] = {
+                        "passed": True,
+                        "validators": {},
+                        "issue_count": 0,
+                    }
+                if failed_label in skills:
+                    skills[failed_label]["passed"] = False
+                    skills[failed_label]["validators"].setdefault(
+                        validator_name,
+                        {
+                            "passed": True,
+                            "description": result.validator_description,
+                            "details": [],
+                            "findings": [],
+                        },
+                    )["passed"] = False
 
         # Deduplicate findings within each skill/validator
         for skill_data in skills.values():

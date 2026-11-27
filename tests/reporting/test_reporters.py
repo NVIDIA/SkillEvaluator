@@ -32,6 +32,7 @@ from skillevaluator.reporting import (
 from skillevaluator.reporting.sarif_reporter import _file_uri, _normalize_artifact_uri
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier1.commands import emit_reports
+from skillevaluator.validators.quality_score import QualityScoreValidator
 
 _SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
 
@@ -1430,6 +1431,195 @@ def test_html_skill_entries_merge_only_occurrences_of_one_finding() -> None:
     for entry in entries:
         assert entry["occurrence_ids"]
         assert {group_of[occurrence_id] for occurrence_id in entry["occurrence_ids"]} == {entry["finding_id"]}
+
+
+def test_folder_merges_keep_one_entry_per_skill_with_that_skills_verdict() -> None:
+    """A member's prefixed label is its identity, not a second skill.
+
+    ``merge_with_prefix`` writes ``[skill] check`` into success details and
+    ``[skill] path`` into findings. Reading the whole detail label as a skill
+    name gave each skill a second, empty entry whose ``passed`` was always
+    true, and treating every finding as a failure marked the real entry failed
+    even when its findings were advisory, so a folder whose skills all passed
+    reported that none did.
+    """
+    collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    for skill, findings in (("alpha", (Severity.MEDIUM,)), ("beta", (Severity.MEDIUM, Severity.LOW))):
+        per_skill = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+        for index, severity in enumerate(findings):
+            per_skill.add_finding(
+                Finding("QUALITY", severity, "guide-only", "Guide-only skill has little content", "SKILL.md", index + 1)
+            )
+        per_skill.add_success("quality_score", "Score: 80.0/100 (Grade: B)", overall_score=80.0, grade="B")
+        collection.merge_with_prefix(per_skill, skill)
+    assert collection.passed, "advisory findings must not fail the collection"
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert sorted(skills_by_name) == ["alpha", "beta"]
+    assert {name: data["passed"] for name, data in skills_by_name.items()} == {"alpha": True, "beta": True}
+    assert {name: data["issue_count"] for name, data in skills_by_name.items()} == {"alpha": 1, "beta": 2}
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([collection]))
+    assert sorted((entry["name"], entry["passed"]) for entry in json_data["skills"]) == [
+        ("alpha", True),
+        ("beta", True),
+    ]
+    assert "[alpha] quality_score" not in json_skill_names(json_data)
+
+
+def json_skill_names(json_data: dict) -> set[str]:
+    """Return the skill names a JSON report lists, for identity assertions."""
+    return {entry["name"] for entry in json_data["skills"]}
+
+
+def test_a_member_name_containing_a_bracket_keeps_its_own_entry() -> None:
+    """A ``]`` in a directory name must not merge that member into a shorter name.
+
+    The label ``merge_with_prefix`` composes cannot be split reliably when a
+    name contains ``]``, so each member records its label in the detail and
+    finding metadata. Reading only the composed ``[fancy]name] check`` name
+    reported the skill as ``fancy`` and dropped ``fancy]name`` from both the
+    JSON ``skills[]`` list and the HTML skill cards.
+    """
+    collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    for name in ("fancy", "fancy]name", "plain"):
+        member = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+        member.add_success("quality_score", "Score: 90.0/100", overall_score=90.0)
+        collection.merge_with_prefix(member, name)
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert sorted(skills_by_name) == ["fancy", "fancy]name", "plain"]
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([collection]))
+    assert sorted(entry["name"] for entry in json_data["skills"]) == ["fancy", "fancy]name", "plain"]
+
+
+def test_nested_members_with_the_same_basename_keep_their_own_verdicts() -> None:
+    """Two skills named ``common`` under different folders are two members.
+
+    The label used to be the directory basename always, so ``team-a/common``
+    and ``team-b/common`` were keyed as one ``common`` member and the second
+    score replaced the first. A repeated name now falls back to the path
+    relative to the scanned folder, so each keeps its own gate result.
+    """
+    collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    for label, score in (("team-a/common", 79.5), ("team-b/common", 82.0)):
+        member = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+        member.add_success("quality_score", f"Score: {score}/100", overall_score=score)
+        member.add_finding(Finding("QUALITY", Severity.LOW, "score-advisory", "An advisory", "SKILL.md", 1))
+        if score < 81:
+            member.fail_gate(f"Score: {score}/100 is below the minimum of 81")
+        collection.merge_with_prefix(member, label)
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert {name: data["passed"] for name, data in skills_by_name.items()} == {
+        "team-a/common": False,
+        "team-b/common": True,
+    }
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([collection]))
+    assert sorted((entry["name"], entry["passed"]) for entry in json_data["skills"]) == [
+        ("team-a/common", False),
+        ("team-b/common", True),
+    ]
+
+
+def test_folder_label_is_the_directory_name_unless_it_repeats(tmp_path: Path) -> None:
+    """A unique directory name stays the label; only a repeat qualifies its path."""
+    for relative in ("alpha", "team-b/common", "team-a/common"):
+        skill = tmp_path / relative
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: common\ndescription: A shared helper skill used by two teams in this folder.\n---\n\n# Common\n",
+            encoding="utf-8",
+        )
+
+    folder = QualityScoreValidator()._validate_folder(tmp_path)
+    details = [detail.check_name for detail in folder.success_details]
+    assert "[alpha] quality_score" in details
+    assert "[team-a/common] quality_score" in details
+    assert "[team-b/common] quality_score" in details
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([folder])
+    assert sorted(skills_by_name) == ["alpha", "team-a/common", "team-b/common"]
+
+
+def test_gate_failure_creates_the_member_it_names() -> None:
+    """A member that fails a gate before recording a success detail still appears.
+
+    ``quality_score`` calls ``fail_gate`` and returns before ``add_success`` when
+    frontmatter exceeds the YAML complexity limits, so its only trace in the
+    merged result is a prefixed gate failure. Skipping it listed the healthy
+    sibling alone while the collection itself was failed.
+    """
+    collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+
+    good = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    good.add_success("quality_score", "Score: 95.2/100 (Grade: A)", overall_score=95.2, grade="A")
+    collection.merge_with_prefix(good, "good")
+
+    poor = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    poor.fail_gate("Score: 61.0/100 is below the minimum of 90")
+    collection.merge_with_prefix(poor, "poor")
+
+    assert not collection.passed, "the gate failure must fail the collection"
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert sorted(skills_by_name) == ["good", "poor"]
+    assert {name: data["passed"] for name, data in skills_by_name.items()} == {"good": True, "poor": False}
+
+
+def test_gate_failure_survives_merge_order() -> None:
+    """The gate loop must not depend on which member was merged first."""
+    for order in (("good", "poor"), ("poor", "good")):
+        collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+        members = {
+            "good": None,
+            "poor": None,
+        }
+        for name in order:
+            member = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+            if name == "good":
+                member.add_success("quality_score", "Score: 95.2/100", overall_score=95.2, grade="A")
+            else:
+                member.fail_gate("Score: 61.0/100 is below the minimum of 90")
+            members[name] = member
+            collection.merge_with_prefix(member, name)
+
+        skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+        assert {name: data["passed"] for name, data in skills_by_name.items()} == {
+            "good": True,
+            "poor": False,
+        }, f"merge order {order} changed the verdicts"
+
+
+def test_folder_marks_only_the_members_whose_own_result_failed() -> None:
+    """A blocking member finding fails that member, not its passing sibling."""
+    collection = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+    for skill, severity in (("good", Severity.LOW), ("broken", Severity.HIGH)):
+        per_skill = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+        per_skill.add_finding(Finding("SCHEMA", severity, "name-consistency", "Name mismatch", "SKILL.md", 1))
+        collection.merge_with_prefix(per_skill, skill)
+    assert not collection.passed
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert {name: data["passed"] for name, data in skills_by_name.items()} == {"good": True, "broken": False}
+
+
+def test_folder_preserves_medium_policy_and_unlabelled_verdicts() -> None:
+    collection = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+    for label, strict in (("good", False), ("strict", True)):
+        member = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+        member.add_finding(
+            Finding(
+                "SCHEMA", Severity.MEDIUM, "policy", "An advisory", "SKILL.md", 1, metadata={"fail_on_medium": strict}
+            )
+        )
+        collection.merge_with_prefix(member, label)
+    collection.add_finding(Finding("SCHEMA", Severity.LOW, "legacy", "An advisory", "legacy/SKILL.md", 1))
+
+    skills = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert {name: entry["passed"] for name, entry in skills.items()} == {"good": True, "strict": False, "legacy": False}
 
 
 def test_same_finding_in_several_skills_counts_once_with_one_occurrence_per_skill() -> None:

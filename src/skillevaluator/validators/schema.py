@@ -283,8 +283,10 @@ class SchemaValidator(ValidatorBase):
         result.merge(self._validate_folder_compliance(skill_path))
 
         declared_ids: dict[str, list[Path]] = {}
+        labels = self._member_labels(skill_dirs, skill_path)
         for skill_dir in skill_dirs:
             skill_result = self._validate_single_skill(skill_dir)
+            label = labels[skill_dir]
             metadata_id = skill_result.metadata.get("metadata_id")
             if isinstance(metadata_id, str):
                 declared_ids.setdefault(metadata_id, []).append(skill_dir)
@@ -303,7 +305,7 @@ class SchemaValidator(ValidatorBase):
 
                 advisories = len(skill_result.findings)
                 result.add_success(
-                    check_name=skill_dir.name,
+                    check_name=label,
                     message=(
                         "All schema and structure checks passed"
                         if not advisories
@@ -312,14 +314,15 @@ class SchemaValidator(ValidatorBase):
                     checks=check_details,
                     total_checks=len(check_details),
                     advisory_findings=advisories,
+                    member_label=label,
                 )
                 # A passing child can still carry policy advisories. Keep them
                 # named after the skill they came from, without merging its
                 # successes a second time; the roll-up above only says that
                 # nothing blocked.
-                result.merge_advisories_with_prefix(skill_result, skill_dir.name)
+                result.merge_advisories_with_prefix(skill_result, label)
             else:
-                result.merge_with_prefix(skill_result, skill_dir.name)
+                result.merge_with_prefix(skill_result, label)
 
         result.merge(self._validate_metadata_id_uniqueness(declared_ids, skill_path))
         return result

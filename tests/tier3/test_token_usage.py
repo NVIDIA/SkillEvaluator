@@ -8,9 +8,11 @@ from __future__ import annotations
 import copy
 import json
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.tier3 import token_usage
 from skillevaluator.tier3.harbor.collector import _pass_summary
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.token_usage import build_token_usage, normalize_token_counts
@@ -168,6 +170,7 @@ def test_sums_each_case_each_agent_and_all_agents() -> None:
         "uncached_prompt_tokens": 210,
         "completion_tokens": 50,
         "total_tokens": 350,
+        "efficiency_tokens": 260,
     }
     cases = {row["entry_id"]: row for row in codex["cases"]}
     assert cases["case-1"]["with_skill"]["totals"]["total_tokens"] == 120
@@ -386,9 +389,15 @@ def test_percentage_change_is_given_at_every_scope(with_total: int, percent: flo
 
     assert usage is not None
     for scope in _scopes(usage):
+        # The trials have no cached or completion tokens, so every measure but the cache moves with the prompt.
         assert scope["delta"] == {
             "status": "available",
+            "prompt_tokens": with_total - 1000,
+            "cached_tokens": 0,
+            "uncached_prompt_tokens": with_total - 1000,
+            "completion_tokens": 0,
             "total_tokens": with_total - 1000,
+            "efficiency_tokens": with_total - 1000,
             "total_tokens_change_percent": percent,
             "reason_codes": [],
             "reason": None,
@@ -405,6 +414,118 @@ def test_a_zero_token_baseline_keeps_the_difference_without_a_percentage() -> No
         None,
         ["zero_baseline"],
     )
+
+
+# -- efficiency tokens, the change per measure and the accounting source ---------------------------
+
+
+def _two_agent_usage() -> dict[str, Any]:
+    usage = build_token_usage(
+        {
+            "codex": _agent(
+                [_trial("case-1", 100, 20, 40), _trial("case-2", 200, 30, 50)],
+                [_trial("case-1", 150, 25, 30), _trial("case-2", 250, 35, 40)],
+            ),
+            "opencode": _agent([_trial("case-1", 80, 10, 20)], [_trial("case-1", 90, 15, 10)]),
+        }
+    )
+    assert usage is not None
+    return usage
+
+
+def test_efficiency_tokens_are_uncached_prompt_plus_completion_at_every_scope() -> None:
+    usage = _two_agent_usage()
+
+    codex = usage["agents"]["codex"]
+    cases = {row["entry_id"]: row for row in codex["cases"]}
+    expected = {
+        ("dataset", "with_skill"): 330,
+        ("dataset", "baseline"): 485,
+        ("codex", "with_skill"): 260,
+        ("codex", "baseline"): 390,
+        ("case-1", "with_skill"): 80,
+        ("case-1", "baseline"): 145,
+        ("case-2", "with_skill"): 180,
+        ("case-2", "baseline"): 245,
+    }
+    scopes = {"dataset": usage["dataset"], "codex": codex, **cases}
+    for (name, arm), efficiency in expected.items():
+        assert scopes[name][arm]["totals"]["efficiency_tokens"] == efficiency, (name, arm)
+    for scope in (*scopes.values(), usage["agents"]["opencode"]):
+        for arm in ("with_skill", "baseline"):
+            totals = scope[arm]["totals"]
+            assert totals["efficiency_tokens"] == totals["uncached_prompt_tokens"] + totals["completion_tokens"]
+            # Cached tokens stay inside the prompt: efficiency never exceeds the total.
+            assert totals["efficiency_tokens"] <= totals["total_tokens"]
+
+
+def test_an_incomplete_attempt_adds_nothing_to_efficiency_tokens() -> None:
+    missing = {"entry_id": "case-2", "trial_id": "case-2__a"}
+    invalid = {"entry_id": "case-3", "trial_id": "case-3__a", "tokens": {"prompt": -5, "completion": 9}}
+    usage = build_token_usage(
+        {
+            "codex": _agent(
+                [_trial("case-1", 100, 20, 40), missing, invalid],
+                [_trial("case-1", 90, 10), _trial("case-2", 90, 10), _trial("case-3", 90, 10)],
+            )
+        }
+    )
+
+    assert usage is not None
+    with_skill = usage["agents"]["codex"]["with_skill"]
+    assert with_skill["coverage"]["status"] == "partial"
+    assert with_skill["totals"]["efficiency_tokens"] == 60 + 20
+    assert usage["dataset"]["with_skill"]["totals"]["efficiency_tokens"] == 60 + 20
+
+
+def test_the_change_covers_every_measure_with_a_percentage_of_the_baseline_total() -> None:
+    usage = _two_agent_usage()
+
+    codex_delta = usage["agents"]["codex"]["delta"]
+    assert codex_delta == {
+        "status": "available",
+        "prompt_tokens": -100,
+        "cached_tokens": 20,
+        "uncached_prompt_tokens": -120,
+        "completion_tokens": -10,
+        "total_tokens": -110,
+        "efficiency_tokens": -130,
+        "total_tokens_change_percent": -23.91,
+        "reason_codes": [],
+        "reason": None,
+    }
+    dataset_delta = usage["dataset"]["delta"]
+    assert (dataset_delta["efficiency_tokens"], dataset_delta["total_tokens"]) == (330 - 485, 440 - 565)
+    case_delta = {row["entry_id"]: row["delta"] for row in usage["agents"]["codex"]["cases"]}["case-1"]
+    assert (case_delta["prompt_tokens"], case_delta["cached_tokens"], case_delta["efficiency_tokens"]) == (-50, 10, -65)
+
+
+def test_an_unavailable_change_has_no_measure_values() -> None:
+    usage = build_token_usage(
+        {"codex": _agent([_trial("case-1", 100, 20)], [_trial("case-1", 90, 10)], baseline_status="failed")}
+    )
+
+    assert usage is not None
+    for scope in _scopes(usage):
+        assert set(scope["delta"]) == {
+            "status",
+            "total_tokens",
+            "total_tokens_change_percent",
+            "reason_codes",
+            "reason",
+        }
+        assert scope["delta"]["status"] == "unavailable"
+        assert scope["delta"]["total_tokens"] is None
+        assert scope["delta"]["total_tokens_change_percent"] is None
+
+
+def test_the_payload_names_its_accounting_source_and_efficiency_formula() -> None:
+    usage = _two_agent_usage()
+
+    assert usage["source"] == "atif_final_metrics"
+    # The additions are backward compatible, so the schema version does not change.
+    assert usage["schema_version"] == "1"
+    assert usage["accounting"]["efficiency_tokens"] == "uncached_prompt_tokens + completion_tokens"
 
 
 def test_a_reused_baseline_is_labelled_and_otherwise_unchanged() -> None:
@@ -631,6 +752,48 @@ _LONG_CASE = "huggingface-factory-peft-sft-local-return"
 _CUT_CASE = _LONG_CASE[:32].rstrip("_-")
 
 
+def test_truncated_case_names_do_not_scan_stop_on_pass_matches() -> None:
+    cases = [f"case-{index:03d}-with-a-long-descriptive-name" for index in range(50)]
+    agent = _agent([_trial(case[:32], 100, 20) for case in cases], [_trial(case[:32], 90, 10) for case in cases])
+
+    class CountedCases(set[str]):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    class CountedAttempts(list[token_usage._Attempt]):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    counted_cases = CountedCases(token_usage._known_cases(agent, frozenset(cases)))
+    counted_attempts = {}
+    collect_attempts = token_usage._agent_attempts
+
+    def collect_counted_attempts(*args, **kwargs):
+        counted_attempts.update({arm: CountedAttempts(rows) for arm, rows in collect_attempts(*args, **kwargs).items()})
+        return counted_attempts
+
+    with (
+        patch.object(token_usage, "_stop_on_pass_case", wraps=token_usage._stop_on_pass_case) as match,
+        patch.object(token_usage, "_known_cases", return_value=counted_cases),
+        patch.object(token_usage, "_agent_attempts", side_effect=collect_counted_attempts),
+    ):
+        usage = build_token_usage({"codex": agent}, dataset_case_ids=cases)
+
+    assert usage is not None
+    assert [row["entry_id"] for row in usage["agents"]["codex"]["cases"]] == cases
+    assert match.call_count == 0
+    assert counted_cases.iterations == 1
+    assert set(counted_attempts) == {"with_skill", "baseline"}
+    for arm, attempts in counted_attempts.items():
+        assert 0 < attempts.iterations < len(cases), arm
+
+
 def test_a_cut_case_name_never_becomes_a_second_row_beside_its_dataset_case() -> None:
     # The scored arm recorded Harbor's cut trial name; the other arm the full one.
     agent = _agent([_trial(_CUT_CASE, 100, 20)], [_trial(_LONG_CASE, 90, 10)])
@@ -647,6 +810,21 @@ def test_a_cut_case_name_never_becomes_a_second_row_beside_its_dataset_case() ->
         "dataset_case_ids": 1,
         "unmatched_case_ids": [],
     }
+
+
+@pytest.mark.parametrize("condition", ["with", "without"])
+def test_real_stop_on_pass_trial_scans_each_known_case_once(condition: str) -> None:
+    first = "first-case-with-a-long-descriptive-name"
+    second = "second-case-with-a-long-descriptive-name"
+    cases = {first, second, "third-case-with-a-long-descriptive-name"}
+    matcher = token_usage._CaseMatcher(cases)
+    trial_id = f"demo-codex-{condition}-{second}-attempt001__trial"
+
+    with patch.object(token_usage, "_stop_on_pass_case", wraps=token_usage._stop_on_pass_case) as match:
+        resolved = matcher.match(first[:32], trial_id)
+
+    assert resolved == second
+    assert sorted(call.args for call in match.call_args_list) == sorted((trial_id, case) for case in cases)
 
 
 def test_an_arm_that_died_keeps_its_tokens_on_the_canonical_case() -> None:
@@ -718,6 +896,43 @@ def test_two_dataset_ids_with_the_same_cut_name_are_never_guessed() -> None:
     rows = {row["entry_id"]: row for row in usage["agents"]["codex"]["cases"]}
     assert rows[_CUT_CASE]["case_id_in_dataset"] is False
     assert usage["case_id_validation"]["unmatched_case_ids"] == [_CUT_CASE]
+
+
+@pytest.mark.parametrize("attempt_suffix", ["-attempt001__trial", "-attempt0__trial", "-attempt1__"])
+def test_stop_on_pass_evidence_keeps_priority_over_a_unique_cut_label(attempt_suffix: str) -> None:
+    first = "first-case-with-a-long-descriptive-name"
+    second = "second-case-with-a-long-descriptive-name"
+    trial = _trial(first[:32], 100, 20)
+    trial["trial_id"] = f"demo-codex-with-{second}{attempt_suffix}"
+
+    usage = build_token_usage({"codex": _agent([trial], [])}, dataset_case_ids=[first, second])
+
+    assert usage is not None
+    rows = usage["agents"]["codex"]["cases"]
+    expected = second if attempt_suffix == "-attempt001__trial" else first
+    assert [row["entry_id"] for row in rows] == [expected]
+    assert rows[0]["with_skill"]["totals"]["total_tokens"] == 120
+
+
+def test_cut_name_resolution_is_local_to_each_agents_known_cases() -> None:
+    first = "same-long-description-prefix-for-first-case"
+    second = "same-long-description-prefix-for-second-case"
+    assert first[:32] == second[:32]
+    agents = {
+        name: _agent([_trial(case, 100, 20)], [], unscored=[_trial(case[:32], 40, 4)])
+        for name, case in (("first", first), ("second", second))
+    }
+    original = copy.deepcopy(agents)
+
+    usage = build_token_usage(agents)
+
+    assert usage is not None
+    for name, case in (("first", first), ("second", second)):
+        rows = usage["agents"][name]["cases"]
+        assert [row["entry_id"] for row in rows] == [case]
+        assert rows[0]["with_skill"]["totals"]["total_tokens"] == 164
+        assert rows[0]["with_skill"]["coverage"]["unscored_attempts"] == 1
+    assert agents == original
 
 
 def test_an_agent_without_scores_still_gets_canonical_case_rows() -> None:

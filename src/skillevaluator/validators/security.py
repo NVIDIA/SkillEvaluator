@@ -61,7 +61,10 @@ from skillevaluator.provider_config import (
 )
 from skillevaluator.skillspector_diagnostics import completeness_record, merge_completeness
 from skillevaluator.skillspector_provenance import SKILLSPECTOR_LLM_ANALYZERS, sanitize_skillspector_llm_provenance
-from skillevaluator.skillspector_reference_caveats import REFERENCE_COMPLETENESS_FIELDS, reference_caveat_metadata
+from skillevaluator.skillspector_reference_caveats import (
+    reference_caveat_metadata,
+    reference_completeness_fields_supported,
+)
 from skillevaluator.skillspector_references import (
     AE1_PATTERN,
     AE1_RULE_ID,
@@ -2828,7 +2831,7 @@ def _skillspector_missing_reference_notes(
     # A bounded subset cannot establish that every reference was checked.
     # Keep unknown evidence fields (including truncation markers) outside the
     # same report contract used by the report-only reference-caveat gate.
-    if set(analysis_completeness) != REFERENCE_COMPLETENESS_FIELDS:
+    if not reference_completeness_fields_supported(analysis_completeness, skillspector_version):
         return None
     reference_rows = [row for row in ledger_exceptions if row.get("phase") == "reference_resolution"]
     other_rows = [row for row in ledger_exceptions if row.get("phase") != "reference_resolution"]
@@ -3680,7 +3683,12 @@ class SecurityValidator(ValidatorBase):
 
         return result
 
-    def _run_skillspector(self, skill_path: Path) -> ValidationResult:
+    def _run_skillspector(
+        self,
+        skill_path: Path,
+        *,
+        verify_reviewed: Callable[[ValidationResult, Path], ValidationResult] | None = None,
+    ) -> ValidationResult:
         """Execute skillspector security scan via CLI on a single directory.
 
         Runs `skillspector scan <path> --format json`; adds `--no-llm` when
@@ -3696,6 +3704,8 @@ class SecurityValidator(ValidatorBase):
         An explicitly selected baseline is passed to both stages with
         ``--baseline``. When it lives inside a staged skill, the staged copy is
         passed instead so SkillSpector excludes the file it actually scans.
+
+        *verify_reviewed* runs on the attested package snapshot while it exists.
         """
         result = ValidationResult()
 
@@ -3807,6 +3817,8 @@ class SecurityValidator(ValidatorBase):
                     static_summary=static_summary,
                 )
             if hook_review is not None:
+                if verify_reviewed is not None and not result.is_incomplete:
+                    result = verify_reviewed(result, scan_root)
                 try:
                     unchanged = capture_hook_review_artifact(skill_path) == hook_review.artifact
                 except (OSError, ValueError):
@@ -4773,6 +4785,11 @@ class SecurityValidator(ValidatorBase):
                         if not gap_rows and not other_gaps and diagnostic["limitations"]:
                             # No incomplete file to name: the limitation is the only stated reason.
                             message = f"{message}. Limitation: {diagnostic['limitations'][0]}"
+                        if diagnostic["omitted_exceptions"]:
+                            message = (
+                                f"{message}. The completeness ledger for these gaps has {diagnostic['ledger_rows_total']} rows, "
+                                f"with {diagnostic['omitted_exceptions']} beyond the per-record limit"
+                            )
                         if accounting_note := _skillspector_supply_chain_accounting_note(gap_rows, gap_statuses):
                             separator = " " if message.endswith(".") else ". "
                             message = f"{message}{separator}{accounting_note}"

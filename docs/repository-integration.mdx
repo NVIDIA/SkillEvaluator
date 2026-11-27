@@ -3,9 +3,9 @@ title: "Bring Skill Evaluation to Your Repository"
 description: "Evaluate changed skills automatically with reusable GitHub and GitLab CI configurations."
 ---
 
-Bring quality and security checks to your repository. No model key required.
-Optional LLM checks are available. Choose your skill folders and get results
-automatically when skills change.
+Run Tier 1 quality and security checks automatically when skills change. Tier 1
+runs without a model key. Add Tier 2 to check for redundant content and similar
+skills using your configured model and embeddings providers.
 
 No evaluation code to write. No scanner installations to manage. The shared
 container runs the checks in your CI runner, including SkillSpector security
@@ -41,16 +41,19 @@ filled-in version, and set your skill folders and score threshold.
 
 | Your platform | Ready-to-use template | Put it in your repository |
 | --- | --- | --- |
-| GitHub | [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
-| GitHub PR comments without hosting | [comment-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/comment-skill-checks.yml) | `.github/workflows/comment-skill-checks.yml`, alongside the scan |
-| GitLab | [gitlab-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing root configuration |
+| GitHub | [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitHub PR comments without hosting | [comment-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/comment-skill-checks.yml) | `.github/workflows/comment-skill-checks.yml`, alongside the scan |
+| GitLab | [gitlab-skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing root configuration |
 
-The [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/1.2.0)
+The [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/1.2.1)
 include the scan configurations, comments without hosting and optional GitHub
 publisher, with reviewed workflow
 and image versions already filled in. Open a file and use GitHub's **Raw** view
 to copy its full contents. The [template catalog](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md)
 explains customization and optional LLM checks.
+
+For GitHub repositories following `@stable`, see
+[Set up stable PR comments](/skills/skillevaluator/github-actions#set-up-stable-pr-comments).
 
 ## What you get
 
@@ -67,10 +70,101 @@ Browse [report, log and PR comment examples](https://github.com/NVIDIA/SkillEval
 in the public repository. No demo-repository access is needed.
 
 <Note>
-  These quality and security checks are called **Tier 1** in SkillEvaluator
-  reports. GitHub and GitLab use the same scanner image with platform-specific
-  workflow files. Additional evaluation stages require a separate opt-in.
+  The templates above run **Tier 1**. GitHub and GitLab use the same scanner
+  image with platform-specific workflow files.
 </Note>
+
+## Run Tier 1 and Tier 2 together
+
+Tier 1 gates pull or merge requests on quality and security. Tier 2 adds advisory
+deduplication findings and compares selected skills with the other skills under
+your configured roots. Tier 2 uses chat and embeddings credentials. With OpenAI
+for both, set `OPENAI_API_KEY` in the `skillevaluator` execution environment. See
+[provider and credential options](/skills/skillevaluator/configuration).
+Install SkillEvaluator 1.2.0 or later to generate the pinned configurations.
+[Installation](/skills/skillevaluator/installation)
+
+<Tabs>
+<Tab title="GitHub Actions">
+<Steps>
+
+### Preview the workflow files
+
+From your skills repository, preview the pinned evaluation and feedback files.
+Replace `skills` with a discovered skill root for your repository.
+
+```bash
+skillevaluator ci init --platform github --tiers 1,2,3 --paths skills \
+  --provider openai --mode preview --no-input --show-files
+```
+
+### Select Tier 1 and Tier 2
+
+Copy the proposed files to the paths the command prints. In
+`.github/workflows/skill-checks-all-tiers.yml`, set `tiers: '1,2'` under
+`jobs.skills.with`. If you use trusted PR feedback, run the following after
+your final workflow edit and put the resulting hash in `trusted-caller-blobs`
+in each feedback job that uses it.
+
+```bash
+git hash-object --path=.github/workflows/skill-checks-all-tiers.yml \
+  .github/workflows/skill-checks-all-tiers.yml
+```
+
+### Run the checks
+
+Merge the configuration and run **Skill checks (all tiers)** on the default
+branch. The provider job also runs on eligible same-repository pull requests
+that change skills. To enforce Tier 1 at merge time, require the new aggregate
+check in branch protection. If you already have a Tier 1 workflow, see the
+[migration steps](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#upgrade-a-tier-1-only-consumer).
+
+</Steps>
+</Tab>
+<Tab title="GitLab CI/CD">
+<Steps>
+
+### Preview the pipeline files
+
+Preview the pinned files from your skills repository. Local mode omits the
+Docker-in-Docker service used for Tier 3.
+
+```bash
+skillevaluator ci init --platform gitlab --tiers 1,2,3 --paths skills \
+  --provider openai --env-mode local --mode preview --no-input --show-files
+```
+
+### Select Tier 1 and Tier 2
+
+Copy the proposed files and set `SKILL_EVAL_TIERS: '1,2'` under `variables`
+in `.gitlab-ci.yml`. For an existing pipeline, follow the printed merge
+instructions. Set up the protected default branch and execution environment.
+See the runner, token, and feedback requirements in the
+[GitLab setup guide](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#gitlab-checks-and-feedback).
+
+### Run the checks
+
+Merge the configuration and run a default-branch pipeline. The provider job
+also runs on eligible same-project merge requests that change skills.
+
+</Steps>
+</Tab>
+</Tabs>
+
+With the 1.2.0 workflow pins, a Tier 3 job can still appear in the pipeline. It
+skips evaluation when you select `1,2`.
+
+Download the artifact starting with `skill-evaluator-results` and open `index.html`.
+Verify that the Tier 1 gate ran and that Tier 2 has completed evidence. Tier 2
+can be incomplete when credentials or a provider are unavailable, even if the
+pipeline passes. Tier 2 needs no Tier 3 datasets or agents. See
+[Advanced CI](/skills/skillevaluator/advanced-ci) for admission and retained evidence.
+
+### Use a prebuilt Tier 2 image
+
+The workflow pins generated by 1.2.0 install Tier 2 from the evaluator's locked
+dependencies. To use a prebuilt runtime on a Linux x86-64 Docker runner, use
+an updated [CI workflow revision and its matching Tier 2 image digest](/skills/skillevaluator/advanced-ci#prebuilt-tier-2-image).
 
 ## Pre-commit hooks
 

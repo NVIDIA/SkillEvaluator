@@ -1506,6 +1506,7 @@ def test_nested_members_with_the_same_basename_keep_their_own_verdicts() -> None
     for label, score in (("team-a/common", 79.5), ("team-b/common", 82.0)):
         member = ValidationResult(validator_name="QUALITY", validator_description="Quality")
         member.add_success("quality_score", f"Score: {score}/100", overall_score=score)
+        member.add_finding(Finding("QUALITY", Severity.LOW, "score-advisory", "An advisory", "SKILL.md", 1))
         if score < 81:
             member.fail_gate(f"Score: {score}/100 is below the minimum of 81")
         collection.merge_with_prefix(member, label)
@@ -1603,6 +1604,22 @@ def test_folder_marks_only_the_members_whose_own_result_failed() -> None:
 
     skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
     assert {name: data["passed"] for name, data in skills_by_name.items()} == {"good": True, "broken": False}
+
+
+def test_folder_preserves_medium_policy_and_unlabelled_verdicts() -> None:
+    collection = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+    for label, strict in (("good", False), ("strict", True)):
+        member = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+        member.add_finding(
+            Finding(
+                "SCHEMA", Severity.MEDIUM, "policy", "An advisory", "SKILL.md", 1, metadata={"fail_on_medium": strict}
+            )
+        )
+        collection.merge_with_prefix(member, label)
+    collection.add_finding(Finding("SCHEMA", Severity.LOW, "legacy", "An advisory", "legacy/SKILL.md", 1))
+
+    skills = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert {name: entry["passed"] for name, entry in skills.items()} == {"good": True, "strict": False, "legacy": False}
 
 
 def test_same_finding_in_several_skills_counts_once_with_one_occurrence_per_skill() -> None:

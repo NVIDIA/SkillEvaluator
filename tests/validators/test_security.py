@@ -9134,7 +9134,8 @@ def test_plugin_root_security_reports_png_exclusion_in_every_format(
     assert run.exit_code == 0, run.output
     note = "1 passive PNG file (assets/logo.png)"
     [json_path] = [path for path in reports.glob("*.json") if not path.name.endswith(".sarif.json")]
-    [security] = json.loads(json_path.read_text(encoding="utf-8"))["results"]
+    results = json.loads(json_path.read_text(encoding="utf-8"))["results"]
+    [security] = [result for result in results if result["validator"] == "Security Scan"]
     assert security["passed"]
     [finding] = security["findings"]
     assert finding["severity"] == "info"
@@ -11035,7 +11036,7 @@ class TestSkillspectorMissingReferences:
         )
         _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
         if manifest:
-            # A parallel job detects the skill's type again, and a manifest makes it a plugin.
+            # Catalog discovery selects this as a skill even with a plugin manifest.
             _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.3", "staged-script"))
         mock_tools.skillspector.is_available = True
@@ -11675,11 +11676,11 @@ def _override_notes_folder_error(version: str) -> str:
 class TestSkillspectorCompleteWithCaveats:
     """SkillSpector 2.13.4 reports an analysis whose only gaps are missing references as ``complete_with_caveats``."""
 
-    @pytest.mark.parametrize("version", ["2.13.4", "2.14.0"])
+    @pytest.mark.parametrize("version", ["2.13.4", "2.13.5", "2.13.6", "2.14.0"])
     @patch("skillevaluator.validators.security.Tools")
     def test_caveats_report_completes_the_scan(self, mock_tools, tmp_path: Path, version: str) -> None:
         skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
-        payload = _reference_report("2.13.4")
+        payload = _reference_report("2.13.4" if version == "2.13.4" else "2.13.6")
         payload["metadata"]["skillspector_version"] = version
 
         result = _validate_skillspector_payload(mock_tools, skill, payload)
@@ -11690,6 +11691,48 @@ class TestSkillspectorCompleteWithCaveats:
         assert result.incomplete_scans == []
         assert result.warnings == [_missing_reference_warning("SKILL.md:10 [reference_resolution; reference_missing]")]
         assert any(detail.check_name == "skillspector" for detail in result.success_details)
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("enabled", True),
+            ("enabled", 0),
+            ("status", "partial"),
+            ("mode", "unknown"),
+            ("locked_entries", 1),
+            ("locked_entries", False),
+            ("inspected_artifacts", 1),
+            ("inspected_artifacts", 0.0),
+            ("artifacts", [{}]),
+            ("truncated", True),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_dependency_inspection_must_be_verifiably_not_requested(
+        self, mock_tools, tmp_path: Path, field: str, value: object
+    ) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        payload = _reference_report("2.13.6")
+        payload["analysis_completeness"]["dependency_inspection"][field] = value
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert not result.passed
+
+    @pytest.mark.parametrize("version", ["2.13.4", "3.0.0"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_dependency_metadata_requires_a_supported_scanner_contract(
+        self, mock_tools, tmp_path: Path, version: str
+    ) -> None:
+        skill = _write_skill(tmp_path / "notes-writer", _NOTES_WRITER_FILES)
+        payload = _reference_report("2.13.6")
+        payload["metadata"]["skillspector_version"] = version
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.incomplete_scans == ["skillspector"]
+        assert not result.passed
 
     @patch("skillevaluator.validators.security.Tools")
     def test_caveats_report_completes_the_llm_stage(self, mock_tools, tmp_path: Path) -> None:
@@ -11794,7 +11837,7 @@ class TestSkillspectorCompleteWithCaveats:
         )
         _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
         if manifest:
-            # A parallel job detects the skill's type again, and a manifest makes it a plugin.
+            # Catalog discovery selects this as a skill even with a plugin manifest.
             _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.4", "staged-script"))
         mock_tools.skillspector.is_available = True

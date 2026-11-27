@@ -31,7 +31,7 @@ This guide gets you from a fresh clone to a mergeable pull request. You need Pyt
   uv run make build
   ```
 
-  Make is an additional dependency. Without Make, the equivalent commands are `uv run python -m ruff check src tests`,
+  Make is an additional dependency. Without Make, the equivalent commands are `uv run python -m ruff check .`,
   `uv run python -m pytest`, and `uv run python -m build` instead.
 
   If you prefer pip, `make install` runs the equivalent editable install:
@@ -55,7 +55,7 @@ The Makefile wraps the standard tools, so you can run the underlying commands di
 | --- | --- | --- |
 | `make install` | `python -m pip install -e '.[all,dev]'` | Editable install with every extra plus dev tooling |
 | `make test` | `pytest` | Default (fast) test suite |
-| `make lint` | `ruff check src tests` | Lint the source and tests |
+| `make lint` | `ruff check .` | Lint the whole repository, as CI does |
 | `make build` | `python -m build` | Build the wheel and sdist |
 | `make clean` | removes `build`, `dist`, and tool caches | Reset build state |
 
@@ -141,7 +141,7 @@ before changing expectations.
 
 ## Code style and dependencies
 
-Ruff owns linting — `make lint` is the project's lint gate. CI runs `ruff check` over the whole repository, so lint the files you touch even outside `src` and `tests`.
+Ruff owns linting — `make lint` is the project's lint gate. It runs `ruff check .` over the whole repository, the same check CI runs, so it covers files outside `src` and `tests` too.
 
 Linting is only the first gate. CI also runs an OSS source-boundary scan (`python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json`), which fails closed if the source tree or built distributions contain private integrations. The packaging job repeats that scan over the wheel and sdist, installs the wheel into a clean environment, and smoke-tests the CLI — including `skillevaluator models --help` and a `doctor` run with placeholder `nv_build` credentials. Platform jobs round out the matrix: a macOS runner executes the Tier 3 local-mode, progress, and preflight test files, and a native-Windows runner asserts local mode fails closed, with `doctor` required to exit non-zero for every `SKILLEVALUATOR_LOCAL_SANDBOX` value.
 
@@ -219,7 +219,7 @@ SkillEvaluator version you used for reproducibility:
 cff-version: 1.2.0
 title: "SkillEvaluator"
 type: software
-version: "1.2.0"
+version: "1.2.1"
 preferred-citation:
   type: article
   title: "Evaluating Skills, Not Just Agents: Agentic Continuous Evaluation of Skills"

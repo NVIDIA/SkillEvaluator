@@ -143,7 +143,7 @@ def test_app_bot_needs_the_same_api_proven_write_role(tmp_path, monkeypatch, sta
     assert any("/collaborators/my-app%5Bbot%5D/permission" in url for url in requested)
 
 
-def _eligibility_outputs(tmp_path, monkeypatch, files, *, scan_mode="auto", paths="skills"):
+def _eligibility_outputs(tmp_path, monkeypatch, files, *, scan_mode="auto", paths="skills", tiers="1,2,3"):
     """Run the actual eligibility script for an eligible same-repository PR."""
     workflow = yaml.load((ROOT / ".github/workflows/evaluate-all-tiers.yml").read_text(), Loader=yaml.BaseLoader)
     shell = workflow["jobs"]["eligibility"]["steps"][0]["run"]
@@ -155,7 +155,7 @@ def _eligibility_outputs(tmp_path, monkeypatch, files, *, scan_mode="auto", path
     for key, value in {
         "TOOLS_REF": SHA,
         "ENV_MODE": "docker",
-        "TIERS": "1,2,3",
+        "TIERS": tiers,
         "SCAN_MODE": scan_mode,
         "SKILL_PATHS": paths,
         "GH_TOKEN": "read-only-token",
@@ -249,12 +249,22 @@ def test_enriched_job_and_gate_artifact_share_the_skill_change_condition():
     assert jobs["eligibility"]["steps"][0]["env"]["SKILL_PATHS"] == "${{ inputs.paths }}"
 
 
+@pytest.mark.parametrize(("tiers", "paid_tiers"), [("1", []), ("1,2", [2]), ("1,3", [3]), ("1,2,3", [2, 3])])
+def test_eligibility_only_schedules_selected_paid_tiers(tmp_path, monkeypatch, tiers, paid_tiers):
+    changed = [{"filename": "skills/alpha/SKILL.md"}]
+    outputs = _eligibility_outputs(tmp_path, monkeypatch, changed, tiers=tiers)
+    assert json.loads(outputs["paid-tiers"]) == paid_tiers
+
+
 def test_paid_tiers_share_the_skill_change_condition_and_aggregate_reason():
     workflow = yaml.load((ROOT / ".github/workflows/evaluate-all-tiers.yml").read_text(), Loader=yaml.BaseLoader)
     jobs = workflow["jobs"]
     condition = "needs.eligibility.outputs.skills-changed == 'true'"
     assert condition in jobs["paid-tiers"]["if"]
     assert "needs.eligibility.outputs.allowed == 'true'" in jobs["paid-tiers"]["if"]
+    assert "needs.eligibility.outputs.paid-tiers != '[]'" in jobs["paid-tiers"]["if"]
+    assert jobs["eligibility"]["outputs"]["paid-tiers"] == "${{ steps.check.outputs.paid-tiers }}"
+    assert jobs["paid-tiers"]["strategy"]["matrix"]["tier"] == "${{ fromJSON(needs.eligibility.outputs.paid-tiers) }}"
     assert "eligibility" in jobs["aggregate"]["needs"]
     assert jobs["aggregate"]["env"]["SKILL_EVAL_SKILLS_CHANGED"] == "${{ needs.eligibility.outputs.skills-changed }}"
 
@@ -292,4 +302,5 @@ def test_fork_prs_never_claim_that_no_skill_changed(tmp_path, monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", respond)
     exec(compile("\n".join(shell.splitlines()[1:-1]), "<workflow eligibility>", "exec"), {})
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert json.loads(outputs.pop("paid-tiers")) == [2, 3]
     assert outputs == {"allowed": "false", "scan-mode": "auto", "skills-changed": "true"}

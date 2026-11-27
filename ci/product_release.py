@@ -22,6 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from email.parser import BytesParser
+from functools import partial
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from zipfile import BadZipFile, ZipFile
@@ -36,6 +37,7 @@ except ModuleNotFoundError:
 REPOSITORY = "NVIDIA/SkillEvaluator"
 DOCUMENTATION = "https://docs.nvidia.com/skills/skillevaluator/"
 PYPI = "https://pypi.org/pypi/skillevaluator/{version}/json"
+TEST_PYPI = "https://test.pypi.org/pypi/skillevaluator/{version}/json"
 DEVZONE_INDEX_VARIABLE = "RELEASE_DEVZONE_INDEX_URL"
 MANIFEST = "artifact-manifest.json"
 CHECKSUMS = "SHA256SUMS.txt"
@@ -456,13 +458,16 @@ def file_url(url: str, host: str, filename: str) -> str:
     return urllib.parse.urlunsplit(address._replace(fragment=""))
 
 
-def pypi_entries(version: str, timeout: float) -> list[tuple]:
-    data = json_object(get_url(PYPI.format(version=version), MAX_METADATA_BYTES, timeout), "PyPI version")
+def pypi_entries(version: str, timeout: float, *, testpypi: bool = False) -> list[tuple]:
+    index_url, files_host, label = (
+        (TEST_PYPI, "test-files.pythonhosted.org", "TestPyPI") if testpypi else (PYPI, "files.pythonhosted.org", "PyPI")
+    )
+    data = json_object(get_url(index_url.format(version=version), MAX_METADATA_BYTES, timeout), f"{label} version")
     require(
         isinstance(data.get("info"), dict)
         and data["info"].get("version") == version
         and isinstance(data.get("urls"), list),
-        "PyPI returned an unexpected project version.",
+        f"{label} returned an unexpected project version.",
     )
     entries = []
     for release_file in data["urls"]:
@@ -473,10 +478,10 @@ def pypi_entries(version: str, timeout: float) -> list[tuple]:
             and isinstance(release_file.get("digests"), dict)
             and isinstance(release_file.get("yanked"), bool)
             and type(release_file.get("size")) is int,
-            "PyPI returned invalid file metadata.",
+            f"{label} returned invalid file metadata.",
         )
         name = release_file["filename"]
-        url = file_url(release_file["url"], "files.pythonhosted.org", name)
+        url = file_url(release_file["url"], files_host, name)
         entries.append((name, url, release_file["digests"].get("sha256"), release_file["yanked"], release_file["size"]))
     return entries
 
@@ -535,7 +540,9 @@ def verify_index_listing(entries: list[tuple], expected: dict, label: str, *, al
     return seen
 
 
-def verify_index_downloads(entries: list[tuple], expected: dict, label: str, timeout: float) -> None:
+def verify_index_downloads(
+    entries: list[tuple], expected: dict, label: str, timeout: float, *, downloads: dict[str, bytes] | None = None
+) -> None:
     for name, url, _, _, _ in entries:
         target = expected[name]
         data = get_url(url, target["size"] + 1, timeout)
@@ -543,6 +550,8 @@ def verify_index_downloads(entries: list[tuple], expected: dict, label: str, tim
             len(data) == target["size"] and sha256(data) == target["sha256"],
             f"{label} download has different bytes for {name}.",
         )
+        if downloads is not None:
+            downloads[name] = data
 
 
 def verify_index(
@@ -571,12 +580,16 @@ def inspect_public_indexes(version: str, expected: dict) -> set[str]:
     return py_files
 
 
-def verify_indexes(version: str, assets: Path, wait_seconds: int = 0) -> None:
+def verify_indexes(version: str, assets: Path, wait_seconds: int = 0, *, testpypi_output: Path | None = None) -> None:
     require(wait_seconds >= 0, "The index wait must be non-negative.")
     manifest, _ = checked_manifest(version, assets)
     expected = {entry["filename"]: entry for entry in manifest["artifacts"]}
     deadline = time.monotonic() + wait_seconds
-    indexes = {"PyPI": pypi_entries, "DevZone": devzone_entries}
+    indexes = (
+        {"TestPyPI": partial(pypi_entries, testpypi=True)}
+        if testpypi_output is not None
+        else {"PyPI": pypi_entries, "DevZone": devzone_entries}
+    )
 
     def request_timeout() -> float:
         return min(REQUEST_TIMEOUT, max(1.0, deadline - time.monotonic())) if wait_seconds else REQUEST_TIMEOUT
@@ -593,12 +606,27 @@ def verify_indexes(version: str, assets: Path, wait_seconds: int = 0) -> None:
             else:
                 listings[label] = entries
         if not pending:
+            downloads: dict[str, bytes] = {}
             try:
                 for label, entries in listings.items():
-                    verify_index_downloads(entries, expected, label, request_timeout())
+                    verify_index_downloads(
+                        entries,
+                        expected,
+                        label,
+                        request_timeout(),
+                        downloads=downloads if testpypi_output is not None else None,
+                    )
             except IndexPending as exc:
                 pending.append(str(exc))
             else:
+                if testpypi_output is not None:
+                    testpypi_output.mkdir()
+                    try:
+                        for name, data in downloads.items():
+                            (testpypi_output / name).write_bytes(data)
+                    except OSError:
+                        shutil.rmtree(testpypi_output)
+                        raise
                 return
 
         delay = deadline - time.monotonic()
@@ -631,6 +659,12 @@ def main() -> None:
     indexes.add_argument("--assets", type=Path, required=True)
     indexes.add_argument("--wait-seconds", type=int, default=0)
 
+    testpypi = commands.add_parser("verify-testpypi", help="Verify and save package artifacts served by TestPyPI.")
+    testpypi.add_argument("--version", required=True)
+    testpypi.add_argument("--assets", type=Path, required=True)
+    testpypi.add_argument("--wait-seconds", type=int, default=0)
+    testpypi.add_argument("--output", type=Path, required=True)
+
     args = parser.parse_args()
     try:
         if args.command == "assemble":
@@ -642,6 +676,9 @@ def main() -> None:
             expected = {asset["filename"]: asset for asset in manifest["artifacts"]}
             existing = inspect_public_indexes(args.version, expected)
             print(f"No public package conflicts for {args.version}. Matching existing files: {len(existing)}.")
+        elif args.command == "verify-testpypi":
+            verify_indexes(args.version, args.assets, args.wait_seconds, testpypi_output=args.output)
+            print(f"Verified SkillEvaluator {args.version} wheel and source distribution on TestPyPI.")
         else:
             verify_indexes(args.version, args.assets, args.wait_seconds)
             print(f"Verified SkillEvaluator {args.version} wheel and source distribution on PyPI and DevZone.")

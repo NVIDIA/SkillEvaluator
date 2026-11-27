@@ -45,6 +45,7 @@ def test_release_is_only_dispatched_manually_and_defaults_to_validation():
     assert any("inspect-indexes" in step.get("run", "") for step in jobs["prepare"]["steps"])
 
 
+@pytest.mark.parametrize("publish_testpypi", ["false", "true"])
 @pytest.mark.parametrize("promote_stable", ["false", "true"])
 @pytest.mark.parametrize(
     ("phase", "publishes"),
@@ -56,7 +57,7 @@ def test_release_is_only_dispatched_manually_and_defaults_to_validation():
         ("Publish release", True),
     ],
 )
-def test_preflight_validates_stable_promotion_phase(phase, publishes, promote_stable, tmp_path):
+def test_preflight_validates_stable_promotion_phase(phase, publishes, promote_stable, publish_testpypi, tmp_path):
     workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
     step = next(step for step in workflow["jobs"]["preflight"]["steps"] if step.get("id") == "reviewed")
     command = tmp_path / "python3"
@@ -71,6 +72,7 @@ def test_preflight_validates_stable_promotion_phase(phase, publishes, promote_st
             "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
             "PHASE": phase,
             "PROMOTE_STABLE": promote_stable,
+            "PUBLISH_TESTPYPI": publish_testpypi,
             "VERSION": VERSION,
             "SOURCE_SHA": SHA,
             "GITHUB_SHA": SHA,
@@ -81,7 +83,11 @@ def test_preflight_validates_stable_promotion_phase(phase, publishes, promote_st
         capture_output=True,
         text=True,
     )
-    if promote_stable == "true" and not publishes:
+    if publish_testpypi == "true" and phase != "Validate release":
+        assert result.returncode == 1
+        assert "TestPyPI requires the Validate release phase." in result.stderr
+        assert not args_file.exists() and not output.exists()
+    elif promote_stable == "true" and not publishes:
         assert result.returncode == 1
         assert "Stable promotion requires Full release, Validate and publish, or Publish release." in result.stderr
         assert not args_file.exists() and not output.exists()
@@ -90,6 +96,46 @@ def test_preflight_validates_stable_promotion_phase(phase, publishes, promote_st
         arguments = args_file.read_text(encoding="utf-8").splitlines()
         assert arguments[arguments.index("--phase") + 1] == phase
         assert output.read_text(encoding="utf-8") == f"version={VERSION}\nsource_sha={SHA}\n"
+
+
+def test_testpypi_upload_is_opt_in_and_uses_only_validated_distributions():
+    workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    testpypi = workflow["on"]["workflow_dispatch"]["inputs"]["publish_testpypi"]
+    assert testpypi["type"] == "boolean"
+    assert testpypi["default"] == "false"
+
+    jobs = workflow["jobs"]
+    publish = jobs["testpypi"]
+    assert publish["needs"] == ["release-source", "prepare"]
+    assert " ".join(publish["if"].split()) == (
+        "!cancelled() && needs.release-source.result == 'success' && needs.prepare.result == 'success' && "
+        "inputs.publish_testpypi && inputs.phase == 'Validate release'"
+    )
+    assert publish["environment"] == "pypi-test"
+    assert publish["permissions"] == {"id-token": "write"}
+    assert not any("checkout@" in step.get("uses", "") for step in publish["steps"])
+    download = next(step for step in publish["steps"] if "download-artifact@" in step.get("uses", ""))
+    assert download["with"]["name"] == (
+        "validated-release-${{ needs.release-source.outputs.version }}-${{ needs.prepare.outputs.run }}"
+    )
+    command = publish["steps"][-1]["run"]
+    assert "--trusted-publishing always" in command
+    assert "--publish-url https://test.pypi.org/legacy/" in command
+    assert "--check-url https://test.pypi.org/simple/" in command
+    assert '"$assets/skillevaluator-$VERSION-py3-none-any.whl"' in command
+    assert '"$assets/skillevaluator-$VERSION.tar.gz"' in command
+
+    verify = jobs["verify-testpypi"]
+    assert verify["needs"] == ["release-source", "prepare", "testpypi"]
+    assert " ".join(verify["if"].split()) == (
+        "!cancelled() && needs.release-source.result == 'success' && needs.prepare.result == 'success' && "
+        "needs.testpypi.result == 'success'"
+    )
+    assert verify["permissions"] == {"contents": "read"}
+    commands = "\n".join(step.get("run", "") for step in verify["steps"])
+    assert "ci/product_release.py verify-testpypi" in commands
+    assert "--default-index https://pypi.org/simple" in commands
+    assert 'ci/smoke_distribution.py "$VERSION"' in commands
 
 
 def test_validate_checks_release_metadata_with_the_current_workflow_from_the_reviewed_checkout():

@@ -27,8 +27,8 @@ this same policy `external`; that label does not publish your repository or repo
 
 ### Copy the ready-to-use template
 
-Open [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/skill-checks.yml)
-from the [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/1.2.0).
+Open [skill-checks.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/skill-checks.yml)
+from the [ready-to-use templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/1.2.1).
 Use GitHub's **Raw** view to copy it into `.github/workflows/skill-checks.yml`.
 The template already supplies pinned workflow and image versions.
 
@@ -50,7 +50,7 @@ Use your own skill folders. Keep `auto` to scan changed skills in PRs;
 `all` checks the configured collection. If your default branch is not `main`,
 update the template's push branch.
 
-The 1.2.0 template supports `enforcement-mode`. Omit it for strict merge
+The 1.2.1 template supports `enforcement-mode`. Omit it for strict merge
 gating, or choose advisory enforcement as described below.
 
 ### Commit the workflow and open a skill PR
@@ -63,9 +63,8 @@ reusable workflow and actions.
 
 <Note>
   The released template provides **checks and downloadable reports**.
-  The same release includes the [optional hosted publisher](#enable-hosted-reports).
-  [Comments without hosting](#enable-pr-comments) are available in the source
-  workflow for a future release bundle.
+  Add [PR comments](#enable-pr-comments) or [hosted reports and PR comments](#enable-hosted-reports)
+  with a second workflow. Both templates are included in the 1.2.1 bundle.
 </Note>
 
 <Accordion title="I prefer to inspect the source templates">
@@ -77,12 +76,12 @@ reusable workflow and actions.
 
 ## Follow the latest stable release
 
-For new Tier 1 setups, the opt-in stable channel updates the scan and optional
-HTML publisher together. Use `skillevaluator ci init --channel stable` with a CLI
-release that supports this option. The versioned templates above are available
-for repositories that review each evaluator upgrade separately.
+For new setups, the opt-in stable channel keeps skill checks and optional PR
+feedback on the same approved release. Use `skillevaluator ci init --channel stable`
+with a CLI release that supports this option. The versioned templates above
+are available for repositories that review each evaluator upgrade separately.
 
-Use `@stable` only with the two `-stable.yml` entry points below. Pin every
+Use `@stable` only with the `-stable.yml` entry points below. Pin every
 other reusable workflow to the full commit SHA supplied by the released
 template.
 
@@ -93,9 +92,11 @@ pinned setup, apply these edits to its current workflow files in one PR.
    `NVIDIA/SkillEvaluator/.github/workflows/skill-checks-stable.yml@stable`.
    Remove the job's `image` input and any explicit `artifact-name`. The channel
    supplies the image and uses `skill-evaluator-tier1`. Keep your paths, scan
-   policy, and `contents: read` permission. Add `id-token: write` for hosted feedback.
-2. For hosted feedback, follow the [Pages setup](#enable-hosted-reports). In
-   `publish-skill-reports.yml`, set the publisher job's `uses` to
+   policy, and `contents: read` permission. Add `id-token: write` for PR feedback.
+2. For PR feedback, choose one workflow. For comments without Pages, follow
+   [Set up stable PR comments](#set-up-stable-pr-comments).
+   For hosted feedback, follow the [Pages setup](#enable-hosted-reports).
+   In `publish-skill-reports.yml`, set the publisher job's `uses` to
    `NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports-stable.yml@stable`.
    Keep the publisher template's `permissions` block.
    Remove its `trusted-evaluator-shas`, `tools-ref` and `tools-repository` inputs,
@@ -105,6 +106,45 @@ Use the maintained tag after its first promotion. A new run picks up later
 stable releases without a caller edit. Published reports verify the scan's
 historically resolved workflow and signed receipt. The first switch adds a
 reusable job level, so check any required status-check names on a new PR.
+
+## Set up stable PR comments
+
+<Note>
+  Use this setup after the [comment workflow appears on the stable tag](https://github.com/NVIDIA/SkillEvaluator/tree/stable/.github/workflows).
+  Until then, the [versioned setup](#enable-pr-comments) supports comments
+  without hosting.
+</Note>
+
+<Steps>
+
+### Enable signed scan results
+
+Set up the [stable scan](#follow-the-latest-stable-release). Keep
+`id-token: write` on the scan job. If you're switching from hosted reports,
+remove `report-base-url` from the scan job's `with` inputs to clear the old
+Pages link from the scan summary.
+
+### Add the comment workflow
+
+Copy the [stable comment template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/manual/comment-skill-checks-stable.yml)
+to `.github/workflows/comment-skill-checks.yml`. If you're switching from
+hosted reports, remove `.github/workflows/publish-skill-reports.yml` in the
+same setup PR. Set `workflow_run.workflows` to your scan workflow's name if
+you changed it from **Skill checks**.
+
+### Approve the scan file
+
+Run `git hash-object .github/workflows/skill-checks.yml` and paste the result
+into `trusted-caller-blobs` in the comment file. Refresh this value when you
+edit the scan file. Both workflows follow future stable releases automatically.
+
+### Verify the comment
+
+Merge the setup PR, then open a skill-change PR from a branch in the same
+repository. Look for the scored comment in **Conversation**, and download the
+HTML report from the scan run in **Actions**.
+
+</Steps>
 
 ## See what happened
 
@@ -127,7 +167,7 @@ error, 10 warning, and 10 notice annotations per step; see
 
 <AccordionGroup>
   <Accordion title="Use advisory enforcement">
-    The 1.2.0 bundle pins a matching workflow and scanner image with
+    The 1.2.1 bundle pins a matching workflow and scanner image with
     `enforcement-mode` support. For an existing 0.8.0 workflow, review both
     pins together before adding this input; the older workflow does not
     accept it.
@@ -208,17 +248,19 @@ quality score and grade, and the first action for each affected skill. Full
 reports remain downloadable from the scan run. Pages settings, a history branch
 and a report URL are not required.
 
+If your checks follow `@stable`, use the [stable comment setup](#set-up-stable-pr-comments).
+For versioned checks, follow the pinned setup below.
+
 <Note>
-  The 1.2.0 bundle includes the comments-only workflow; the archived 0.9.0
+  The 1.2.1 bundle includes the comments-only workflow; the archived 0.9.0
   bundle does not. Default `skillevaluator ci init` feedback still configures
-  the hosted publisher. For comments without hosting, use the versioned
-  template below and approve the exact scan caller after your edits.
+  the hosted publisher.
 </Note>
 
 1. Keep the **Skill checks** scan as one reusable job in
    `.github/workflows/skill-checks.yml`, with its reviewed evaluator and image
    pins. Enable `id-token: write` for signed execution receipts.
-2. Add the [comment workflow template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/comment-skill-checks.yml)
+2. Add the [comment workflow template](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/comment-skill-checks.yml)
    as `.github/workflows/comment-skill-checks.yml`. Pin its workflow and tools to
    the reviewed comment revision, approve the scanner revision, and set
    `trusted-caller-blobs` to the output of
@@ -246,7 +288,7 @@ succeeds**. It needs a second workflow plus one-time hosting and approval settin
   get both workflows.
 </Card>
 
-Copy [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/publish-skill-reports.yml)
+Copy [publish-skill-reports.yml](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.1/publish-skill-reports.yml)
 from the same template folder as your scan workflow. Complete the one-time setup below,
 or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
 

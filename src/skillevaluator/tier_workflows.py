@@ -162,11 +162,12 @@ def run_tier2_workflow(
             EmbeddingRegistry(EmbeddingClient(), full_body=full_body).load_catalog(catalog)
         except (OSError, ValueError) as exc:
             raise click.ClickException(sanitize_path_text(str(exc), (skill_path, catalog))) from exc
-    results = tier2.run_context_optimization_check(skill_path, threshold=threshold)
+    results = tier2.run_context_optimization_check(skill_path, content_type="skill", threshold=threshold)
     stages = {"intra_skill": _stage(results)}
     if catalog is not None:
         inter_results = tier2.run_similarity_check(
             skill_path,
+            content_type="skill",
             catalog=catalog,
             threshold=similarity_threshold,
             full_body=full_body,

@@ -320,6 +320,9 @@ SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS = 128_000_000
 # Reasoning effort for the dedup verdict model (GPT-6 and Claude 5.5 or later only):
 # a DUPLICATE verdict creates a blocking finding, so precision outweighs latency.
 CONTENT_DEDUP_LLM_REASONING_EFFORT = "medium"
+# Output ceiling for a dedup verdict reply. GPT-5 and GPT-6 reasoning models are
+# raised to REASONING_MAX_COMPLETION_TOKENS by completion_token_limit.
+CONTENT_DEDUP_LLM_MAX_TOKENS = MAX_COMPLETION_TOKENS
 
 CONTENT_DEDUP_SCANNABLE_EXTENSIONS = frozenset({".md", ".mdc", ".py", ".sh"})
 CONTENT_DEDUP_BINARY_EXTENSIONS = frozenset(

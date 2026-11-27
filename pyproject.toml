@@ -7,7 +7,7 @@ requires = ["setuptools >= 77", "wheel"]
 
 [project]
 name = "skillevaluator"
-version = "1.2.0"
+version = "1.2.1"
 description = "Multi-tier framework for evaluating AI agent skills and plugins with quality gates, security scanning, harness compatibility checks, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation that measures how skills affect agent behavior. Includes reusable GitHub Actions and GitLab CI templates, with all-tier evaluation available as an opt-in."
 authors = [{ name = "NVIDIA Corporation" }]
 readme = "README.md"

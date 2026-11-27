@@ -70,6 +70,7 @@ class RulesSchemaValidator(ValidatorBase):
             rule_name = mdc_file.stem  # filename without extension
 
             if rule_result.passed:
+                result.merge_advisories_with_prefix(rule_result, rule_name)
                 result.add_success(
                     check_name=rule_name,
                     message="passed",
@@ -136,6 +137,7 @@ class RulesSchemaValidator(ValidatorBase):
             rule_name = mdc_file.stem
 
             if rule_result.passed:
+                result.merge_advisories_with_prefix(rule_result, rule_name)
                 result.add_success(
                     check_name=rule_name,
                     message="passed",

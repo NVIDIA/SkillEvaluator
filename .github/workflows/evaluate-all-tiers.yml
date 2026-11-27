@@ -7,6 +7,10 @@ on:
         description: Immutable legacy Tier 1 GHCR image
         type: string
         required: true
+      tier2-image:
+        description: Optional immutable Tier 2 GHCR digest built from tools-ref
+        type: string
+        default: ''
       tools-repository:
         type: string
         default: NVIDIA/SkillEvaluator
@@ -145,6 +149,7 @@ jobs:
       allowed: ${{ steps.check.outputs.allowed }}
       scan-mode: ${{ steps.check.outputs.scan-mode }}
       skills-changed: ${{ steps.check.outputs.skills-changed }}
+      paid-tiers: ${{ steps.check.outputs.paid-tiers }}
     steps:
       - name: Check immutable configuration and current same-repository PR head
         id: check
@@ -225,6 +230,7 @@ jobs:
               output.write('allowed=' + str(allowed).lower() + '\n')
               output.write('scan-mode=' + scan_mode + '\n')
               output.write('skills-changed=' + str(skills_changed).lower() + '\n')
+              output.write('paid-tiers=' + json.dumps([tier for tier in (2, 3) if str(tier) in tiers]) + '\n')
           print('Provider jobs eligible' if allowed else 'Provider jobs withheld; Tier 1 remains available')
           if allowed and not skills_changed:
               print('No changed skill: the LLM Tier 1, Tier 2 and Tier 3 jobs are skipped; the keyless Tier 1 scan is the gate')
@@ -232,7 +238,10 @@ jobs:
   paid-tiers:
     needs: eligibility
     # A PR that changes no skill skips the paid tiers; the aggregate records them as skipped.
-    if: ${{ needs.eligibility.outputs.allowed == 'true' && needs.eligibility.outputs.skills-changed == 'true' }}
+    if: >-
+      needs.eligibility.outputs.allowed == 'true' &&
+      needs.eligibility.outputs.skills-changed == 'true' &&
+      needs.eligibility.outputs.paid-tiers != '[]'
     runs-on: ${{ inputs.runner }}
     environment:
       name: ${{ inputs.environment }}
@@ -245,7 +254,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tier: [2, 3]
+        tier: ${{ fromJSON(needs.eligibility.outputs.paid-tiers) }}
     env:
       SKILLEVALUATOR_TOOLS_REF: ${{ inputs.tools-ref }}
       SKILL_EVAL_PATHS: ${{ inputs.paths }}
@@ -288,13 +297,14 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
           fetch-depth: 0
-          filter: blob:none
+          # Give the read-only Tier 2 image a complete checkout without credentials.
+          filter: ${{ (matrix.tier != 2 || inputs.tier2-image == '') && 'blob:none' || '' }}
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
       - name: Install only the selected tier's runtime from pinned tools
-        if: ${{ contains(format(',{0},', inputs.tiers), format(',{0},', matrix.tier)) }}
+        if: ${{ contains(format(',{0},', inputs.tiers), format(',{0},', matrix.tier)) && (matrix.tier != 2 || inputs.tier2-image == '') }}
         env:
           TIER: ${{ matrix.tier }}
         run: |
@@ -351,8 +361,10 @@ jobs:
         run: python -I evaluator/ci/bootstrap_tiers.py
       - name: Evaluate selected tier and retain native evidence
         if: ${{ !cancelled() && steps.current-head.outputs.allowed == 'true' && contains(format(',{0},', inputs.tiers), format(',{0},', matrix.tier)) }}
+        shell: bash
         env:
           TIER: ${{ matrix.tier }}
+          TIER2_IMAGE: ${{ matrix.tier == 2 && inputs.tier2-image || '' }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
@@ -362,7 +374,12 @@ jobs:
           # The job budget also covers setup; stop evaluation first so timeout evidence is retained.
           reserve=$(( SKILL_EVAL_TIMEOUT_MINUTES / 4 < 20 ? SKILL_EVAL_TIMEOUT_MINUTES / 4 : 20 ))
           export SKILL_EVAL_TIMEOUT_SECONDS="$(( (SKILL_EVAL_TIMEOUT_MINUTES - reserve) * 60 ))"
-          python -I evaluator/ci/run_tiers.py evaluate --tier "$TIER" --workspace "$GITHUB_WORKSPACE/candidate" --reports "$RUNNER_TEMP/skill-reports"
+          if [ -n "$TIER2_IMAGE" ]; then
+            launcher=(evaluator/ci/run_tier2_image.py --image "$TIER2_IMAGE")
+          else
+            launcher=(evaluator/ci/run_tiers.py evaluate --tier "$TIER")
+          fi
+          python -I "${launcher[@]}" --workspace "$GITHUB_WORKSPACE/candidate" --reports "$RUNNER_TEMP/skill-reports"
       - name: Retain native reports after failure
         if: ${{ always() && contains(format(',{0},', inputs.tiers), format(',{0},', matrix.tier)) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

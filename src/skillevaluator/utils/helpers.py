@@ -8,6 +8,7 @@ import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_FILE, SKILL_MANIFEST_VARIANTS
 from skillevaluator.utils.path_security import matches_filesystem_name
@@ -213,13 +214,15 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
 
         # Compute the relative path within the repo
         try:
-            rel_path = str(resolved.relative_to(repo_root))
+            rel_path = resolved.relative_to(repo_root).as_posix()
         except ValueError:
             rel_path = ""
 
         if rel_path and rel_path != ".":
             tree_segment = "/tree/" if https_url.startswith("https://github.com/") else "/-/tree/"
-            return f"{https_url}{tree_segment}{branch}/{rel_path}"
+            encoded_branch = quote(branch, safe="/", errors="surrogateescape")
+            encoded_path = quote(rel_path, safe="/", errors="surrogateescape")
+            return f"{https_url}{tree_segment}{encoded_branch}/{encoded_path}"
         return https_url
 
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):

@@ -25,7 +25,11 @@ from skillevaluator.inference import (
     LLMVerdict,
 )
 from skillevaluator.inference import client as client_mod
-from skillevaluator.inference.client import _is_native_openai_endpoint, _token_limit_kwargs
+from skillevaluator.inference.client import (
+    _is_azure_openai_endpoint,
+    _is_native_openai_endpoint,
+    _token_limit_kwargs,
+)
 from skillevaluator.inference.json_span import MAX_JSON_NESTING
 from skillevaluator.provider_config import (
     ANTHROPIC_REFUSAL_FALLBACK_MODEL,
@@ -364,6 +368,109 @@ class TestNativeOpenAIEndpoint:
         assert _token_limit_kwargs(config, 512) == {"max_tokens": REASONING_MAX_COMPLETION_TOKENS}
 
 
+class TestAzureOpenAIEndpoint:
+    """Azure OpenAI deployments of GPT-5/6-class reasoning models reject ``max_tokens``
+    the same way native OpenAI does -- https://github.com/NVIDIA/SkillEvaluator/issues/NNNN."""
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://my-resource.openai.azure.com/openai/v1",
+            "https://my-resource.openai.azure.com/openai/v1/",
+            "https://my-resource.cognitiveservices.azure.com/openai/v1",
+            "https://my-resource.cognitiveservices.azure.com/openai/v1/",
+            "HTTPS://MY-RESOURCE.OPENAI.AZURE.COM/openai/v1",
+        ],
+    )
+    def test_accepts_openai_compatible_azure_url_forms(self, base_url: str) -> None:
+        config = _gpt5_config(provider="openai-compatible", base_url=base_url)
+
+        assert _is_azure_openai_endpoint(config) is True
+        assert _token_limit_kwargs(config, 512) == {"max_completion_tokens": REASONING_MAX_COMPLETION_TOKENS}
+
+    @pytest.mark.parametrize("provider", ["openai", "nv_build", "anthropic", "bedrock", " openai-compatible"])
+    def test_requires_openai_compatible_provider_intent(self, provider: str) -> None:
+        config = _gpt5_config(
+            provider=provider,
+            base_url="https://my-resource.openai.azure.com/openai/v1",
+        )
+
+        assert _is_azure_openai_endpoint(config) is False
+        assert _token_limit_kwargs(config, 512) == {"max_tokens": REASONING_MAX_COMPLETION_TOKENS}
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            pytest.param("https://my-resource.openai.azure.com/openai/v1?route=proxy", id="query"),
+            pytest.param("https://my-resource.openai.azure.com/openai/v1#fragment", id="fragment"),
+            pytest.param("https://my-resource.openai.azure.com/openai/v1;transport=proxy", id="params"),
+            pytest.param("https://my-resource.openai.azure.com/openai/v1/chat/completions", id="other-path"),
+            pytest.param("https://my-resource.openai.azure.com.evil.test/openai/v1", id="suffix-host"),
+            pytest.param("https://user:pass@my-resource.openai.azure.com/openai/v1", id="userinfo"),
+            pytest.param("http://my-resource.openai.azure.com/openai/v1", id="http"),
+            pytest.param("https://my-resource.openai.azure.com:444/openai/v1", id="other-port"),
+            pytest.param("https://evil.test/openai/v1", id="non-azure-host"),
+            pytest.param("https://api.openai.com/v1", id="native-openai-not-azure"),
+        ],
+    )
+    def test_noncanonical_raw_url_is_not_classified_as_azure_openai(self, base_url: str) -> None:
+        config = _gpt5_config(provider="openai-compatible", base_url=base_url)
+
+        assert _is_azure_openai_endpoint(config) is False
+        assert _token_limit_kwargs(config, 512) == {"max_tokens": REASONING_MAX_COMPLETION_TOKENS}
+
+    def test_non_reasoning_model_on_azure_stays_on_max_tokens(self) -> None:
+        config = _gpt5_config(
+            provider="openai-compatible",
+            base_url="https://my-resource.openai.azure.com/openai/v1",
+            model="gpt-4o-mini",
+        )
+
+        assert _token_limit_kwargs(config, 512) == {"max_tokens": 512}
+
+    def test_arbitrary_deployment_name_stays_on_max_tokens_without_a_declared_reasoning_model(self) -> None:
+        """An Azure deployment named e.g. "judge-prod" doesn't match the gpt-5/gpt-6
+        name heuristic, so without SKILL_EVAL_LLM_REASONING_MODEL it's indistinguishable
+        from a non-reasoning deployment."""
+        config = ProviderConfig(
+            provider="openai-compatible",
+            model="judge-prod",
+            api_key="test-key",
+            base_url="https://my-resource.openai.azure.com/openai/v1",
+            litellm_model="openai/judge-prod",
+        )
+
+        assert _token_limit_kwargs(config, 512) == {"max_tokens": 512}
+
+    def test_declared_reasoning_model_overrides_an_arbitrary_deployment_name(self) -> None:
+        config = ProviderConfig(
+            provider="openai-compatible",
+            model="judge-prod",
+            api_key="test-key",
+            base_url="https://my-resource.openai.azure.com/openai/v1",
+            litellm_model="openai/judge-prod",
+            reasoning_model="gpt-5-mini",
+        )
+
+        kwargs = _token_limit_kwargs(config, 512)
+
+        assert kwargs == {"max_completion_tokens": REASONING_MAX_COMPLETION_TOKENS}
+
+    def test_declared_reasoning_model_keeps_the_deployment_name_out_of_the_token_check(self) -> None:
+        """The deployment name itself is never inspected once an override is declared --
+        only REASONING_MODEL_ENV decides, even for a deployment named like a non-reasoning model."""
+        config = ProviderConfig(
+            provider="openai-compatible",
+            model="gpt-4o-mini",
+            api_key="test-key",
+            base_url="https://my-resource.openai.azure.com/openai/v1",
+            litellm_model="openai/gpt-4o-mini",
+            reasoning_model="gpt-5-mini",
+        )
+
+        assert _token_limit_kwargs(config, 512) == {"max_completion_tokens": REASONING_MAX_COMPLETION_TOKENS}
+
+
 class TestCompletions:
     def test_returns_message_content(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
@@ -439,6 +546,51 @@ class TestCompletions:
         assert "max_tokens" not in call_kwargs
         assert call_kwargs["max_completion_tokens"] == REASONING_MAX_COMPLETION_TOKENS
         assert "temperature" not in call_kwargs
+
+    def test_azure_arbitrarily_named_deployment_uses_declared_reasoning_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An Azure deployment named "judge-prod" gets reasoning-model request shaping once
+        SKILL_EVAL_LLM_REASONING_MODEL names its underlying model -- the deployment name
+        itself still goes out on the wire unchanged."""
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
+        monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "test-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://my-resource.openai.azure.com/openai/v1")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "judge-prod")
+        monkeypatch.setenv("SKILL_EVAL_LLM_REASONING_MODEL", "gpt-5-mini")
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="Done"))]
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            LLMClient(max_tokens=512).completions("system", "user")
+
+        mock_openai.chat.completions.create.assert_called_once()
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        assert call_kwargs["model"] == "judge-prod"
+        assert "max_tokens" not in call_kwargs
+        assert call_kwargs["max_completion_tokens"] == REASONING_MAX_COMPLETION_TOKENS
+        assert "temperature" not in call_kwargs
+
+    def test_azure_arbitrarily_named_deployment_without_override_uses_max_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without SKILL_EVAL_LLM_REASONING_MODEL, "judge-prod" doesn't match the gpt-5/gpt-6
+        name heuristic and is treated as a non-reasoning deployment."""
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
+        monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "test-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://my-resource.openai.azure.com/openai/v1")
+        monkeypatch.setenv("SKILL_EVAL_LLM_MODEL", "judge-prod")
+        monkeypatch.delenv("SKILL_EVAL_LLM_REASONING_MODEL", raising=False)
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="Done"))]
+
+        with patch("openai.OpenAI", return_value=mock_openai):
+            LLMClient(max_tokens=512).completions("system", "user")
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        assert call_kwargs["model"] == "judge-prod"
+        assert call_kwargs["max_tokens"] == 512
+        assert "max_completion_tokens" not in call_kwargs
 
     def test_nvidia_build_uses_max_tokens(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")

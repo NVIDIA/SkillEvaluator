@@ -1277,6 +1277,13 @@ def _is_openai_reasoning_model(model):
     return _model_leaf(model).startswith(("gpt-5", "gpt-6"))
 
 
+def _capability_model(provider, model):
+    """Return the model name reasoning-capability checks should key off."""
+    if str(provider or "").strip().casefold() != "openai-compatible":
+        return model
+    return os.environ.get("SKILL_EVAL_LLM_REASONING_MODEL", "").strip() or model
+
+
 def _is_claude_5_5_or_later(model):
     version = _claude_version(model)
     return version is not None and version >= (5, 5)
@@ -1321,6 +1328,40 @@ def _is_native_openai_chat_url(provider, request_url):
         and parsed.netloc.casefold() in {"api.openai.com", "api.openai.com:443"}
         and port in {None, 443}
         and parsed.path in {"/v1/chat/completions", "/v1/chat/completions/"}
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and ";" not in raw_url
+        and "?" not in raw_url
+        and "#" not in raw_url
+    )
+
+
+# Azure OpenAI's reasoning deployments enforce the same max_completion_tokens requirement as native OpenAI.
+_AZURE_OPENAI_HOST_SUFFIXES = (".openai.azure.com", ".cognitiveservices.azure.com")
+
+
+def _is_azure_openai_chat_url(provider, request_url):
+    if str(provider or "").strip().casefold() != "openai-compatible":
+        return False
+
+    raw_url = str(request_url or "")
+    if raw_url != raw_url.strip() or any(ord(character) < 0x20 or ord(character) == 0x7F for character in raw_url):
+        return False
+    try:
+        parsed = urlparse(raw_url)
+        port = parsed.port
+    except ValueError:
+        return False
+
+    return (
+        parsed.scheme.casefold() == "https"
+        and parsed.hostname is not None
+        and parsed.hostname.casefold().endswith(_AZURE_OPENAI_HOST_SUFFIXES)
+        and port in {None, 443}
+        and parsed.path in {"/openai/v1/chat/completions", "/openai/v1/chat/completions/"}
         and parsed.username is None
         and parsed.password is None
         and not parsed.params
@@ -1443,20 +1484,25 @@ def _chat_completion_payload(
 ):
     resolved_provider = _public_provider() if provider is None else provider
     resolved_request_url = _resolve_url(resolved_provider) if request_url is None else request_url
+    capability = _capability_model(resolved_provider, model)
     token_key = (
         "max_completion_tokens"
-        if _is_openai_reasoning_model(model) and _is_native_openai_chat_url(resolved_provider, resolved_request_url)
+        if _is_openai_reasoning_model(capability)
+        and (
+            _is_native_openai_chat_url(resolved_provider, resolved_request_url)
+            or _is_azure_openai_chat_url(resolved_provider, resolved_request_url)
+        )
         else "max_tokens"
     )
     payload = {
         "model": model,
-        token_key: _completion_token_limit(model, max_tokens),
+        token_key: _completion_token_limit(capability, max_tokens),
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
     }
-    if temperature is not None and _supports_custom_temperature(model):
+    if temperature is not None and _supports_custom_temperature(capability):
         payload["temperature"] = temperature
-    if effort := _effective_reasoning_effort(resolved_provider, model, JUDGE_REASONING_EFFORT):
+    if effort := _effective_reasoning_effort(resolved_provider, capability, JUDGE_REASONING_EFFORT):
         payload["reasoning_effort"] = effort
     if response_schema is not None:
         payload["response_format"] = _build_openai_response_format(response_schema, schema_name)

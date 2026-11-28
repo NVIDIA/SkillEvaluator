@@ -36,6 +36,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The Bedrock provider sends no `temperature` when the model is an application
+  inference profile ARN, which names no model. Claude Opus 5.5 behind such a
+  profile rejected every request with HTTP 400.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,

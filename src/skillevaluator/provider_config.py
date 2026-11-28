@@ -103,6 +103,8 @@ _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _HEX_DIGIT_BYTES = frozenset(b"0123456789abcdefABCDEF")
 _UNRESERVED_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _NO_CUSTOM_TEMPERATURE_MODEL_IDS = frozenset({"claude-mythos-preview"})
+# A Bedrock application inference profile ARN names an opaque profile ID, not its model.
+_BEDROCK_APPLICATION_PROFILE_RE = re.compile(r"(?:^|[:/])application-inference-profile/")
 # Bedrock inference-profile geographies: two letters (``us``, ``eu``), a two-letter
 # ``-gov`` partition (``us-gov``), ``apac`` and ``global``.
 _BEDROCK_VENDOR_PREFIX_RE = re.compile(r"^(?:(?:[a-z]{2}(?:-gov)?|apac|global)\.)?(?:anthropic|openai)\.")
@@ -180,8 +182,15 @@ def is_claude_5_5_or_later(model: str) -> bool:
 
 
 def _supports_custom_temperature(model: str) -> bool:
-    """Return whether ``model`` accepts a non-default temperature value."""
+    """Return whether ``model`` accepts a non-default temperature value.
+
+    A Bedrock application inference profile hides its model, which may be one that
+    rejects ``temperature`` (Claude 4.7 and later), so it gets none. Every model
+    accepts a request without one.
+    """
     if is_openai_reasoning_model(model) or _model_leaf(model) in _NO_CUSTOM_TEMPERATURE_MODEL_IDS:
+        return False
+    if _BEDROCK_APPLICATION_PROFILE_RE.search(str(model or "").strip().casefold()):
         return False
     version = _claude_version(model)
     return version is None or version < (4, 7)

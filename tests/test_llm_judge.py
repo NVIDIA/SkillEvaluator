@@ -84,6 +84,8 @@ def test_older_models_accept_custom_temperature() -> None:
         "claude-mythos-5",
         "claude-mythos-preview",
         "anthropic/claude-mythos-preview",
+        # An application inference profile can route to any of these (#919).
+        "arn:aws:bedrock:eu-west-1:123456789012:application-inference-profile/a1b2c3d4e5f6",
     ],
 )
 def test_newer_claude_models_reject_custom_temperature(model: str) -> None:
@@ -1245,3 +1247,12 @@ def test_schema_rejection_grammar_accepts_direct_option_errors(message: str) -> 
     eval_template = load_harbor_eval_template("harbor_template_eval_rejection_grammar")
     assert client_mod._message_rejects_schema_option(message)
     assert eval_template._message_rejects_schema_option(message)
+
+
+def test_application_inference_profile_request_sends_no_temperature() -> None:
+    """#919: Bedrock rejects temperature for Claude Opus 5.5 behind an application inference profile."""
+    from skillevaluator.inference.client import _temperature_kwargs
+
+    arn = "arn:aws:bedrock:eu-west-1:123456789012:application-inference-profile/a1b2c3d4e5f6"
+    assert _temperature_kwargs(arn, 0.0) == {}
+    assert _temperature_kwargs("claude-3-5-sonnet-20241022", 0.0) == {"temperature": 0.0}

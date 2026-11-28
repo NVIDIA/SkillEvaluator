@@ -223,14 +223,13 @@ def _normalize_artifact_uri(
 
 def _physical_location(
     finding: Finding,
-    workspace_root: Path | None,
-    scan_root: Path | None = None,
+    artifact_uri: str | None,
 ) -> dict[str, Any] | None:
-    if not finding.file_path:
+    if artifact_uri is None:
         return None
     location: dict[str, Any] = {
         "artifactLocation": {
-            "uri": _normalize_artifact_uri(finding.file_path, workspace_root, scan_root),
+            "uri": artifact_uri,
         },
     }
     start_line = _positive_start_line(finding.line_number)
@@ -245,8 +244,7 @@ def _physical_location(
 def _result_from_finding(
     finding: Finding,
     validator_name: str,
-    workspace_root: Path | None,
-    scan_root: Path | None = None,
+    artifact_uri: str | None,
 ) -> dict[str, Any]:
     severity = _finding_severity_value(finding)
     result: dict[str, Any] = {
@@ -256,7 +254,7 @@ def _result_from_finding(
     }
     if finding.suggestion:
         result["message"]["markdown"] = f"{finding.message}\n\n**Suggestion:** {finding.suggestion}"
-    location = _physical_location(finding, workspace_root, scan_root)
+    location = _physical_location(finding, artifact_uri)
     if location is not None:
         result["locations"] = [location]
     properties: dict[str, Any] = {
@@ -377,13 +375,21 @@ class SARIFReporter(ReporterBase):
         sarif_results: list[dict[str, Any]] = []
         workspace_root = self.workspace_root
         scan_root = self.scan_root
+        artifact_uris: dict[str, str] = {}
 
         for result in results:
             validator_name = result.validator_name or "UNKNOWN"
             for finding in result.findings:
                 rule = _rule_descriptor(finding, validator_name)
                 rules[rule["id"]] = rule
-                sarif_results.append(_result_from_finding(finding, validator_name, workspace_root, scan_root))
+                artifact_uri = None
+                if finding.file_path:
+                    if finding.file_path not in artifact_uris:
+                        artifact_uris[finding.file_path] = _normalize_artifact_uri(
+                            finding.file_path, workspace_root, scan_root
+                        )
+                    artifact_uri = artifact_uris[finding.file_path]
+                sarif_results.append(_result_from_finding(finding, validator_name, artifact_uri))
 
         run: dict[str, Any] = {
             "tool": {

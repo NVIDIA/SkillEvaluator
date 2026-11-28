@@ -22,6 +22,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- SARIF reports resolve each finding's artifact path once per report, avoiding
+  repeated filesystem access when multiple validators report on the same file.
 - Tier 1 accepts automatically discovered stable SkillSpector releases
   starting at 2.13.7. Managed installs and the Tier 1 CI image pin 2.13.7.
 - Tier 1 plugin reports label the validator `Plugin Schema & Component Checks` and

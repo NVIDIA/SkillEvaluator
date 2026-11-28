@@ -1285,6 +1285,9 @@ def _is_claude_5_5_or_later(model):
 def _supports_custom_temperature(model):
     if _is_openai_reasoning_model(model) or _model_leaf(model) == "claude-mythos-preview":
         return False
+    # A Bedrock application inference profile ARN hides its model, which may reject temperature.
+    if re.search(r"(?:^|[:/])application-inference-profile/", str(model or "").strip().casefold()):
+        return False
     version = _claude_version(model)
     return version is None or version < (4, 7)
 

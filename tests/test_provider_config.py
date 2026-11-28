@@ -136,6 +136,16 @@ def test_skillspector_reasoning_effort_is_set_only_for_gpt_6_models(model: str, 
         # Gateway catalogs prefix vendor words; the old leaf check sent these a temperature.
         ("aws/anthropic/bedrock-claude-opus-5", False, False, False),
         ("aws/anthropic/bedrock-claude-opus-5-5", False, True, False),
+        # An application inference profile ARN hides its model: no custom temperature (#919).
+        ("arn:aws:bedrock:eu-west-1:123456789012:application-inference-profile/a1b2c3d4e5f6", False, False, False),
+        (
+            "bedrock/arn:aws:bedrock:eu-west-1:123456789012:application-inference-profile/a1b2c3d4e5f6",
+            False,
+            False,
+            False,
+        ),
+        # A system inference profile or foundation model ARN still names the model.
+        ("arn:aws:bedrock:eu-west-1:123456789012:inference-profile/eu.anthropic.claude-opus-5-5", False, True, False),
         ("claude-3-5-sonnet-20241022", False, False, True),
         ("nvidia/nemotron-3.5-lightning-30b-a3b", False, False, True),
     ],

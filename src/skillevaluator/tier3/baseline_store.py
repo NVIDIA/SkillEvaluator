@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import re
+import stat
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -109,8 +110,8 @@ def identity_dataset_digest(task_dirs: Sequence[Path]) -> str:
 
 
 def baseline_task_tree_digest(task_dirs_by_agent: dict[str, Sequence[Path]]) -> str:
-    """Hash the staged without-skill task trees, normalizing arm-specific task names."""
-    digest = hashlib.sha256()
+    """Hash staged file kinds, permissions and contents, normalizing arm-specific task names."""
+    digest = hashlib.sha256(b"skillevaluator-baseline-task-tree-v2\0")
     for agent, task_dirs in sorted(task_dirs_by_agent.items()):
         for task_dir in sorted(task_dirs, key=lambda path: path.name):
             task_name = _ARM_TASK_DIR_SUFFIX.sub("", task_dir.name)
@@ -121,9 +122,10 @@ def baseline_task_tree_digest(task_dirs_by_agent: dict[str, Sequence[Path]]) -> 
                 relative = path.relative_to(task_dir).as_posix()
                 if relative == "environment/repo-context.json":
                     continue
-                if path.is_symlink():
+                metadata = path.lstat()
+                if stat.S_ISLNK(metadata.st_mode):
                     content = b"symlink\0" + path.readlink().as_posix().encode("utf-8")
-                elif path.is_file():
+                elif stat.S_ISREG(metadata.st_mode):
                     content = path.read_bytes()
                     if relative == "task.toml":
                         content = _ARM_TASK_NAME_SUFFIX.sub(r"\1\2", content.decode("utf-8"), count=1).encode("utf-8")
@@ -132,6 +134,8 @@ def baseline_task_tree_digest(task_dirs_by_agent: dict[str, Sequence[Path]]) -> 
                 file_header = relative.encode("utf-8")
                 digest.update(len(file_header).to_bytes(8, "big"))
                 digest.update(file_header)
+                digest.update(stat.S_IFMT(metadata.st_mode).to_bytes(4, "big"))
+                digest.update(stat.S_IMODE(metadata.st_mode).to_bytes(2, "big"))
                 digest.update(len(content).to_bytes(8, "big"))
                 digest.update(content)
     return "sha256:" + digest.hexdigest()

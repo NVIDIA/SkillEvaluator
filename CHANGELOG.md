@@ -36,6 +36,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Retained Tier 3 baselines are invalidated when a staged file's permissions or
+  kind changes, including a script losing its executable bit with unchanged
+  contents. The updated task-tree identity requires a fresh baseline for runs
+  that recorded the older digest format.
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Tier 2 deduplication verdict requests carry the documented output ceiling,
